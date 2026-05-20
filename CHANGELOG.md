@@ -7,7 +7,7 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.12] - 2026-05-20
 
 ### Added
 - **MCP / explore**: `codegraph_explore` source sections now carry line
@@ -71,6 +71,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "trace a request" query returned 8/9 test files; now it surfaces
   `Call.kt`, `OkHttpClient.kt`, `Request.kt`, `Response.kt`). Capital-led
   matching keeps production files like `latest.kt` / `manifest.kt` unflagged.
+
+[0.7.12]: https://github.com/colbymchenry/codegraph/releases/tag/v0.7.12
 
 ## [0.7.10] - 2026-05-19
 
