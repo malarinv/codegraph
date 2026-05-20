@@ -238,7 +238,7 @@ const projectPathProperty: PropertySchema = {
 export const tools: ToolDefinition[] = [
   {
     name: 'codegraph_search',
-    description: 'Quick symbol search by name. Returns locations only (no code). Use codegraph_context instead for comprehensive task context.',
+    description: 'Quick symbol search by name. Returns locations only (no code) — best for pinpoint "where is X defined / find the symbol named X" lookups. For understanding how something works or tracing a flow, lead with codegraph_explore instead of searching then reading.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -368,13 +368,13 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_explore',
-    description: 'Deep exploration tool — returns comprehensive context for a topic in a SINGLE call. Groups all relevant source code by file (contiguous sections, not snippets), includes a relationship map, and uses deeper graph traversal. Designed to replace multiple codegraph_node + file Read calls. Use this instead of codegraph_context when you need thorough understanding. IMPORTANT: Use specific symbol names, file names, or short code terms in your query — NOT natural language sentences. Before calling this, use codegraph_search to discover relevant symbol names, then include those names in your query. Bad: "how are agent prompts loaded and passed to the CLI". Good: "readAgentsFromDirectory createClaudeSession chat-manager agents.ts".',
+    description: 'PRIMARY TOOL for understanding questions — "how does X work", "trace X end to end", "explain the Y system", architecture/onboarding. Returns comprehensive context in a SINGLE call: relevant source grouped by file (contiguous, line-numbered sections, not snippets) + a relationship map + deep graph traversal. It REPLACES the grep+Read exploration loop: feed it the key symbol/file names and read its output — do NOT Read the files one by one. It works best when your query names the relevant symbols (e.g. "readAgentsFromDirectory createClaudeSession chat-manager agents.ts"); if the question is a plain sentence that names nothing concrete, do ONE quick codegraph_search or codegraph_context to surface the names, then call this with them. After exploring, use codegraph_node / Read only to fill specific gaps it did not cover. Prefer codegraph_search over this only for a pinpoint "where is X defined" lookup.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). Use codegraph_search first to find relevant names.',
+          description: 'What to explore. A short list of symbol/file/keyword terms works best (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"), but a plain-language phrase also works — the tool runs its own retrieval. No need to codegraph_search first.',
         },
         maxFiles: {
           type: 'number',

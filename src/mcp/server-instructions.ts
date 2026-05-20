@@ -24,27 +24,27 @@ editing code, not during.
 
 ## Tool selection by intent
 
-- **"What is the symbol named X?"** → \`codegraph_search\`
-- **"What's the deal with this task / feature / area?"** → \`codegraph_context\` (PRIMARY — composes search + node + callers + callees in one call)
+- **"How does X work? / trace X end to end / explain the Y system / architecture?"** → \`codegraph_explore\` (PRIMARY for understanding — seed it with the key symbol names, read its output, don't grep+Read your way there)
+- **"What is the symbol named X? / where is X defined?"** → \`codegraph_search\` (pinpoint lookups)
+- **"What's the deal with this task / feature / area?"** → \`codegraph_context\` (lighter composed view of search + node + callers + callees)
 - **"What calls this?"** → \`codegraph_callers\`
 - **"What does this call?"** → \`codegraph_callees\`
 - **"What would changing this break?"** → \`codegraph_impact\`
 - **"Show me this symbol's source / signature / docstring."** → \`codegraph_node\`
-- **"Survey an unfamiliar topic / pattern / module."** → \`codegraph_explore\` (heavier; deep dive)
 - **"What's in directory X?"** → \`codegraph_files\`
 - **"Is the index ready / what's its size?"** → \`codegraph_status\`
 
 ## Common chains
 
-- **Onboarding**: \`codegraph_context\` first. If still unclear, \`codegraph_explore\` for breadth, then \`codegraph_node\` on specific symbols.
+- **Understanding / onboarding**: feed \`codegraph_explore\` the key symbol/file names and read its output (line-numbered source from many files in one call). If the question names nothing concrete, do ONE quick \`codegraph_search\` / \`codegraph_context\` to surface the names, then explore with them. Fill remaining gaps with \`codegraph_node\` / Read — don't drop back to grep+Read for the whole topic.
 - **Refactor planning**: \`codegraph_search\` → \`codegraph_callers\` → \`codegraph_impact\`. The blast-radius answer comes from impact, not from walking callers manually.
 - **Debugging a regression**: \`codegraph_callers\` of the suspected symbol; widen with \`codegraph_impact\` if an unexpected call appears.
 
 ## Anti-patterns
 
+- **Don't search-then-Read your way through an understanding question** — feed the names you find into \`codegraph_explore\` instead of Reading the files one by one; it does that whole loop in one call and returns line numbers you can cite directly.
 - **Don't grep first** when looking up a symbol by name — \`codegraph_search\` is faster and returns kind + location + signature.
-- **Don't chain \`codegraph_search\` + \`codegraph_node\`** when you just want context — \`codegraph_context\` is one round-trip.
-- **Don't use \`codegraph_explore\` for narrow questions** — it's a multi-call deep dive, expensive in tokens. Save it for genuine "I'm new here" surveys.
+- **Don't reach for \`codegraph_explore\` on a pinpoint "where is X defined" lookup** — \`codegraph_search\` is one cheap call.
 - **Don't query the index immediately after editing a file** — the watcher needs ~500ms to debounce + sync. Wait for the next turn.
 
 ## Limitations

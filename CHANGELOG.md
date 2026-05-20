@@ -44,6 +44,17 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   VS Code ~12%. Agent-trust floor still holds — the Relationships section,
   scored cluster selection, and structured-source output are all retained.
   Thanks to [@essopsp](https://github.com/essopsp) for the repro.
+- **MCP / tool guidance**: the tool descriptions and installed instructions
+  now steer agents to treat `codegraph_explore` as the workhorse for
+  understanding/architecture/"how does X work" questions — seed it with the
+  key symbol names (a quick `codegraph_search`/`codegraph_context` first if
+  the question names nothing concrete) and read its output, rather than
+  searching and then Reading each file. Diagnosed from a benchmark run where
+  Claude Code's Explore agent used `codegraph_search` + Read + grep (37 tool
+  calls, ~90k tokens) and never called `codegraph_explore`, vs a
+  general-purpose agent that led with explore (13 calls, ~55k tokens) for the
+  same VS Code question. Updated in lockstep across `server-instructions.ts`,
+  `instructions-template.ts`, and `.cursor/rules/codegraph.mdc`.
 
 ### Fixed
 - **MCP**: source-omission markers in `codegraph_explore` and
@@ -51,6 +62,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `... (trimmed) ...`, `... (truncated) ...`) instead of C-style `//`
   comments, which were misleading inside Python, Ruby, and other non-C
   fenced source blocks.
+- **Search/explore ranking**: test-file detection now recognizes Kotlin
+  (`*Test.kt`, `jvmTest/`/`commonTest/`/`androidTest/` source sets), Swift
+  (`*Tests.swift`), and other camelCase test conventions, so test code is
+  properly deprioritized in `codegraph_explore` / `codegraph_context`
+  results. Previously only Java/JS/Python conventions were known, which let
+  test files dominate exploration of Kotlin/Swift codebases (e.g. an OkHttp
+  "trace a request" query returned 8/9 test files; now it surfaces
+  `Call.kt`, `OkHttpClient.kt`, `Request.kt`, `Response.kt`). Capital-led
+  matching keeps production files like `latest.kt` / `manifest.kt` unflagged.
 
 ## [0.7.10] - 2026-05-19
 
