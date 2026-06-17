@@ -40,6 +40,41 @@ export function isOffloadEnabled(): boolean {
   return resolveOffload().enabled;
 }
 
+export interface OffloadUsage {
+  plan?: string;
+  allowance?: number;
+  used?: number;
+  overage?: number;
+  remaining?: number;
+  periodEnd?: number;
+  models?: string[];
+}
+
+/**
+ * GET `/v1/usage` from the configured (managed) endpoint → the org's credit
+ * balance/usage, or null on any failure. Drives `codegraph offload status`.
+ */
+export async function fetchUsage(): Promise<OffloadUsage | null> {
+  const cfg = resolveOffload();
+  if (!cfg.url || !cfg.apiKey) return null;
+  const url = cfg.url.replace(/\/+$/, '') + '/usage';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${cfg.apiKey}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) { debug('usage not ok', res.status); return null; }
+    return (await res.json()) as OffloadUsage;
+  } catch (err) {
+    debug('usage error', (err as Error)?.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function debug(...args: unknown[]): void {
   if (process.env.CODEGRAPH_OFFLOAD_DEBUG === '1') {
     // stderr only — stdout is the MCP JSON-RPC transport.

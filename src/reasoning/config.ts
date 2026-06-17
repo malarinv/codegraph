@@ -8,20 +8,30 @@
  * Every codegraph MCP server on the machine picks it up, so a user configures it
  * once. Env vars override the file (CI / ephemeral / advanced use).
  *
- * The API key is NEVER written to disk. The CLI stores the NAME of an env var
- * that holds it (`keyEnv`); at call time the key is read from that env var (or
- * directly from `CODEGRAPH_OFFLOAD_KEY`). So the config file carries no secret.
+ * For a BYO endpoint, the API key is NEVER written to disk: the CLI stores the
+ * NAME of an env var (`keyEnv`) and reads the key from it at call time. The
+ * MANAGED tier ("CodeGraph AI") instead authenticates with a revocable, org-scoped
+ * token from `codegraph offload login`, stored separately in `credentials.json`
+ * (see ./credentials) — so `config.json` itself never carries a secret either way.
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { readOffloadToken } from './credentials';
+
+/** Managed tier ("CodeGraph AI") — the metered gateway used when logged in. */
+export const MANAGED_DEFAULT_URL = 'https://ai.getcodegraph.com/v1';
+/** The gateway's public model id (it translates this to the upstream provider id). */
+export const MANAGED_DEFAULT_MODEL = 'openai/gpt-oss-120b';
 
 export interface OffloadConfig {
+  /** Managed tier: route through CodeGraph AI (metered) with the logged-in org token. */
+  managed?: boolean;
   /** OpenAI-compatible base URL ending in `/v1` (e.g. https://api.cerebras.ai/v1). */
   url?: string;
-  /** Model id to request (default `gpt-oss-120b`). */
+  /** Model id to request (default `gpt-oss-120b` BYO, `openai/gpt-oss-120b` managed). */
   model?: string;
-  /** Name of the env var holding the provider API key (the key itself is never persisted). */
+  /** Name of the env var holding the provider API key (never persisted). BYO only. */
   keyEnv?: string;
   /** reasoning_effort: low | medium | high (default `low`). */
   effort?: string;
@@ -30,13 +40,15 @@ export interface OffloadConfig {
 }
 
 export interface ResolvedOffload {
-  /** True when a reasoning endpoint is configured (by env or by file). */
+  /** True when the offload is usable (endpoint present; for managed, a token too). */
   enabled: boolean;
+  /** Managed tier (CodeGraph AI, metered) vs BYO endpoint. */
+  managed: boolean;
   url?: string;
   model: string;
-  /** Resolved API key (from `CODEGRAPH_OFFLOAD_KEY` or the configured `keyEnv`), if any. */
+  /** Resolved API key / org token (from env, the configured `keyEnv`, or login), if any. */
   apiKey?: string;
-  /** Which env var the key came from (for `status` display) — never the key itself. */
+  /** Where the key/token came from (for `status` display) — never the secret itself. */
   keySource?: string;
   effort: string;
   style: string;
@@ -91,29 +103,39 @@ const trimmed = (v: string | undefined): string | undefined => {
 /** Merge the persisted config with `CODEGRAPH_OFFLOAD_*` env overrides (env wins). */
 export function resolveOffload(env: NodeJS.ProcessEnv = process.env): ResolvedOffload {
   const c = readOffloadConfig();
-  const url = trimmed(env.CODEGRAPH_OFFLOAD_URL) ?? trimmed(c.url);
+  const managed = !!c.managed;
+  const envUrl = trimmed(env.CODEGRAPH_OFFLOAD_URL);
+  const envKey = trimmed(env.CODEGRAPH_OFFLOAD_KEY);
 
-  // Key: direct env var first, else the configured env-var name. Never from disk.
+  let url: string | undefined;
   let apiKey: string | undefined;
   let keySource: string | undefined;
-  if (trimmed(env.CODEGRAPH_OFFLOAD_KEY)) {
-    apiKey = trimmed(env.CODEGRAPH_OFFLOAD_KEY);
-    keySource = 'CODEGRAPH_OFFLOAD_KEY';
-  } else if (c.keyEnv && trimmed(env[c.keyEnv])) {
-    apiKey = trimmed(env[c.keyEnv]);
-    keySource = c.keyEnv;
+  let model: string;
+
+  if (managed) {
+    // Managed tier: default to the CodeGraph AI gateway + its public model id; the
+    // bearer is the org token from `codegraph offload login` (or an env override).
+    url = envUrl ?? trimmed(c.url) ?? MANAGED_DEFAULT_URL;
+    model = trimmed(env.CODEGRAPH_OFFLOAD_MODEL) ?? trimmed(c.model) ?? MANAGED_DEFAULT_MODEL;
+    if (envKey) { apiKey = envKey; keySource = 'CODEGRAPH_OFFLOAD_KEY'; }
+    else { const t = readOffloadToken(); if (t) { apiKey = t; keySource = 'codegraph login'; } }
+  } else {
+    // BYO: endpoint + (optional) provider key resolved from env or the named env var.
+    url = envUrl ?? trimmed(c.url);
+    model = trimmed(env.CODEGRAPH_OFFLOAD_MODEL) ?? trimmed(c.model) ?? 'gpt-oss-120b';
+    if (envKey) { apiKey = envKey; keySource = 'CODEGRAPH_OFFLOAD_KEY'; }
+    else if (c.keyEnv && trimmed(env[c.keyEnv])) { apiKey = trimmed(env[c.keyEnv]); keySource = c.keyEnv; }
   }
 
-  const origin: ResolvedOffload['origin'] = trimmed(env.CODEGRAPH_OFFLOAD_URL)
-    ? 'env'
-    : trimmed(c.url)
-      ? 'config'
-      : 'none';
+  const origin: ResolvedOffload['origin'] = envUrl ? 'env' : (managed || trimmed(c.url)) ? 'config' : 'none';
 
   return {
-    enabled: !!url,
+    // Managed needs both an endpoint AND a token (no token → effectively logged out);
+    // BYO needs only an endpoint (some endpoints require no auth).
+    enabled: managed ? (!!url && !!apiKey) : !!url,
+    managed,
     url,
-    model: trimmed(env.CODEGRAPH_OFFLOAD_MODEL) ?? trimmed(c.model) ?? 'gpt-oss-120b',
+    model,
     apiKey,
     keySource,
     effort: trimmed(env.CODEGRAPH_OFFLOAD_EFFORT) ?? trimmed(c.effort) ?? 'low',

@@ -18,7 +18,10 @@ import {
   readOffloadConfig,
   writeOffloadConfig,
   resolveOffload,
+  MANAGED_DEFAULT_URL,
+  MANAGED_DEFAULT_MODEL,
 } from '../src/reasoning/config';
+import { readOffloadToken, writeOffloadToken } from '../src/reasoning/credentials';
 import { isOffloadEnabled, synthesizeOffload, stripAgentDirectives } from '../src/reasoning/reasoner';
 
 describe('reasoning offload', () => {
@@ -181,6 +184,63 @@ describe('reasoning offload', () => {
       expect(stripped).not.toContain('Found 12 symbols');
       expect(stripped).toContain('#### src/a.ts');
       expect(stripped).toContain('code body');
+    });
+  });
+
+  describe('managed tier (CodeGraph AI)', () => {
+    it('stores the org token at 0600 in credentials.json, not in config.json', () => {
+      writeOffloadConfig({ managed: true });
+      writeOffloadToken('cgai_secrettoken');
+      expect(readOffloadToken()).toBe('cgai_secrettoken');
+
+      // config.json carries the managed flag but NOT the token.
+      const cfg = fs.readFileSync(path.join(home, '.codegraph', 'config.json'), 'utf8');
+      expect(cfg).toContain('managed');
+      expect(cfg).not.toContain('cgai_secrettoken');
+
+      const credPath = path.join(home, '.codegraph', 'credentials.json');
+      expect(fs.readFileSync(credPath, 'utf8')).toContain('cgai_secrettoken');
+      // POSIX perms must be owner-only (0600). (Windows has no POSIX mode bits.)
+      if (process.platform !== 'win32') {
+        expect(fs.statSync(credPath).mode & 0o777).toBe(0o600);
+      }
+    });
+
+    it('resolves managed mode to the gateway URL + public model id + login token', () => {
+      writeOffloadConfig({ managed: true });
+      writeOffloadToken('cgai_live');
+      const c = resolveOffload();
+      expect(c.enabled).toBe(true);
+      expect(c.managed).toBe(true);
+      expect(c.url).toBe(MANAGED_DEFAULT_URL);
+      expect(c.model).toBe(MANAGED_DEFAULT_MODEL);
+      expect(c.apiKey).toBe('cgai_live');
+      expect(c.keySource).toBe('codegraph login');
+    });
+
+    it('is NOT enabled when managed but signed out (no token)', () => {
+      writeOffloadConfig({ managed: true });
+      const c = resolveOffload();
+      expect(c.managed).toBe(true);
+      expect(c.enabled).toBe(false); // url defaults, but no token → effectively logged out
+      expect(isOffloadEnabled()).toBe(false);
+    });
+
+    it('clears the token on logout', () => {
+      writeOffloadToken('cgai_live');
+      writeOffloadToken(null);
+      expect(readOffloadToken()).toBeUndefined();
+    });
+
+    it('lets env override the managed endpoint and token (for testing)', () => {
+      writeOffloadConfig({ managed: true });
+      writeOffloadToken('cgai_stored');
+      process.env.CODEGRAPH_OFFLOAD_URL = 'http://localhost:8787/v1';
+      process.env.CODEGRAPH_OFFLOAD_KEY = 'cgai_env';
+      const c = resolveOffload();
+      expect(c.url).toBe('http://localhost:8787/v1');
+      expect(c.apiKey).toBe('cgai_env');
+      expect(c.keySource).toBe('CODEGRAPH_OFFLOAD_KEY');
     });
   });
 });
