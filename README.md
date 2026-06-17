@@ -606,6 +606,44 @@ add a negation — `!vendor/`. The defaults apply uniformly, so committing a
 dependency or build directory doesn't force it into the graph; the `.gitignore`
 negation is the explicit opt-in.
 
+## Reasoning offload (bring your own model)
+
+**Optional, off by default.** Normally `codegraph_explore` returns the verbatim
+source it retrieved and your agent reasons over it. With reasoning offload, that
+source is instead handed to a reasoning model **you** point at, which returns a
+tight, cited answer — so your agent's main context gets the answer, not a wall of
+source. You trade one network round-trip for far fewer main-context tokens.
+
+Point it at **any** OpenAI-compatible endpoint with your own key — Cerebras,
+OpenAI, a local vLLM or Ollama, anything. Nothing but the assembled context + your
+question leaves your machine, and your API key is **never written to disk** (the
+config stores the *name* of an env var; the key is read from it at call time).
+
+```bash
+# Enable — URL ends in /v1; the key is read from the named env var at call time
+codegraph offload set-endpoint https://api.cerebras.ai/v1 \
+    --model gpt-oss-120b --key-env CEREBRAS_API_KEY
+
+codegraph offload status     # show the current endpoint / model / key source
+codegraph offload disable    # turn it back off
+```
+
+Restart your editor/agent session afterward so running MCP servers pick it up.
+Everything is also settable by env (these override the saved config — handy for
+CI): `CODEGRAPH_OFFLOAD_URL`, `_MODEL`, `_KEY`, `_EFFORT` (`low`|`medium`|`high`),
+`_STYLE` (`plain`|`report`).
+
+A few things worth knowing:
+
+- **Quality tracks the model you choose.** The synthesis prompt is correctness-first
+  (it leads with a `Coverage: full / partial / not found` verdict and cites
+  `file:line` for every claim, so answers stay verifiable), but a weak endpoint can
+  still be confidently wrong. It's designed and validated against `gpt-oss-120b`-class
+  models at low temperature.
+- **It's strictly degradable.** Any failure — no endpoint, network error, timeout,
+  empty answer — silently falls back to returning the local source. The offload can
+  never break a call.
+
 ## Telemetry
 
 CodeGraph collects **anonymous usage statistics** — which tools and commands get

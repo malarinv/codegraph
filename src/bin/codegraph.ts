@@ -36,6 +36,7 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
+import { writeOffloadConfig, resolveOffload } from '../reasoning/config';
 
 // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
 async function loadCodeGraph(): Promise<typeof import('../index')> {
@@ -1346,6 +1347,66 @@ program
       note: (m) => clack.log.success(m),
       done: (m) => clack.outro(m),
     });
+  });
+
+/**
+ * codegraph offload — configure the reasoning offload (bring-your-own endpoint).
+ *
+ * When set, codegraph_explore reasons over its assembled source with a remote
+ * model and returns the synthesized answer instead of the raw source dump.
+ */
+const offloadCmd = program
+  .command('offload')
+  .description('Configure the reasoning offload — let codegraph_explore answer via your own reasoning model');
+
+offloadCmd
+  .command('set-endpoint <url>')
+  .description('Send explore output to an OpenAI-compatible reasoning endpoint (URL ends in /v1)')
+  .option('--model <model>', 'Model id to request', 'gpt-oss-120b')
+  .option('--key-env <ENV>', 'Name of the env var holding the API key (the key is never written to disk)')
+  .option('--effort <effort>', 'reasoning_effort: low | medium | high')
+  .option('--style <style>', 'Output style: plain | report')
+  .action((url: string, opts: { model?: string; keyEnv?: string; effort?: string; style?: string }) => {
+    writeOffloadConfig({
+      url,
+      model: opts.model,
+      keyEnv: opts.keyEnv,
+      effort: opts.effort,
+      style: opts.style,
+    });
+    success(`Reasoning offload enabled → ${url}`);
+    info(`  model: ${opts.model || 'gpt-oss-120b'}`);
+    if (opts.keyEnv) info(`  key:   read from $${opts.keyEnv} at call time`);
+    else warn('  no API key configured — pass --key-env <ENV> (or set CODEGRAPH_OFFLOAD_KEY) if your endpoint needs auth.');
+    info('  Restart your editor/agent session for running MCP servers to pick it up.');
+  });
+
+offloadCmd
+  .command('status')
+  .description('Show the current reasoning-offload configuration')
+  .action(() => {
+    const c = resolveOffload();
+    if (!c.enabled) {
+      info('Reasoning offload: off.  Enable with `codegraph offload set-endpoint <url>`.');
+      return;
+    }
+    success(`Reasoning offload: on (${c.origin === 'env' ? 'from environment' : 'configured'})`);
+    info(`  endpoint: ${c.url}`);
+    info(`  model:    ${c.model}`);
+    info(`  key:      ${c.apiKey ? `present (from $${c.keySource})` : 'none'}`);
+    info(`  effort:   ${c.effort}    style: ${c.style}`);
+    if (!c.apiKey) warn('  no API key resolved — set --key-env <ENV> or CODEGRAPH_OFFLOAD_KEY if your endpoint requires auth.');
+  });
+
+offloadCmd
+  .command('disable')
+  .description('Turn off the reasoning offload')
+  .action(() => {
+    writeOffloadConfig(null);
+    success('Reasoning offload disabled.');
+    if (process.env.CODEGRAPH_OFFLOAD_URL) {
+      warn('Note: CODEGRAPH_OFFLOAD_URL is still set in your environment, which keeps it on. Unset it to fully disable.');
+    }
   });
 
 /**
