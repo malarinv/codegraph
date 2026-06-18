@@ -47,6 +47,11 @@ export interface OffloadUsage {
   overage?: number;
   remaining?: number;
   periodEnd?: number;
+  unlimited?: boolean;
+  banned?: boolean;
+  tokensLast30?: number;
+  callsLast30?: number;
+  creditsLast30?: number;
   models?: string[];
 }
 

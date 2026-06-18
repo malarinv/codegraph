@@ -36,7 +36,7 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
-import { writeOffloadConfig } from '../reasoning/config';
+import { writeOffloadConfig, resolveOffload } from '../reasoning/config';
 import { writeOffloadToken } from '../reasoning/credentials';
 import { startDeviceLogin, pollForToken, openBrowser } from '../reasoning/login';
 import { fetchUsage } from '../reasoning/reasoner';
@@ -1402,6 +1402,49 @@ program
     writeOffloadToken(null);
     writeOffloadConfig(null);
     success('Signed out of CodeGraph AI.');
+  });
+
+/**
+ * codegraph usage — show the CodeGraph AI balance + recent usage (the server is the source of
+ * truth; this just pings /v1/usage with the stored token). Degrades quietly when signed out or
+ * unreachable — managed reasoning is optional, so this command never errors hard.
+ */
+program
+  .command('usage')
+  .description('Show your CodeGraph AI balance and recent usage')
+  .action(async () => {
+    const cfg = resolveOffload();
+
+    if (!cfg.apiKey) {
+      if (cfg.url && cfg.managed) {
+        info('Signed out of CodeGraph AI. Run `codegraph login` to sign in.');
+      } else {
+        info('Not signed in to CodeGraph AI — codegraph_explore runs locally.');
+        info('Run `codegraph login` to use managed reasoning with your credits.');
+      }
+      return;
+    }
+
+    const usage = await fetchUsage();
+    if (!usage) {
+      if (cfg.managed) warn('Could not reach CodeGraph AI to read your balance — try again in a moment.');
+      else info(`Reasoning offload: your own endpoint (${cfg.url}) — no CodeGraph AI balance to show.`);
+      info('  (codegraph_explore still works locally regardless.)');
+      return;
+    }
+
+    success('CodeGraph AI');
+    if (usage.banned) warn('  Account suspended — contact support.');
+    else if (usage.unlimited) info('  Balance:  unlimited');
+    else if (typeof usage.remaining === 'number')
+      info(`  Balance:  ${usage.remaining.toLocaleString()} credits  ($${(usage.remaining / 100_000).toFixed(2)})`);
+    if (usage.plan) info(`  Plan:     ${usage.plan === 'payg' ? 'pay-as-you-go' : usage.plan}`);
+    if (typeof usage.tokensLast30 === 'number' || typeof usage.callsLast30 === 'number')
+      info(`  30 days:  ${(usage.callsLast30 ?? 0).toLocaleString()} explores · ${(usage.tokensLast30 ?? 0).toLocaleString()} tokens`);
+    // Only a subscription allowance resets each period; pay-as-you-go credits don't expire, so there's
+    // nothing to renew. Show a reset date only when there's an actual recurring allowance.
+    if (usage.periodEnd && (usage.allowance ?? 0) > 0)
+      info(`  Allowance resets: ${new Date(usage.periodEnd).toISOString().slice(0, 10)}`);
   });
 
 /**
