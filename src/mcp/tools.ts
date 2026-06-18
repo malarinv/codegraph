@@ -29,6 +29,7 @@ import {
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
+import { isOffloadEnabled, synthesizeOffload } from '../reasoning/reasoner';
 
 /**
  * An expected, recoverable "codegraph can't serve this" condition — most
@@ -2985,6 +2986,17 @@ export class ToolHandler {
     // necessary overflow above the 24K budget, but hard-stop at 25K — never into
     // externalize territory.
     const output = flow.text + lines.join('\n');
+
+    // Reasoning offload (opt-in, bring-your-own endpoint): when configured, hand
+    // the assembled source + the query to a reasoning model and return its
+    // synthesized answer instead of the raw source dump. Reasons over the FULL
+    // assembled context (pre-truncation). Strictly degradable — any failure
+    // returns null and we fall through to returning the local source below.
+    if (isOffloadEnabled()) {
+      const synthesized = await synthesizeOffload({ query, context: output });
+      if (synthesized) return this.textResult(synthesized);
+    }
+
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
     if (output.length > hardCeiling) {
       // Cut at a FILE-SECTION boundary (the last `#### ` header before the
