@@ -36,8 +36,9 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
-import { writeOffloadConfig, resolveOffload } from '../reasoning/config';
+import { writeOffloadConfig } from '../reasoning/config';
 import { writeOffloadToken } from '../reasoning/credentials';
+import { startDeviceLogin, pollForToken, openBrowser } from '../reasoning/login';
 import { fetchUsage } from '../reasoning/reasoner';
 
 // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
@@ -1352,103 +1353,55 @@ program
   });
 
 /**
- * codegraph offload — configure the reasoning offload (bring-your-own endpoint).
+ * codegraph login / logout — managed reasoning (CodeGraph AI).
  *
- * When set, codegraph_explore reasons over its assembled source with a remote
- * model and returns the synthesized answer instead of the raw source dump.
+ * `login` runs a browser device-authorization flow against the CodeGraph dashboard,
+ * mints the account's metered org token, and stores it (managed offload on). When
+ * signed in, codegraph_explore reasons over its assembled source via the managed
+ * gateway instead of returning the raw source dump. `logout` clears it.
+ *
+ * Bring-your-own endpoint is configured via the CODEGRAPH_OFFLOAD_URL /
+ * CODEGRAPH_OFFLOAD_KEY / CODEGRAPH_OFFLOAD_MODEL env vars (see ../reasoning/config).
  */
-const offloadCmd = program
-  .command('offload')
-  .description('Configure the reasoning offload — let codegraph_explore answer via your own reasoning model');
-
-offloadCmd
-  .command('set-endpoint <url>')
-  .description('Send explore output to an OpenAI-compatible reasoning endpoint (URL ends in /v1)')
-  .option('--model <model>', 'Model id to request', 'gpt-oss-120b')
-  .option('--key-env <ENV>', 'Name of the env var holding the API key (the key is never written to disk)')
-  .option('--effort <effort>', 'reasoning_effort: low | medium | high')
-  .option('--style <style>', 'Output style: plain | report')
-  .action((url: string, opts: { model?: string; keyEnv?: string; effort?: string; style?: string }) => {
-    writeOffloadConfig({
-      url,
-      model: opts.model,
-      keyEnv: opts.keyEnv,
-      effort: opts.effort,
-      style: opts.style,
-    });
-    success(`Reasoning offload enabled → ${url}`);
-    info(`  model: ${opts.model || 'gpt-oss-120b'}`);
-    if (opts.keyEnv) info(`  key:   read from $${opts.keyEnv} at call time`);
-    else warn('  no API key configured — pass --key-env <ENV> (or set CODEGRAPH_OFFLOAD_KEY) if your endpoint needs auth.');
-    info('  Restart your editor/agent session for running MCP servers to pick it up.');
-  });
-
-offloadCmd
+program
   .command('login')
-  .description('Use the managed CodeGraph AI tier (metered) with your account token')
-  .requiredOption('--token <token>', 'Your CodeGraph AI org token')
-  .option('--url <url>', 'Override the managed gateway URL (advanced/testing)')
-  .option('--model <model>', 'Override the model id')
-  .action((opts: { token: string; url?: string; model?: string }) => {
-    // Phase 2: the token is pasted in. A future `codegraph login` device flow will
-    // mint and store it automatically.
-    writeOffloadConfig({ managed: true, url: opts.url, model: opts.model });
-    writeOffloadToken(opts.token);
-    success('Reasoning offload: signed in to CodeGraph AI (managed).');
-    info('  Credits burn from your account. Check the balance with `codegraph offload status`.');
-    info('  Restart your editor/agent session for running MCP servers to pick it up.');
+  .description('Sign in to CodeGraph AI for managed reasoning — opens your browser to authorize')
+  .option('--no-browser', "Don't auto-open the browser; just print the URL to visit")
+  .action(async (opts: { browser?: boolean }) => {
+    try {
+      const start = await startDeviceLogin();
+      const url = start.verification_uri_complete ?? start.verification_uri;
+      info('To authorize, open this URL in your browser:');
+      info(`  ${url}`);
+      info(`and confirm the code:  ${start.user_code}`);
+      if (opts.browser !== false) await openBrowser(url);
+      info('Waiting for authorization…  (Ctrl-C to cancel)');
+      const token = await pollForToken(start.device_code, start.interval ?? 5, start.expires_in ?? 600);
+      writeOffloadConfig({ managed: true });
+      writeOffloadToken(token);
+      success('Signed in to CodeGraph AI — managed reasoning is on.');
+      try {
+        const usage = await fetchUsage();
+        if (usage && typeof usage.remaining === 'number') {
+          info(`  credits: ${usage.remaining.toLocaleString()} remaining`);
+        }
+      } catch {
+        /* balance is best-effort */
+      }
+      info('  Restart your editor/agent session for running MCP servers to pick it up.');
+    } catch (err) {
+      error(`Login failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
   });
 
-offloadCmd
+program
   .command('logout')
-  .description('Sign out of CodeGraph AI and clear the stored token')
+  .description('Sign out of CodeGraph AI (clears the saved token and turns off managed reasoning)')
   .action(() => {
     writeOffloadToken(null);
     writeOffloadConfig(null);
-    success('Signed out of CodeGraph AI; offload turned off.');
-  });
-
-offloadCmd
-  .command('status')
-  .description('Show the current reasoning-offload configuration (and managed balance)')
-  .action(async () => {
-    const c = resolveOffload();
-    if (!c.enabled) {
-      if (c.managed) info('Reasoning offload: managed, but signed out.  Run `codegraph offload login --token <token>`.');
-      else info('Reasoning offload: off.  Enable with `codegraph offload set-endpoint <url>` or `codegraph offload login`.');
-      return;
-    }
-    if (c.managed) {
-      success(`Reasoning offload: on — CodeGraph AI (managed)`);
-      info(`  endpoint: ${c.url}`);
-      info(`  model:    ${c.model}`);
-      info(`  token:    present (from ${c.keySource})`);
-      const usage = await fetchUsage();
-      if (usage && typeof usage.remaining === 'number') {
-        const reset = usage.periodEnd ? ` · allowance resets ${new Date(usage.periodEnd).toISOString().slice(0, 10)}` : '';
-        info(`  credits:  ${usage.remaining.toLocaleString()} remaining (plan ${usage.plan ?? '—'})${reset}`);
-      } else {
-        warn('  credits:  could not reach CodeGraph AI to read your balance (the offload still degrades gracefully).');
-      }
-      return;
-    }
-    success(`Reasoning offload: on (${c.origin === 'env' ? 'from environment' : 'configured'})`);
-    info(`  endpoint: ${c.url}`);
-    info(`  model:    ${c.model}`);
-    info(`  key:      ${c.apiKey ? `present (from $${c.keySource})` : 'none'}`);
-    info(`  effort:   ${c.effort}    style: ${c.style}`);
-    if (!c.apiKey) warn('  no API key resolved — set --key-env <ENV> or CODEGRAPH_OFFLOAD_KEY if your endpoint requires auth.');
-  });
-
-offloadCmd
-  .command('disable')
-  .description('Turn off the reasoning offload (keeps any saved login token)')
-  .action(() => {
-    writeOffloadConfig(null);
-    success('Reasoning offload disabled.');
-    if (process.env.CODEGRAPH_OFFLOAD_URL) {
-      warn('Note: CODEGRAPH_OFFLOAD_URL is still set in your environment, which keeps it on. Unset it to fully disable.');
-    }
+    success('Signed out of CodeGraph AI.');
   });
 
 /**
