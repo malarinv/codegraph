@@ -2327,6 +2327,26 @@ export class ToolHandler {
       if (n) namedSeedFiles.add(n.filePath);
     }
 
+    // Multi-term corroboration tier: a file that is BOTH (a) an entry/central file
+    // (a search root, named seed, or graph-central hub — i.e. structurally part of
+    // the answer) AND (b) matched by ≥2 DISTINCT query terms must not be buried by
+    // graph-centrality mass that accrued to a denser-but-off-topic cluster. In a
+    // cross-layer monorepo (an API server alongside a much larger, internally dense
+    // frontend that mirrors the same domain words) the Random-Walk-with-Restart mass
+    // — seeded from text matches that skew to the bigger layer — floats hits=0
+    // frontend files above the hits=2/3 backend service that IS the answer (its many
+    // callers don't help: it's call-isolated from the frontend seed cluster). The
+    // entry/central GUARD keeps this safe: an INCIDENTAL multi-term file that is
+    // neither entry nor central (a type/util file that matches "element"+x but isn't
+    // the flow) is NOT promoted, so it can't displace the graph-central answer file
+    // (hits=1) the way a blunt hits-only tier would. Single-layer repos with one
+    // cluster are unaffected (no competing mass). Set CODEGRAPH_RANK_NO_MULTITERM=1
+    // to disable.
+    const MULTITERM_OFF = process.env.CODEGRAPH_RANK_NO_MULTITERM === '1';
+    const isCorroborated = (fp: string) =>
+      !MULTITERM_OFF &&
+      (fileTermHits.get(fp) ?? 0) >= 2 &&
+      (entryFiles.has(fp) || centralFiles.has(fp));
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
@@ -2335,6 +2355,11 @@ export class ToolHandler {
       const aNamed = namedSeedFiles.has(a[0]) ? 1 : 0;
       const bNamed = namedSeedFiles.has(b[0]) ? 1 : 0;
       if (aNamed !== bNamed) return bNamed - aNamed;
+
+      // Corroborated (entry/central + ≥2 terms) tier, above the graph signal.
+      const aCorr = isCorroborated(a[0]) ? 1 : 0;
+      const bCorr = isCorroborated(b[0]) ? 1 : 0;
+      if (aCorr !== bCorr) return bCorr - aCorr;
 
       // Graph connectivity is the next key (small epsilon so near-ties fall
       // through to the text signal rather than coin-flipping on float noise).
