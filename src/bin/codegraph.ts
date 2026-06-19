@@ -1382,8 +1382,14 @@ program
       success('Signed in to CodeGraph AI — managed reasoning is on.');
       try {
         const usage = await fetchUsage();
-        if (usage && typeof usage.remaining === 'number') {
-          info(`  credits: ${usage.remaining.toLocaleString()} remaining`);
+        if (usage) {
+          // Mirror `codegraph usage`'s precedence: a comped/internal account is
+          // flagged `unlimited` (often with remaining:0 when no allowance is set),
+          // so check that before the numeric balance or it reads "0 remaining".
+          if (usage.banned) warn('  Account suspended — contact support.');
+          else if (usage.unlimited) info('  credits: unlimited');
+          else if (typeof usage.remaining === 'number')
+            info(`  credits: ${usage.remaining.toLocaleString()} remaining`);
         }
       } catch {
         /* balance is best-effort */

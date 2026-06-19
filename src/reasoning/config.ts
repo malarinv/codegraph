@@ -102,6 +102,17 @@ const trimmed = (v: string | undefined): string | undefined => {
 
 /** Merge the persisted config with `CODEGRAPH_OFFLOAD_*` env overrides (env wins). */
 export function resolveOffload(env: NodeJS.ProcessEnv = process.env): ResolvedOffload {
+  // Hard kill-switch: disable the offload for this process/session without touching
+  // the persisted config or the stored login — e.g. one A/B arm, or a user who wants
+  // codegraph_explore to return raw source for a session. Env-only by design.
+  if (env.CODEGRAPH_OFFLOAD_DISABLE === '1') {
+    return {
+      enabled: false, managed: false, url: undefined, model: MANAGED_DEFAULT_MODEL,
+      apiKey: undefined, keySource: undefined, effort: 'low', style: 'plain',
+      timeoutMs: 20000, maxTokens: 12000, strip: false,
+      debug: env.CODEGRAPH_OFFLOAD_DEBUG === '1', origin: 'none',
+    };
+  }
   const c = readOffloadConfig();
   const managed = !!c.managed;
   const envUrl = trimmed(env.CODEGRAPH_OFFLOAD_URL);

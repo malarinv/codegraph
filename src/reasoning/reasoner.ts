@@ -28,6 +28,7 @@
  * result — a broken offload must be invisible to the agent (one isError early in a
  * session and an agent can abandon the tool entirely).
  */
+import * as fs from 'fs';
 import { resolveOffload } from './config';
 
 interface SynthArgs {
@@ -84,6 +85,23 @@ function debug(...args: unknown[]): void {
   if (process.env.CODEGRAPH_OFFLOAD_DEBUG === '1') {
     // stderr only — stdout is the MCP JSON-RPC transport.
     console.error('[offload]', ...args);
+  }
+}
+
+/**
+ * Append one JSON line of per-call offload usage to `CODEGRAPH_OFFLOAD_USAGE_LOG`
+ * when that env var is set (otherwise a no-op). Lets a harness attribute CodeGraph AI
+ * tokens + cost to a single run without depending on the metered server's cumulative
+ * totals. Best-effort: a write failure is logged under debug and never disrupts the
+ * tool call (the offload is strictly degradable, and so is its bookkeeping).
+ */
+function recordUsage(entry: Record<string, unknown>): void {
+  const logPath = process.env.CODEGRAPH_OFFLOAD_USAGE_LOG;
+  if (!logPath) return;
+  try {
+    fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
+  } catch (err) {
+    debug('usage-log write failed', (err as Error)?.message);
   }
 }
 
@@ -215,14 +233,39 @@ export async function synthesizeOffload({ query, context }: SynthArgs): Promise<
     }
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     };
+    // Per-call usage/cost capture. The managed gateway returns the spend in the
+    // `x-cg-credits-charged` header (100k credits = $1) and the token counts in the
+    // standard OpenAI `usage` block; a BYO endpoint typically returns `usage` only.
+    // This is the source of truth for "CodeGraph AI tokens + cost" per run.
+    // Optional chaining: usage bookkeeping must NEVER break the degradable path,
+    // even if a response/mock lacks a standard headers object.
+    const creditsCharged = Number(res.headers?.get?.('x-cg-credits-charged'));
     const answer = data.choices?.[0]?.message?.content?.trim();
+    recordUsage({
+      ts: new Date().toISOString(),
+      ms: Date.now() - started,
+      model: cfg.model,
+      style: cfg.style,
+      managed: cfg.managed,
+      promptTokens: data.usage?.prompt_tokens ?? null,
+      completionTokens: data.usage?.completion_tokens ?? null,
+      totalTokens: data.usage?.total_tokens ?? null,
+      creditsCharged: Number.isFinite(creditsCharged) ? creditsCharged : null,
+      costUsd: Number.isFinite(creditsCharged) ? creditsCharged / 100_000 : null,
+      queryLen: query.length,
+      ctxLen: ctx.length,
+      rawCtxLen: context.length,
+      answerLen: answer?.length ?? 0,
+      finishReason: data.choices?.[0]?.finish_reason ?? null,
+    });
     if (!answer) {
       debug('empty answer', JSON.stringify(data).slice(0, 200));
       return null;
     }
     debug(
-      `ok in ${Date.now() - started}ms [${cfg.style}] — answer ${answer.length} chars (ctx ${ctx.length} of ${context.length}, finish=${data.choices?.[0]?.finish_reason})`
+      `ok in ${Date.now() - started}ms [${cfg.style}] — answer ${answer.length} chars (ctx ${ctx.length} of ${context.length}, finish=${data.choices?.[0]?.finish_reason}), ${data.usage?.total_tokens ?? '?'} tok, ${Number.isFinite(creditsCharged) ? creditsCharged + ' cr' : 'no-charge-hdr'}`
     );
     return answer + footer;
   } catch (err) {

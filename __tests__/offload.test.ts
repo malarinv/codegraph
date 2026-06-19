@@ -34,7 +34,7 @@ describe('reasoning offload', () => {
     'CODEGRAPH_OFFLOAD_URL', 'CODEGRAPH_OFFLOAD_MODEL', 'CODEGRAPH_OFFLOAD_KEY',
     'CODEGRAPH_OFFLOAD_EFFORT', 'CODEGRAPH_OFFLOAD_STYLE', 'CODEGRAPH_OFFLOAD_TIMEOUT_MS',
     'CODEGRAPH_OFFLOAD_MAXTOKENS', 'CODEGRAPH_OFFLOAD_STRIP', 'CODEGRAPH_OFFLOAD_DEBUG',
-    'CEREBRAS_API_KEY',
+    'CODEGRAPH_OFFLOAD_DISABLE', 'CODEGRAPH_OFFLOAD_USAGE_LOG', 'CEREBRAS_API_KEY',
   ];
   let saved: Record<string, string | undefined>;
 
@@ -115,6 +115,64 @@ describe('reasoning offload', () => {
       const c = resolveOffload();
       expect(c.apiKey).toBe('sk-direct');
       expect(c.keySource).toBe('CODEGRAPH_OFFLOAD_KEY');
+    });
+  });
+
+  describe('CODEGRAPH_OFFLOAD_DISABLE kill-switch', () => {
+    it('forces the offload off even when managed + signed in', () => {
+      writeOffloadConfig({ managed: true });
+      writeOffloadToken('cgai_live');
+      expect(resolveOffload().enabled).toBe(true); // sanity: on without the flag
+      process.env.CODEGRAPH_OFFLOAD_DISABLE = '1';
+      const c = resolveOffload();
+      expect(c.enabled).toBe(false);
+      expect(c.managed).toBe(false);
+      expect(c.origin).toBe('none');
+      expect(isOffloadEnabled()).toBe(false);
+    });
+
+    it('forces the offload off even with a BYO endpoint + key', () => {
+      process.env.CODEGRAPH_OFFLOAD_URL = 'https://env.example/v1';
+      process.env.CODEGRAPH_OFFLOAD_KEY = 'sk-direct';
+      expect(resolveOffload().enabled).toBe(true);
+      process.env.CODEGRAPH_OFFLOAD_DISABLE = '1';
+      expect(resolveOffload().enabled).toBe(false);
+    });
+  });
+
+  describe('per-call usage log (CODEGRAPH_OFFLOAD_USAGE_LOG)', () => {
+    const okResponse = () => ({
+      ok: true, status: 200,
+      headers: { get: (h: string) => (h === 'x-cg-credits-charged' ? '127' : null) },
+      json: async () => ({
+        choices: [{ message: { content: 'Coverage: full.\nThe answer.' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 700, completion_tokens: 80, total_tokens: 780 },
+      }),
+    });
+
+    it('appends one JSON line with tokens + charged credits when the log path is set', async () => {
+      writeOffloadConfig({ url: 'https://api.cerebras.ai/v1', keyEnv: 'CEREBRAS_API_KEY' });
+      process.env.CEREBRAS_API_KEY = 'sk-live';
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse()));
+      const logPath = path.join(home, 'usage.jsonl');
+      process.env.CODEGRAPH_OFFLOAD_USAGE_LOG = logPath;
+
+      await synthesizeOffload({ query: 'q', context: 'src' });
+      const line = JSON.parse(fs.readFileSync(logPath, 'utf8').trim());
+      expect(line.totalTokens).toBe(780);
+      expect(line.promptTokens).toBe(700);
+      expect(line.creditsCharged).toBe(127);
+      expect(line.costUsd).toBeCloseTo(0.00127, 6); // 100k credits = $1
+      expect(line.answerLen).toBeGreaterThan(0);
+    });
+
+    it('is a no-op (and never throws) when the log path is unset', async () => {
+      writeOffloadConfig({ url: 'https://api.cerebras.ai/v1', keyEnv: 'CEREBRAS_API_KEY' });
+      process.env.CEREBRAS_API_KEY = 'sk-live';
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse()));
+      // no CODEGRAPH_OFFLOAD_USAGE_LOG set → answer still returns fine
+      const out = await synthesizeOffload({ query: 'q', context: 'src' });
+      expect(out).toContain('Coverage: full.');
     });
   });
 
