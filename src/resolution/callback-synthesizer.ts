@@ -1647,9 +1647,67 @@ function svelteKitLoadEdges(ctx: ResolutionContext): Edge[] {
 }
 
 /**
+ * Redux-thunk dispatch chain. `export const X = createAsyncThunk(prefix, async (a, api) => {...})`
+ * (or a wrapper like trezor's `createThunk(...)`) passes the async body as an ARGUMENT, so
+ * tree-sitter never extracts it as a function node: `X` is a `constant` whose body's calls are
+ * ORPHANED. The `dispatch(nextThunk(...))` calls that drive a thunk chain forward therefore produce
+ * no edges, so `callees(X)` is empty and a flow `dispatch(X(...)) → X → nextThunk` dead-ends at the
+ * constant (validated on trezor-suite: the signXxxThunk constants had ZERO outgoing edges). Bridge
+ * it: body-scan each thunk constant for `dispatch(Y(...))` and link `X → Y`, so the dispatch chain
+ * connects. High-precision — the `dispatch(` keyword plus `Y` must resolve to a function/constant/
+ * method node; capped; gated on thunk constants existing so it never runs on non-RTK repos.
+ * Cross-file by design (a suite thunk dispatches a wallet-core thunk). Provenance `heuristic`,
+ * `synthesizedBy:'redux-thunk'`; `registeredAt` is the dispatch site.
+ */
+const THUNK_DECL_RE = /create(?:Async)?Thunk/;
+const THUNK_DISPATCH_RE = /\bdispatch\s*\(\s*([A-Za-z_]\w*)\s*[(),]/g;
+const THUNK_FANOUT_CAP = 24;
+
+function reduxThunkEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const node of queries.iterateNodesByKind('constant')) {
+    // Cheap gate: the initializer (captured in `signature`) must be a create(Async)Thunk call —
+    // avoids reading every constant's body on a large repo.
+    if (!node.signature || !THUNK_DECL_RE.test(node.signature)) continue;
+    const content = ctx.readFile(node.filePath);
+    const src = content && sliceLines(content, node.startLine, node.endLine);
+    if (!src) continue;
+    // Thunks are TS/JS-family (same // and /* */ comment syntax); map to a CommentLang.
+    const safe = stripCommentsForRegex(src, node.language === 'javascript' || node.language === 'jsx' ? 'javascript' : 'typescript');
+    THUNK_DISPATCH_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    let added = 0;
+    while ((m = THUNK_DISPATCH_RE.exec(safe)) && added < THUNK_FANOUT_CAP) {
+      const name = m[1]!;
+      if (name === node.name) continue; // self-dispatch (recursive thunk) — skip
+      const target = ctx
+        .getNodesByName(name)
+        .find((n) => n.kind === 'constant' || n.kind === 'function' || n.kind === 'method');
+      if (!target || target.id === node.id) continue;
+      const key = `${node.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const line = node.startLine + safe.slice(0, m.index).split('\n').length - 1;
+      edges.push({
+        source: node.id,
+        target: target.id,
+        kind: 'calls',
+        line,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'redux-thunk', via: name, registeredAt: `${node.filePath}:${line}` },
+      });
+      added++;
+    }
+  }
+  return edges;
+}
+
+/**
  * Synthesize dispatcher→callback edges (field observers + EventEmitters +
  * React re-render + JSX children + Vue templates + SvelteKit load + RN event
- * channel + Fabric native-impl + MyBatis Java↔XML + Gin middleware chain).
+ * channel + Fabric native-impl + MyBatis Java↔XML + Gin middleware chain +
+ * Redux-thunk dispatch chain).
  * Returns the count added. Never throws into indexing — callers wrap in try/catch.
  */
 export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionContext): number {
@@ -1687,6 +1745,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
   const rnXPlatEdges = rnCrossPlatformEdges(queries);
   const mybatisEdges = mybatisJavaXmlEdges(queries);
   const ginEdges = ginMiddlewareChainEdges(queries, ctx);
+  const thunkEdges = reduxThunkEdges(queries, ctx);
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -1710,6 +1769,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     ...rnXPlatEdges,
     ...mybatisEdges,
     ...ginEdges,
+    ...thunkEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;

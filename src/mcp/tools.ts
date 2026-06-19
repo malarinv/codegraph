@@ -633,28 +633,18 @@ export function getStaticTools(): ToolDefinition[] {
 }
 
 /**
- * The MCP tools served by DEFAULT (short names). The other defined tools
- * (callees, impact, files, status) remain fully functional — handlers stay,
- * the library API and CLI are untouched, and `CODEGRAPH_MCP_TOOLS` re-enables
- * any of them — they just aren't LISTED to agents anymore.
+ * The MCP tools served by DEFAULT (short names). Pared to ONLY `codegraph_explore`
+ * — the single tool that reliably earns its place: one capped call returns the
+ * verbatim source of the relevant symbols grouped by file (and, with the offload,
+ * a reasoned flow map over that source). Every other tool is a narrower slice of
+ * what explore already does, and presence itself steers mis-picks, so they are no
+ * longer LISTED to agents.
  *
- * Evidence for the cut (the "adapt the tool to the agent" principle —
- * fewer tools = fewer mis-picks, and presence itself steers):
- * - `codegraph_impact` appears in ZERO recorded eval runs ever — its
- *   blast-radius info already arrives inline on explore (the "Blast radius"
- *   section) and node (the dependents note), so agents never need the
- *   standalone tool.
- * - `codegraph_callees` is redundant by construction: a symbol's body (which
- *   node returns) IS its callee list, plus the caller/callee trail.
- * - `codegraph_files` / `codegraph_status`: the tiny-repo audit (see
- *   getTools) found they "reduce to one grep"; staleness banners already
- *   inline the pending-sync info on every read tool, and the CLI covers
- *   diagnostics.
- * - `codegraph_callers` stays: exhaustive call-site enumeration (every
- *   caller with file:line, callback registrations labeled, one section per
- *   same-named definition) is the one job explore/node don't replicate.
+ * The other defined tools (`node`, `search`, `callers`, plus callees/impact/files/
+ * status) remain fully functional — handlers stay, the library API and CLI are
+ * untouched, and `CODEGRAPH_MCP_TOOLS=explore,node,...` re-enables any of them.
  */
-const DEFAULT_MCP_TOOLS = new Set(['explore', 'node', 'search', 'callers']);
+const DEFAULT_MCP_TOOLS = new Set(['explore']);
 
 /**
  * Tool handler that executes tools against a CodeGraph instance

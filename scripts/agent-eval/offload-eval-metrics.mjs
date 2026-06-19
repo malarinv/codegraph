@@ -43,7 +43,11 @@ for (const line of lines) {
       const text = Array.isArray(b.content)
         ? b.content.map(c => (typeof c === 'string' ? c : c.text || '')).join('')
         : (typeof b.content === 'string' ? b.content : '');
-      if (/Synthesized by CodeGraph/.test(text)) { offloadAnswers.push(text); exploreResults++; }
+      // An offload answer is either the 'plain'/'report' synthesis (carries the
+      // "Synthesized by CodeGraph" footer) or a 'refs' answer (carries the re-expanded
+      // "### Referenced source — verbatim" appendix). A refs call that cited nothing
+      // valid falls back to RAW source, which is correctly counted as a raw explore below.
+      if (/Synthesized by CodeGraph|### Referenced source — verbatim/.test(text)) { offloadAnswers.push(text); exploreResults++; }
       else if (/Found \d+ symbols? across|## Exploration:/.test(text)) exploreResults++;
     }
   }
