@@ -200,6 +200,9 @@ export async function synthesizeOffload({ query, context }: SynthArgs): Promise<
   const url = cfg.url.replace(/\/+$/, '') + '/chat/completions';
   const { system, footer } = promptFor(cfg.style);
   const ctx = cfg.strip ? stripAgentDirectives(context) : context;
+  // Optional operator/eval flag forwarded verbatim to the managed Worker (see body below);
+  // the Worker validates it and falls back to its default for anything it doesn't recognize.
+  const workerStyle = (process.env.CODEGRAPH_OFFLOAD_STYLE || '').trim();
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
@@ -217,6 +220,10 @@ export async function synthesizeOffload({ query, context }: SynthArgs): Promise<
         max_tokens: cfg.maxTokens,
         temperature: 0.2,
         reasoning_effort: cfg.effort,
+        // Optional managed-tier flag, forwarded ONLY to the managed gateway (which strips it
+        // before the upstream model call) and ONLY when an operator/eval sets it — so BYO
+        // endpoints, which may reject unknown fields, never see it.
+        ...(cfg.managed && workerStyle ? { offload_style: workerStyle } : {}),
         messages: [
           { role: 'system', content: system },
           {

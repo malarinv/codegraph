@@ -36,9 +36,13 @@ prewarm() { # path  extra-env (e.g. "FOO=bar")
 run() { # arm rep mcp-config usage-log-or-dash
   local arm="$1" rep="$2" cfg="$3" usage="$4" tag="$REPO-$1-$2"
   [ "$usage" != "-" ] && : > "$usage"
+  # DISALLOW (optional): block sub-agent delegation across all arms so the A/B
+  # measures the retrieval mode, not whether Sonnet decides to spawn a codegraph-blind
+  # Explore subagent (which thrashes regardless and adds huge variance).
   ( cd "$TARGET" && claude -p "$Q" \
       --output-format stream-json --verbose --permission-mode bypassPermissions \
       --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" --max-budget-usd 4 \
+      ${DISALLOW:+--disallowedTools "$DISALLOW"} \
       --strict-mcp-config --mcp-config "$cfg" \
       </dev/null > "$RUNS/$tag.jsonl" 2>"$RUNS/$tag.err" )
   node "$EXTRACT" --run "$RUNS/$tag.jsonl" --usage "$usage" --arm "$arm" --rep "$rep" \
@@ -52,14 +56,17 @@ printf '{"mcpServers":{"codegraph":{"command":"env","args":["CODEGRAPH_WASM_RELA
 printf '{"mcpServers":{"codegraph":{"command":"env","args":["CODEGRAPH_WASM_RELAUNCHED=1","CODEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$TARGET" > "$CFG_RAW"
 printf '{"mcpServers":{}}' > "$CFG_NOCG"
 
-echo "###### repo=$REPO tier=$TIER reps=$REPS model=${MODEL:-sonnet}/${EFFORT:-high}"
+# REP_START lets a later batch ADD reps without clobbering earlier jsonls
+# (e.g. REP_START=4 REPS=3 -> reps 4,5,6; default starts at 1).
+START="${REP_START:-1}"; END=$((START + REPS - 1))
+echo "###### repo=$REPO tier=$TIER reps=$START..$END model=${MODEL:-sonnet}/${EFFORT:-high}"
 echo "###### Q=$Q"
 echo "== ARM offload =="; prewarm "$TARGET" "CODEGRAPH_OFFLOAD_USAGE_LOG=$USAGE"
-for r in $(seq 1 "$REPS"); do run offload "$r" "$CFG_OFF" "$USAGE"; done
+for r in $(seq "$START" "$END"); do run offload "$r" "$CFG_OFF" "$USAGE"; done
 pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.codegraph/daemon.sock" 2>/dev/null; sleep 1
 echo "== ARM raw =="; prewarm "$TARGET" "CODEGRAPH_OFFLOAD_DISABLE=1"
-for r in $(seq 1 "$REPS"); do run raw "$r" "$CFG_RAW" "-"; done
+for r in $(seq "$START" "$END"); do run raw "$r" "$CFG_RAW" "-"; done
 pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.codegraph/daemon.sock" 2>/dev/null; sleep 1
 echo "== ARM nocg =="
-for r in $(seq 1 "$REPS"); do run nocg "$r" "$CFG_NOCG" "-"; done
+for r in $(seq "$START" "$END"); do run nocg "$r" "$CFG_NOCG" "-"; done
 echo "###### DONE $REPO"
