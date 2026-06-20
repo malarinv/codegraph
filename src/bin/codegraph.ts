@@ -36,10 +36,6 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
-import { writeOffloadConfig, resolveOffload } from '../reasoning/config';
-import { writeOffloadToken } from '../reasoning/credentials';
-import { startDeviceLogin, pollForToken, openBrowser } from '../reasoning/login';
-import { fetchUsage } from '../reasoning/reasoner';
 
 // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
 async function loadCodeGraph(): Promise<typeof import('../index')> {
@@ -1350,107 +1346,6 @@ program
       note: (m) => clack.log.success(m),
       done: (m) => clack.outro(m),
     });
-  });
-
-/**
- * codegraph login / logout — managed reasoning (CodeGraph AI).
- *
- * `login` runs a browser device-authorization flow against the CodeGraph dashboard,
- * mints the account's metered org token, and stores it (managed offload on). When
- * signed in, codegraph_explore reasons over its assembled source via the managed
- * gateway instead of returning the raw source dump. `logout` clears it.
- *
- * Bring-your-own endpoint is configured via the CODEGRAPH_OFFLOAD_URL /
- * CODEGRAPH_OFFLOAD_KEY / CODEGRAPH_OFFLOAD_MODEL env vars (see ../reasoning/config).
- */
-program
-  .command('login')
-  .description('Sign in to CodeGraph AI for managed reasoning — opens your browser to authorize')
-  .option('--no-browser', "Don't auto-open the browser; just print the URL to visit")
-  .action(async (opts: { browser?: boolean }) => {
-    try {
-      const start = await startDeviceLogin();
-      const url = start.verification_uri_complete ?? start.verification_uri;
-      info('To authorize, open this URL in your browser:');
-      info(`  ${url}`);
-      info(`and confirm the code:  ${start.user_code}`);
-      if (opts.browser !== false) await openBrowser(url);
-      info('Waiting for authorization…  (Ctrl-C to cancel)');
-      const token = await pollForToken(start.device_code, start.interval ?? 5, start.expires_in ?? 600);
-      writeOffloadConfig({ managed: true });
-      writeOffloadToken(token);
-      success('Signed in to CodeGraph AI — managed reasoning is on.');
-      try {
-        const usage = await fetchUsage();
-        if (usage) {
-          // Mirror `codegraph usage`'s precedence: a comped/internal account is
-          // flagged `unlimited` (often with remaining:0 when no allowance is set),
-          // so check that before the numeric balance or it reads "0 remaining".
-          if (usage.banned) warn('  Account suspended — contact support.');
-          else if (usage.unlimited) info('  credits: unlimited');
-          else if (typeof usage.remaining === 'number')
-            info(`  credits: ${usage.remaining.toLocaleString()} remaining`);
-        }
-      } catch {
-        /* balance is best-effort */
-      }
-      info('  Restart your editor/agent session for running MCP servers to pick it up.');
-    } catch (err) {
-      error(`Login failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-program
-  .command('logout')
-  .description('Sign out of CodeGraph AI (clears the saved token and turns off managed reasoning)')
-  .action(() => {
-    writeOffloadToken(null);
-    writeOffloadConfig(null);
-    success('Signed out of CodeGraph AI.');
-  });
-
-/**
- * codegraph usage — show the CodeGraph AI balance + recent usage (the server is the source of
- * truth; this just pings /v1/usage with the stored token). Degrades quietly when signed out or
- * unreachable — managed reasoning is optional, so this command never errors hard.
- */
-program
-  .command('usage')
-  .description('Show your CodeGraph AI balance and recent usage')
-  .action(async () => {
-    const cfg = resolveOffload();
-
-    if (!cfg.apiKey) {
-      if (cfg.url && cfg.managed) {
-        info('Signed out of CodeGraph AI. Run `codegraph login` to sign in.');
-      } else {
-        info('Not signed in to CodeGraph AI — codegraph_explore runs locally.');
-        info('Run `codegraph login` to use managed reasoning with your credits.');
-      }
-      return;
-    }
-
-    const usage = await fetchUsage();
-    if (!usage) {
-      if (cfg.managed) warn('Could not reach CodeGraph AI to read your balance — try again in a moment.');
-      else info(`Reasoning offload: your own endpoint (${cfg.url}) — no CodeGraph AI balance to show.`);
-      info('  (codegraph_explore still works locally regardless.)');
-      return;
-    }
-
-    success('CodeGraph AI');
-    if (usage.banned) warn('  Account suspended — contact support.');
-    else if (usage.unlimited) info('  Balance:  unlimited');
-    else if (typeof usage.remaining === 'number')
-      info(`  Balance:  ${usage.remaining.toLocaleString()} credits  ($${(usage.remaining / 100_000).toFixed(2)})`);
-    if (usage.plan) info(`  Plan:     ${usage.plan === 'payg' ? 'pay-as-you-go' : usage.plan}`);
-    if (typeof usage.tokensLast30 === 'number' || typeof usage.callsLast30 === 'number')
-      info(`  30 days:  ${(usage.callsLast30 ?? 0).toLocaleString()} explores · ${(usage.tokensLast30 ?? 0).toLocaleString()} tokens`);
-    // Only a subscription allowance resets each period; pay-as-you-go credits don't expire, so there's
-    // nothing to renew. Show a reset date only when there's an actual recurring allowance.
-    if (usage.periodEnd && (usage.allowance ?? 0) > 0)
-      info(`  Allowance resets: ${new Date(usage.periodEnd).toISOString().slice(0, 10)}`);
   });
 
 /**

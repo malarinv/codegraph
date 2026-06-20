@@ -20,9 +20,9 @@ describe('CODEGRAPH_MCP_TOOLS allowlist', () => {
   it('exposes ONLY codegraph_explore by default when unset', () => {
     delete process.env[ENV];
     // The default set (see DEFAULT_MCP_TOOLS) is pared to explore alone — the one
-    // tool that earns its place (verbatim source grouped by file, plus the reasoned
-    // flow map under the offload). node/search/callers/callees/impact/files/status
-    // stay defined and executable but unlisted; CODEGRAPH_MCP_TOOLS re-enables them.
+    // tool that earns its place (verbatim source grouped by file).
+    // node/search/callers/callees/impact/files/status stay defined and executable
+    // but unlisted; CODEGRAPH_MCP_TOOLS re-enables them.
     expect(listed()).toEqual(['codegraph_explore']);
   });
 

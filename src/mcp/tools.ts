@@ -29,7 +29,6 @@ import {
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
-import { isOffloadEnabled, synthesizeOffload } from '../reasoning/reasoner';
 
 /**
  * An expected, recoverable "codegraph can't serve this" condition — most
@@ -635,10 +634,9 @@ export function getStaticTools(): ToolDefinition[] {
 /**
  * The MCP tools served by DEFAULT (short names). Pared to ONLY `codegraph_explore`
  * — the single tool that reliably earns its place: one capped call returns the
- * verbatim source of the relevant symbols grouped by file (and, with the offload,
- * a reasoned flow map over that source). Every other tool is a narrower slice of
- * what explore already does, and presence itself steers mis-picks, so they are no
- * longer LISTED to agents.
+ * verbatim source of the relevant symbols grouped by file. Every other tool is a
+ * narrower slice of what explore already does, and presence itself steers
+ * mis-picks, so they are no longer LISTED to agents.
  *
  * The other defined tools (`node`, `search`, `callers`, plus callees/impact/files/
  * status) remain fully functional — handlers stay, the library API and CLI are
@@ -3152,16 +3150,6 @@ export class ToolHandler {
     // necessary overflow above the 24K budget, but hard-stop at 25K — never into
     // externalize territory.
     const output = flow.text + lines.join('\n');
-
-    // Reasoning offload (opt-in, bring-your-own endpoint): when configured, hand
-    // the assembled source + the query to a reasoning model and return its
-    // synthesized answer instead of the raw source dump. Reasons over the FULL
-    // assembled context (pre-truncation). Strictly degradable — any failure
-    // returns null and we fall through to returning the local source below.
-    if (isOffloadEnabled()) {
-      const synthesized = await synthesizeOffload({ query, context: output });
-      if (synthesized) return this.textResult(synthesized);
-    }
 
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
     if (output.length > hardCeiling) {
