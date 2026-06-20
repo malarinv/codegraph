@@ -1547,8 +1547,11 @@ export class ToolHandler {
    * whose qualifiedName contains another named token (`PmsProductServiceImpl::list`),
    * dropping unrelated `OmsOrderService::list`.
    */
-  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string> } {
-    const EMPTY = { text: '', pathNodeIds: new Set<string>(), namedNodeIds: new Set<string>(), uniqueNamedNodeIds: new Set<string>() };
+  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string>; spineCallSites: Map<string, number> } {
+    // spineCallSites: for each spine node, the line where it CALLS the next hop —
+    // lets the source assembler window an oversize spine method (e.g. n8n's 962-line
+    // processRunExecutionData) to the call site instead of dumping the whole body.
+    const EMPTY = { text: '', pathNodeIds: new Set<string>(), namedNodeIds: new Set<string>(), uniqueNamedNodeIds: new Set<string>(), spineCallSites: new Map<string, number>() };
     try {
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
       // Strip only a REAL file extension (Create.cs → Create); KEEP qualified
@@ -1578,8 +1581,13 @@ export class ToolHandler {
       // the dynamic-boundary scan (a token is covered when ANY of its nodes
       // lands on the main chain — overloads off the chain don't count against).
       const tokenNodes = new Map<string, string[]>();
+      // token → its full same-name callable family (before the container filter).
+      // A LARGE family that fails to connect on the chain is a polymorphic
+      // interface/registry dispatch — surfaced by buildPolymorphicBoundaries below.
+      const tokenFamily = new Map<string, Node[]>();
       for (const t of tokens) {
         const cands = this.findAllSymbols(cg, t).nodes.filter((n) => CALLABLE.has(n.kind));
+        tokenFamily.set(t, cands);
         // A qualified or otherwise-specific name (<=3 hits) keeps all; an
         // ambiguous simple name keeps only candidates whose container is named.
         const specific = cands.length <= 3;
@@ -1607,7 +1615,7 @@ export class ToolHandler {
         const boundaries = this.buildDynamicBoundaries(cg, [...named.values()], named);
         if (!boundaries) return EMPTY;
         const text = boundaries + '> Full source for these symbols is below.\n';
-        return { text, pathNodeIds: new Set(), namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds };
+        return { text, pathNodeIds: new Set(), namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds, spineCallSites: new Map<string, number>() };
       }
       const MAX_HOPS = 7;
       let best: Array<{ node: Node; edge: Edge | null }> | null = null;
@@ -1642,6 +1650,14 @@ export class ToolHandler {
       }
       const hasMain = !!best && best.length >= 3;
       const pathIds = new Set((best ?? []).map((s) => s.node.id));
+      // Where each spine node calls the NEXT hop (best[i+1].edge is the edge from
+      // best[i] → best[i+1]; its line is the call site inside best[i]'s body). Lets
+      // the assembler window an oversize spine method to the call instead of dumping it.
+      const spineCallSites = new Map<string, number>();
+      if (best) for (let i = 0; i < best.length - 1; i++) {
+        const ln = best[i + 1]?.edge?.line;
+        if (ln && ln > 0 && !spineCallSites.has(best[i]!.node.id)) spineCallSites.set(best[i]!.node.id, ln);
+      }
 
       // Dynamic-boundary scan (#687) — fires ONLY when the flow the agent
       // asked about did not fully connect: some token resolved to nodes but
@@ -1671,6 +1687,28 @@ export class ToolHandler {
             (uniqueNamedNodeIds.has(b.id) ? 1 : 0) - (uniqueNamedNodeIds.has(a.id) ? 1 : 0)));
           boundaryText = this.buildDynamicBoundaries(cg, scanList, named);
         }
+      }
+
+      // Interface/registry-dispatch announcement (extends #687 to GRAPH-visible
+      // polymorphism). A method the agent NAMED that resolves to a large same-name
+      // family AND did not land on the main chain is almost always a runtime
+      // dispatch (plugin/strategy/handler interface): the concrete target is chosen
+      // at runtime from N implementations, so no single static edge is the answer.
+      // The body-scan above can't see this — `nodeType.execute()` is textually an
+      // ordinary call; the polymorphism lives in the graph (implements edges), so
+      // detect it there. Fires ONLY for an uncovered named token; a connected flow
+      // stays silent.
+      let polyText = '';
+      {
+        const POLY_MIN_FAMILY = 8; // smaller families are overload sets, not dispatch
+        const polyCands: Array<{ token: string; family: Node[] }> = [];
+        for (const [t, fam] of tokenFamily) {
+          if (fam.length < POLY_MIN_FAMILY) continue;
+          const ids = tokenNodes.get(t) || [];
+          if (ids.some((id) => pathIds.has(id))) continue; // covered by the flow — silent
+          polyCands.push({ token: t, family: fam });
+        }
+        if (polyCands.length) polyText = this.buildPolymorphicBoundaries(cg, polyCands, named);
       }
 
       // Supplementary: dynamic-dispatch (synthesized) edges incident to a NAMED
@@ -1704,7 +1742,7 @@ export class ToolHandler {
         }
       }
 
-      if (!hasMain && synthLines.length === 0 && !boundaryText) return EMPTY;
+      if (!hasMain && synthLines.length === 0 && !boundaryText && !polyText) return EMPTY;
       const out: string[] = [];
       if (hasMain) {
         out.push('## Flow (call path among the symbols you queried)', '');
@@ -1725,13 +1763,14 @@ export class ToolHandler {
         );
       }
       if (boundaryText) out.push(boundaryText);
+      if (polyText) out.push(polyText);
       out.push('> Full source for these symbols is below — the call flow among them, followed by their bodies.', '');
       // namedNodeIds = every callable the agent explicitly named (a superset of
       // the spine). A file holding one is something the agent asked to SEE, so it
       // must keep full source even if it's an off-spine polymorphic sibling — the
       // agent named `getResponseWithInterceptorChain` / `SQLCompiler.execute_sql`
       // as the mechanism, not as an interchangeable leaf. See the skeleton gate.
-      return { text: out.join('\n'), pathNodeIds: pathIds, namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds };
+      return { text: out.join('\n'), pathNodeIds: pathIds, namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds, spineCallSites };
     } catch {
       return EMPTY;
     }
@@ -1789,6 +1828,93 @@ export class ToolHandler {
       ...notes,
       '',
       '> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run codegraph_explore or codegraph_node on a candidate; source for the sites above is included below.',
+      '',
+    ].join('\n');
+  }
+
+  /**
+   * Interface/registry-dispatch announcement — #687 extended to GRAPH-visible
+   * polymorphism (the body-scan can't see it: `nodeType.execute()` is textually
+   * an ordinary call; the polymorphism lives in the `implements`/`extends` edges).
+   *
+   * A method the agent named that resolves to a large same-name family whose
+   * definers overwhelmingly implement/extend ONE supertype is a runtime dispatch:
+   * the concrete target is chosen at runtime from N implementations, so no single
+   * static edge is "the answer" — the implementations ARE the continuations. We
+   * announce the supertype, its TRUE implementer count, and a few concrete targets,
+   * then steer to codegraph_explore. Graph-only, query-time, zero mutation; the
+   * caller fires it ONLY for an UNCOVERED named token, so a connected flow is silent.
+   *
+   * Robust to FTS sampling bias: the same-name family is a capped FTS sample that
+   * over-represents whatever FTS ranks first (n8n: DB `TableOperation.execute`
+   * outnumbered `INodeType.execute` in the sample 7:6 even though INodeType has
+   * 611 implementers vs a handful). So candidate supertypes are ranked by their
+   * TRUE graph-wide implementer count, NOT their frequency in the sample.
+   */
+  private buildPolymorphicBoundaries(cg: CodeGraph, candidates: Array<{ token: string; family: Node[] }>, named: Map<string, Node>): string {
+    const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'protocol', 'abstract']);
+    const MIN_IMPL = 8;     // a supertype needs >= this many implementers to count as "polymorphic"
+    const MIN_SUPPORT = 2;  // >= this many sampled definers must share the supertype (ties it to the token)
+    const SAMPLE = 40;      // family members inspected per token
+    const MAX_NOTES = 3;
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const containerOf = (m: Node): Node | null => {
+      try { const ce = cg.getIncomingEdges(m.id).find((e) => e.kind === 'contains'); return ce ? cg.getNode(ce.source) : null; }
+      catch { return null; }
+    };
+    const notes: string[] = [];
+    const seenSuper = new Set<string>();
+    for (const { token, family } of candidates) {
+      if (notes.length >= MAX_NOTES) break;
+      // supertype id → how many sampled definers share it + a few example definers
+      const supers = new Map<string, { node: Node; count: number; targets: Node[] }>();
+      for (const m of family.slice(0, SAMPLE)) {
+        const container = containerOf(m);
+        if (!container || !CLASSY.has(container.kind)) continue;
+        let sups: Node[] = [];
+        try {
+          sups = cg.getOutgoingEdges(container.id)
+            .filter((e) => e.kind === 'implements' || e.kind === 'extends')
+            .map((e) => { try { return cg.getNode(e.target); } catch { return null; } })
+            .filter((n): n is Node => !!n && CLASSY.has(n.kind) && (n.name?.length || 0) >= 3);
+        } catch { /* no supertypes — free function or unresolved */ }
+        for (const s of sups) {
+          const e = supers.get(s.id) || { node: s, count: 0, targets: [] };
+          e.count++;
+          if (e.targets.length < 6) e.targets.push(m);
+          supers.set(s.id, e);
+        }
+      }
+      // Pick the supertype with the most TRUE implementers (graph-wide), among
+      // those genuinely shared by the token's definers.
+      let best: { node: Node; impl: number; targets: Node[] } | null = null;
+      for (const { node, count, targets } of supers.values()) {
+        if (count < MIN_SUPPORT) continue;
+        let impl = 0;
+        try { impl = cg.getIncomingEdges(node.id).filter((e) => e.kind === 'implements' || e.kind === 'extends').length; }
+        catch { /* leave 0 — gated out below */ }
+        if (impl < MIN_IMPL) continue;
+        if (!best || impl > best.impl) best = { node, impl, targets };
+      }
+      if (!best || seenSuper.has(best.node.id)) continue;
+      seenSuper.add(best.node.id);
+      const namedNames = new Set([...named.values()].map((n) => n.name));
+      const eg = best.targets.slice(0, 4).map((m) => {
+        const cont = containerOf(m);
+        const disp = cont ? `${cont.name}.${m.name}` : (m.qualifiedName || m.name);
+        const mark = cont && namedNames.has(cont.name) ? ' ← you named this' : '';
+        return `\`${disp}\` (${rel(m.filePath)}:${m.startLine})${mark}`;
+      });
+      const more = best.impl > eg.length ? ` +${best.impl - eg.length} more` : '';
+      notes.push(`- \`${token}\` → runtime dispatch to **${best.impl}** types implementing \`${best.node.name}\` — the static path ends here, the target is chosen at runtime. e.g. ${eg.join(', ')}${more}`);
+    }
+    if (notes.length === 0) return '';
+    return [
+      '## Interface dispatch (a named method has many implementations)',
+      '',
+      ...notes,
+      '',
+      '> The method above is dispatched at runtime to one of the listed implementations (a registry / plugin / strategy interface) — there is no single static caller→callee edge; the implementations ARE the continuations. To follow one, run codegraph_explore on a listed target.',
       '',
     ].join('\n');
   }
@@ -2721,7 +2847,7 @@ export class ToolHandler {
         const n = cg.getNode(id);
         if (n && n.filePath === filePath && n.startLine > 0 && n.endLine > 0) rangeNodes.set(id, n);
       }
-      const ranges: Array<{ start: number; end: number; name: string; kind: string; importance: number }> = [...rangeNodes.values()]
+      const ranges: Array<{ start: number; end: number; name: string; kind: string; importance: number; spine: boolean; spineCallLine?: number }> = [...rangeNodes.values()]
         // Drop whole-file envelope nodes (containers covering >50% of the file).
         .filter(n => !(ENVELOPE_KINDS.has(n.kind) && (n.endLine - n.startLine + 1) > fileLines.length * 0.5))
         .map(n => {
@@ -2730,7 +2856,12 @@ export class ToolHandler {
           else if (flow.namedNodeIds.has(n.id)) importance = 9; // agent named it → keep its cluster
           else if (glueNodeIds.has(n.id)) importance = 6; // bridging caller/callee of an entry
           else if (connectedToEntry.has(n.id)) importance = 3;
-          return { start: n.startLine, end: n.endLine, name: n.name, kind: n.kind, importance };
+          // On the rendered call-path spine? That IS the flow answer — its cluster
+          // must never be dropped by the per-file budget (n8n's huge workflow-execute.ts:
+          // processRunExecutionData, the named flow ENTRY at L1562, is a large
+          // low-density method that lost the budget to denser blocks and got cut, so
+          // the agent Read it back — the very thing explore exists to prevent).
+          return { start: n.startLine, end: n.endLine, name: n.name, kind: n.kind, importance, spine: flow.pathNodeIds.has(n.id), spineCallLine: flow.spineCallSites.get(n.id) };
         });
 
       // Add edge source locations in this file — captures template references
@@ -2748,7 +2879,7 @@ export class ToolHandler {
           // Look up target name from subgraph first, fall back to edge kind
           const targetNode = subgraph.nodes.get(edge.target);
           const targetName = targetNode?.name ?? edge.kind;
-          ranges.push({ start: edge.line, end: edge.line, name: targetName, kind: edge.kind, importance: 2 });
+          ranges.push({ start: edge.line, end: edge.line, name: targetName, kind: edge.kind, importance: 2, spine: false });
         }
       }
 
@@ -2757,13 +2888,15 @@ export class ToolHandler {
       if (ranges.length === 0) continue;
 
       const gapThreshold = budget.gapThreshold;
-      const clusters: Array<{ start: number; end: number; symbols: string[]; score: number; maxImportance: number }> = [];
+      const clusters: Array<{ start: number; end: number; symbols: string[]; score: number; maxImportance: number; hasSpine: boolean; spineCallLine?: number }> = [];
       let current = {
         start: ranges[0]!.start,
         end: ranges[0]!.end,
         symbols: [`${ranges[0]!.name}(${ranges[0]!.kind})`],
         score: ranges[0]!.importance,
         maxImportance: ranges[0]!.importance,
+        hasSpine: ranges[0]!.spine,
+        spineCallLine: ranges[0]!.spineCallLine,
       };
 
       for (let i = 1; i < ranges.length; i++) {
@@ -2773,6 +2906,8 @@ export class ToolHandler {
           current.symbols.push(`${r.name}(${r.kind})`);
           current.score += r.importance;
           current.maxImportance = Math.max(current.maxImportance, r.importance);
+          current.hasSpine = current.hasSpine || r.spine;
+          current.spineCallLine = current.spineCallLine ?? r.spineCallLine;
         } else {
           clusters.push(current);
           current = {
@@ -2781,6 +2916,8 @@ export class ToolHandler {
             symbols: [`${r.name}(${r.kind})`],
             score: r.importance,
             maxImportance: r.importance,
+            hasSpine: r.spine,
+            spineCallLine: r.spineCallLine,
           };
         }
       }
@@ -2795,16 +2932,40 @@ export class ToolHandler {
       // get tail-trimmed with a marker.
       const contextPadding = 3;
       const withLineNumbers = exploreLineNumbersEnabled();
-      const buildSection = (c: { start: number; end: number }): string => {
+      // Language-neutral separator (no `//` — not a comment in Python, Ruby,
+      // etc.). With line numbers on, the line-number jump also signals the gap.
+      const GAP_MARKER = '\n\n... (gap) ...\n\n';
+      // An oversize spine method (the call path runs THROUGH a god-method — n8n's
+      // processRunExecutionData is 962 lines) is windowed to its next-hop CALL site
+      // plus the signature head, NOT dumped whole. Without this the cluster is too big
+      // for any per-file cap and gets dropped, so the agent Reads the method back —
+      // the exact gap this closes. Bounded, so a god-method can't blow the budget yet
+      // the spine's call still appears in context.
+      const OVERSIZE_SPINE_LINES = 200;
+      const SPINE_WINDOW = 28; // lines each side of the next-hop call site
+      const buildSection = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): string => {
+        if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES) {
+          const call = c.spineCallLine;
+          const winStart = Math.max(c.start, call - SPINE_WINDOW);
+          const winEnd = Math.min(c.end, call + SPINE_WINDOW);
+          const parts: string[] = [];
+          // Signature head, only when it sits clearly above the window (else the
+          // window already covers the method opening).
+          const headEnd = Math.min(c.start + 4, winStart - 2);
+          if (headEnd >= c.start) {
+            const head = fileLines.slice(c.start - 1, headEnd).join('\n');
+            parts.push(withLineNumbers ? numberSourceLines(head, c.start) : head);
+          }
+          const win = fileLines.slice(winStart - 1, winEnd).join('\n');
+          parts.push(withLineNumbers ? numberSourceLines(win, winStart) : win);
+          return parts.join(GAP_MARKER);
+        }
         const startIdx = Math.max(0, c.start - 1 - contextPadding);
         const endIdx = Math.min(fileLines.length, c.end + contextPadding);
         const slice = fileLines.slice(startIdx, endIdx).join('\n');
         // startIdx is 0-based, so the slice's first line is line startIdx + 1.
         return withLineNumbers ? numberSourceLines(slice, startIdx + 1) : slice;
       };
-      // Language-neutral separator (no `//` — not a comment in Python, Ruby,
-      // etc.). With line numbers on, the line-number jump also signals the gap.
-      const GAP_MARKER = '\n\n... (gap) ...\n\n';
 
       // Rank clusters for inclusion under the per-file cap. Entry-point
       // clusters come first: a cluster containing a query entry point
@@ -2819,6 +2980,11 @@ export class ToolHandler {
       const rankedClusters = clusters
         .map((c, i) => ({ idx: i, span: c.end - c.start + 1, c }))
         .sort((a, b) => {
+          // Spine clusters first — the rendered call path IS the flow answer, so it
+          // outranks any denser block of peripheral declarations (a low-density entry
+          // method must not lose the budget to them). Within spine / within non-spine,
+          // the existing importance → density → score → span order holds.
+          if (a.c.hasSpine !== b.c.hasSpine) return (b.c.hasSpine ? 1 : 0) - (a.c.hasSpine ? 1 : 0);
           if (b.c.maxImportance !== a.c.maxImportance) return b.c.maxImportance - a.c.maxImportance;
           const densityA = a.c.score / a.span;
           const densityB = b.c.score / b.span;
@@ -2834,6 +3000,11 @@ export class ToolHandler {
       // That source-order slice is what cut Django's `_fetch_all` (L2237, importance
       // 9 — agent-named) when query.py was the last of four big files to be emitted.
       const fileBudget = Math.min(budget.maxCharsPerFile, Math.max(0, budget.maxOutputChars - totalChars - 200));
+      // Spine ceiling: a flow-path cluster may exceed the per-file cap (the call
+      // path is the answer), but bounded — at most ~2.5× the per-file cap and never
+      // past what's left of the total output cap — so a pathological long in-file
+      // spine can't run away or starve co-flow files entirely.
+      const SPINE_CEILING = Math.min(budget.maxCharsPerFile * 2.5, Math.max(0, budget.maxOutputChars - totalChars - 200));
       const chosenIndices = new Set<number>();
       let projectedChars = 0;
       for (const rc of rankedClusters) {
@@ -2846,7 +3017,12 @@ export class ToolHandler {
           projectedChars += sectionLen;
           continue;
         }
-        if (projectedChars + sectionLen > fileBudget) continue;
+        // A spine cluster (the rendered call path) is the flow answer — include it
+        // past the per-file budget up to the spine ceiling; non-spine clusters obey
+        // the normal per-file budget.
+        const fits = projectedChars + sectionLen <= fileBudget;
+        const spineFits = rc.c.hasSpine && projectedChars + sectionLen <= SPINE_CEILING;
+        if (!fits && !spineFits) continue;
         chosenIndices.add(rc.idx);
         projectedChars += sectionLen;
       }
