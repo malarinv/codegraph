@@ -1681,9 +1681,20 @@ function reduxThunkEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] 
     while ((m = THUNK_DISPATCH_RE.exec(safe)) && added < THUNK_FANOUT_CAP) {
       const name = m[1]!;
       if (name === node.name) continue; // self-dispatch (recursive thunk) — skip
-      const target = ctx
+      // Resolve the dispatched name, PREFERRING the thunk/action-creator over a same-named
+      // service function. `dispatch(X(...))` dispatches a thunk or an action-creator (both
+      // `constant`s) — never an unrelated helper that merely shares the name. On octo-call,
+      // `leaveCall` is BOTH a `createAsyncThunk` const AND a service function, and the bare
+      // `.find()` picked the function (wrong). Order: thunk const > other const > same-file
+      // callable > first match. A single candidate (no collision) is unaffected.
+      const cands = ctx
         .getNodesByName(name)
-        .find((n) => n.kind === 'constant' || n.kind === 'function' || n.kind === 'method');
+        .filter((n) => n.kind === 'constant' || n.kind === 'function' || n.kind === 'method');
+      const target =
+        cands.find((n) => !!n.signature && THUNK_DECL_RE.test(n.signature)) ??
+        cands.find((n) => n.kind === 'constant') ??
+        cands.find((n) => n.filePath === node.filePath) ??
+        cands[0];
       if (!target || target.id === node.id) continue;
       const key = `${node.id}>${target.id}`;
       if (seen.has(key)) continue;

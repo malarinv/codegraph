@@ -79,4 +79,51 @@ export const notAThunk = 'dispatch(innerThunk())';
     expect(outer.via).toBe('innerThunk');
     expect(outer.registeredAt).toMatch(/thunks\.ts:\d+/);
   });
+
+  it('on a name collision, a dispatch resolves to the THUNK, not a same-named service function', async () => {
+    // Regression for the octo-call case: `leaveCall` exists as BOTH a `createAsyncThunk`
+    // const and an unrelated service function. `dispatch(leaveCall())` targets the thunk,
+    // but the old first-match resolver could pick the function. The resolver now prefers a
+    // thunk-signature const > other const > same-file > first.
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'app', dependencies: { '@reduxjs/toolkit': '^2' } })
+    );
+    // A plain service function that shares the name `leaveCall` with the thunk below.
+    fs.writeFileSync(path.join(dir, 'service.ts'), `export function leaveCall(id: string) { return id; }\n`);
+    fs.writeFileSync(
+      path.join(dir, 'thunks.ts'),
+      `import { createAsyncThunk } from '@reduxjs/toolkit';
+
+export const leaveCall = createAsyncThunk('call/leave', async () => {
+  return 1;
+});
+
+export const logout = createAsyncThunk('user/logout', async (_: void, { dispatch }) => {
+  dispatch(leaveCall());
+});
+`
+    );
+
+    const cg = await CodeGraph.init(dir, { silent: true });
+    await cg.indexAll();
+
+    const db = (cg as any).db.db;
+    const row = db
+      .prepare(
+        `SELECT t.kind target_kind, t.file_path target_file
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'redux-thunk'
+           AND s.name = 'logout' AND t.name = 'leaveCall'`
+      )
+      .get();
+    cg.close?.();
+
+    expect(row).toBeTruthy();
+    // Resolved to the createAsyncThunk constant in thunks.ts, NOT service.ts's function.
+    expect(row.target_kind).toBe('constant');
+    expect(row.target_file).toMatch(/thunks\.ts$/);
+  });
 });

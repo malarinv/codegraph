@@ -1528,6 +1528,13 @@ export class ToolHandler {
         registeredAt,
       };
     }
+    // Generic fallback for any other synthesizer (redux-thunk, gin-middleware-chain,
+    // flutter-build, …): a synthesized hop must never read as a bare static `calls`.
+    // It's a dynamic-dispatch bridge — label it as one and keep its wiring site.
+    if (typeof m?.synthesizedBy === 'string') {
+      const kind = m.synthesizedBy.replace(/-/g, ' ');
+      return { label: `${kind} (dynamic dispatch)`, compact: `dynamic: ${kind}${at}`, registeredAt };
+    }
     return null;
   }
 
@@ -1583,8 +1590,20 @@ export class ToolHandler {
       // A LARGE family that fails to connect on the chain is a polymorphic
       // interface/registry dispatch — surfaced by buildPolymorphicBoundaries below.
       const tokenFamily = new Map<string, Node[]>();
+      // Non-callable endpoints (CONSTANT/VARIABLE/FIELD) connected by a SYNTHESIZED
+      // edge. RTK thunks are `const X = createAsyncThunk(...)`, so a thunk→thunk hop
+      // is constant→constant — the CALLABLE-only `named` set can't hold it, and
+      // without this the hop is invisible to the Flow path at every tier (the
+      // Relationships section catches it only on repos ≥500 files). Kept SEPARATE
+      // from `named` (which drives the call-chain + source sizing, callable-only);
+      // fed only to the dynamic-dispatch-links scan below.
+      const dynNamed = new Map<string, Node>();
+      const DYN_KINDS = new Set(['constant', 'variable', 'field', 'property']);
+      const hasHeuristicEdge = (id: string): boolean =>
+        [...cg.getCallers(id), ...cg.getCallees(id)].some(({ edge }) => edge.provenance === 'heuristic');
       for (const t of tokens) {
-        const cands = this.findAllSymbols(cg, t).nodes.filter((n) => CALLABLE.has(n.kind));
+        const hits = this.findAllSymbols(cg, t).nodes;
+        const cands = hits.filter((n) => CALLABLE.has(n.kind));
         tokenFamily.set(t, cands);
         // A qualified or otherwise-specific name (<=3 hits) keeps all; an
         // ambiguous simple name keeps only candidates whose container is named.
@@ -1602,18 +1621,58 @@ export class ToolHandler {
           named.set(n.id, n);
           if (specific) uniqueNamedNodeIds.add(n.id);
         }
+        // Same token, non-callable synth endpoints (capped, precision-gated on an
+        // actual heuristic edge so plain config constants never qualify).
+        if (dynNamed.size < 12) {
+          for (const n of hits) {
+            if (CALLABLE.has(n.kind) || !DYN_KINDS.has(n.kind) || dynNamed.has(n.id)) continue;
+            if (hasHeuristicEdge(n.id)) dynNamed.set(n.id, n);
+            if (dynNamed.size >= 12) break;
+          }
+        }
         if (named.size > 40) break;
       }
+      // Surface synthesized (heuristic) edges incident to a named symbol — INCLUDING
+      // the non-callable CONSTANT endpoints in `dynNamed`. `skipInChain` drops a hop
+      // already shown in the rendered main chain (a 2-node chain renders nothing, so a
+      // direct named→named synth hop still surfaces — #687).
+      const collectSynthLinks = (skipInChain: ((e: Edge) => boolean) | null): string[] => {
+        const synthLines: string[] = [];
+        const synthSeen = new Set<string>();
+        for (const n of [...named.values(), ...dynNamed.values()]) {
+          if (synthLines.length >= 6) break;
+          for (const { node: other, edge } of [...cg.getCallers(n.id), ...cg.getCallees(n.id)]) {
+            if (synthLines.length >= 6) break;
+            if (edge.provenance !== 'heuristic' || other.id === n.id) continue;
+            if (skipInChain && skipInChain(edge)) continue;
+            const src = edge.source === n.id ? n : other;
+            const tgt = edge.source === n.id ? other : n;
+            const key = `${src.name}>${tgt.name}`;
+            if (synthSeen.has(key)) continue;
+            synthSeen.add(key);
+            const note = this.synthEdgeNote(edge);
+            synthLines.push(`- ${src.name} → ${tgt.name}   [${note ? note.compact : edge.kind}]`);
+          }
+        }
+        return synthLines;
+      };
       if (named.size < 2) {
-        // The agent named a flow but only one side resolved (the other end is
-        // anonymous / runtime-registered / not extracted). The resolved side's
-        // body may still hold the dynamic-dispatch site that EXPLAINS the gap —
-        // surface that instead of silently returning nothing.
-        if (named.size === 0) return EMPTY;
-        const boundaries = this.buildDynamicBoundaries(cg, [...named.values()], named);
-        if (!boundaries) return EMPTY;
-        const text = boundaries + '> Full source for these symbols is below.\n';
-        return { text, pathNodeIds: new Set(), namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds, spineCallSites: new Map<string, number>() };
+        // <2 CALLABLES resolved. Two recoveries before giving up: (1) synthesized
+        // edges among named CONSTANT/VARIABLE endpoints — RTK thunk→thunk is
+        // constant→constant, so `named` can be empty while `dynNamed` holds the
+        // whole chain; (2) the one resolved callable's body may hold the
+        // dynamic-dispatch site that EXPLAINS a half-connected flow.
+        const synthLines = collectSynthLinks(null);
+        const boundaries = named.size === 0 ? '' : (this.buildDynamicBoundaries(cg, [...named.values()], named) || '');
+        if (synthLines.length === 0 && !boundaries) return EMPTY;
+        const out: string[] = [];
+        if (synthLines.length) out.push(
+          '## Dynamic-dispatch links among your symbols',
+          '(synthesized — the indirect hops grep/Read would reconstruct; the `@file:line` is the wiring site)',
+          '', ...synthLines, '');
+        if (boundaries) out.push(boundaries);
+        out.push('> Full source for these symbols is below.\n');
+        return { text: out.join('\n'), pathNodeIds: new Set(), namedNodeIds: new Set<string>([...named.keys(), ...dynNamed.keys()]), uniqueNamedNodeIds, spineCallSites: new Map<string, number>() };
       }
       const MAX_HOPS = 7;
       let best: Array<{ node: Node; edge: Edge | null }> | null = null;
@@ -1709,36 +1768,16 @@ export class ToolHandler {
         if (polyCands.length) polyText = this.buildPolymorphicBoundaries(cg, polyCands, named);
       }
 
-      // Supplementary: dynamic-dispatch (synthesized) edges incident to a NAMED
-      // symbol — the indirect hops an agent would otherwise grep/Read to
-      // reconstruct ("where do the appended `validators` actually run?"). The
-      // synth edge IS that answer, so surface it even when the OTHER end wasn't
-      // named (e.g. the agent names `validate` but not the `didCompleteTask`
-      // that drains the collection). On-topic by construction: only heuristic
-      // edges touching a symbol the agent named; skipped when the hop already
-      // shows in the main chain.
-      const synthLines: string[] = [];
-      const synthSeen = new Set<string>();
-      for (const n of named.values()) {
-        if (synthLines.length >= 6) break;
-        for (const { node: other, edge } of [...cg.getCallers(n.id), ...cg.getCallees(n.id)]) {
-          if (synthLines.length >= 6) break;
-          if (edge.provenance !== 'heuristic' || other.id === n.id) continue;
-          // "Already in the main chain" only applies when a chain RENDERS
-          // (hasMain). A 2-node chain populates pathIds but renders nothing,
-          // so a direct synthesized hop between two named symbols (custom
-          // EventBus emit→handler, #687) was invisible — too short for Flow,
-          // skipped here as in-chain. Surface it.
-          if (hasMain && pathIds.has(edge.source) && pathIds.has(edge.target)) continue;
-          const src = edge.source === n.id ? n : other;
-          const tgt = edge.source === n.id ? other : n;
-          const key = `${src.name}>${tgt.name}`;
-          if (synthSeen.has(key)) continue;
-          synthSeen.add(key);
-          const note = this.synthEdgeNote(edge);
-          synthLines.push(`- ${src.name} → ${tgt.name}   [${note ? note.compact : edge.kind}]`);
-        }
-      }
+      // Supplementary: dynamic-dispatch (synthesized) edges incident to a named
+      // symbol (incl. the non-callable CONSTANT endpoints in `dynNamed`) — the
+      // indirect hops an agent would otherwise grep/Read to reconstruct ("where do
+      // the appended `validators` actually run?"). Surfaced even when the OTHER end
+      // wasn't named. The skip drops a hop already in the rendered main chain; a
+      // 2-node chain renders nothing (hasMain false) so a direct named→named synth
+      // hop still surfaces — too short for Flow, but #687-visible here.
+      const synthLines = collectSynthLinks(
+        hasMain ? (e: Edge) => pathIds.has(e.source) && pathIds.has(e.target) : null
+      );
 
       if (!hasMain && synthLines.length === 0 && !boundaryText && !polyText) return EMPTY;
       const out: string[] = [];
@@ -1768,7 +1807,7 @@ export class ToolHandler {
       // must keep full source even if it's an off-spine polymorphic sibling — the
       // agent named `getResponseWithInterceptorChain` / `SQLCompiler.execute_sql`
       // as the mechanism, not as an interchangeable leaf. See the skeleton gate.
-      return { text: out.join('\n'), pathNodeIds: pathIds, namedNodeIds: new Set(named.keys()), uniqueNamedNodeIds, spineCallSites };
+      return { text: out.join('\n'), pathNodeIds: pathIds, namedNodeIds: new Set<string>([...named.keys(), ...dynNamed.keys()]), uniqueNamedNodeIds, spineCallSites };
     } catch {
       return EMPTY;
     }
