@@ -2415,6 +2415,95 @@ function mediatrDispatchEdges(ctx: ResolutionContext): Edge[] {
   return edges;
 }
 
+// ── Sidekiq job dispatch (Ruby) ───────────────────────────────────────────────
+// Sidekiq decouples a job's enqueue site from the worker's `perform`, linked by the WORKER
+// CLASS NAME:
+//   # app/workers/destroy_user_worker.rb
+//   class DestroyUserWorker
+//     include Sidekiq::Worker          # or Sidekiq::Job (the modern alias)
+//     def perform(user_id) … end
+//   # app/services/… — a DIFFERENT file
+//   DestroyUserWorker.perform_async(user.id)   # also .perform_in(t, …) / .perform_at(t, …)
+// Bridge it: link the enclosing method at each `Worker.perform_async/_in/_at(…)` site → that
+// worker's instance `perform`. Name-keyed (like Celery): the receiver class must be a Sidekiq
+// worker — gated by reading `include Sidekiq::Job|Worker` from the class body, since that mixin
+// is an external gem module that forms no resolvable edge. ActiveJob's `perform_later`/`_now` is
+// a different shape and deliberately not matched, so an ActiveJob-only app yields 0.
+const SIDEKIQ_DISPATCH_RE = /([A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*)\s*\.\s*perform_(?:async|in|at)\b/g;
+const SIDEKIQ_WORKER_RE = /\binclude\s+Sidekiq::(?:Job|Worker)\b/;
+const SIDEKIQ_RB_EXT = /\.rb$/;
+const SIDEKIQ_FANOUT_CAP = 80;
+
+function sidekiqDispatchEdges(ctx: ResolutionContext): Edge[] {
+  // class node id → its instance `perform` method (null if the class isn't a Sidekiq worker),
+  // memoized. Reads the class body for the mixin; only consulted for actual dispatch receivers.
+  const performCache = new Map<string, Node | null>();
+  const performOf = (cls: Node): Node | null => {
+    let v = performCache.get(cls.id);
+    if (v !== undefined) return v;
+    v = null;
+    const content = ctx.readFile(cls.filePath);
+    if (content) {
+      const end = cls.endLine ?? cls.startLine;
+      const body = content.split('\n').slice(cls.startLine - 1, end).join('\n');
+      if (SIDEKIQ_WORKER_RE.test(body)) {
+        v = ctx.getNodesInFile(cls.filePath).find(
+          (n) => n.kind === 'method' && n.name === 'perform' && n.startLine >= cls.startLine && n.startLine <= end
+        ) ?? null;
+      }
+    }
+    performCache.set(cls.id, v);
+    return v;
+  };
+
+  // Resolve a (possibly namespaced) worker reference to its `perform`. A namespaced ref is
+  // matched by EXACT qualified name first, so same-named workers in different namespaces
+  // (forem has four `SendEmailNotificationWorker`s) resolve to the right one; an unqualified
+  // ref falls back to the simple name and links only when a single worker bears it — an
+  // ambiguous collision bails (precision over recall).
+  const resolve = (ref: string): Node | null => {
+    if (ref.includes('::')) {
+      const q = ctx.getNodesByQualifiedName(ref).find((n) => n.kind === 'class' && performOf(n));
+      if (q) return performOf(q);
+    }
+    const workers = ctx.getNodesByName(ref.split('::').pop()!).filter((n) => n.kind === 'class' && performOf(n));
+    return workers.length === 1 ? performOf(workers[0]!) : null;
+  };
+
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const file of ctx.getAllFiles()) {
+    if (!SIDEKIQ_RB_EXT.test(file)) continue;
+    const content = ctx.readFile(file);
+    if (!content || !/\.perform_(?:async|in|at)\b/.test(content)) continue;
+    const safe = stripCommentsForRegex(content, 'ruby');
+    const nodesInFile = ctx.getNodesInFile(file);
+    SIDEKIQ_DISPATCH_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    let added = 0;
+    while ((m = SIDEKIQ_DISPATCH_RE.exec(safe)) && added < SIDEKIQ_FANOUT_CAP) {
+      const line = safe.slice(0, m.index).split('\n').length;
+      const disp = enclosingFn(nodesInFile, line);
+      if (!disp) continue;
+      const target = resolve(m[1]!);
+      if (!target || target.id === disp.id) continue;
+      const key = `${disp.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: disp.id,
+        target: target.id,
+        kind: 'calls',
+        line,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'sidekiq-dispatch', via: m[1]!, registeredAt: `${file}:${line}` },
+      });
+      added++;
+    }
+  }
+  return edges;
+}
+
 /**
  * Synthesize dispatcher→callback edges (field observers + EventEmitters +
  * React re-render + JSX children + Vue templates + SvelteKit load + RN event
@@ -2422,7 +2511,8 @@ function mediatrDispatchEdges(ctx: ResolutionContext): Edge[] {
  * Redux-thunk dispatch chain + object-literal registry dispatch + RTK Query
  * generated-hook → endpoint + Pinia useStore().action() + Vuex string dispatch +
  * Celery task .delay()/.apply_async() → task body + Spring publishEvent → @EventListener +
- * MediatR Send/Publish → IRequestHandler/INotificationHandler).
+ * MediatR Send/Publish → IRequestHandler/INotificationHandler +
+ * Sidekiq Worker.perform_async → #perform).
  * Returns the count added. Never throws into indexing — callers wrap in try/catch.
  */
 export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionContext): number {
@@ -2468,6 +2558,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
   const celeryEdges = celeryDispatchEdges(ctx);
   const springEdges = springEventEdges(ctx);
   const mediatrEdges = mediatrDispatchEdges(ctx);
+  const sidekiqEdges = sidekiqDispatchEdges(ctx);
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -2499,6 +2590,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     ...celeryEdges,
     ...springEdges,
     ...mediatrEdges,
+    ...sidekiqEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;
