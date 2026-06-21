@@ -76,7 +76,7 @@ In a **new terminal**, run the installer to connect CodeGraph to the agents you 
 codegraph install
 ```
 
-<sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own. (Shortcut: `npx @colbymchenry/codegraph` downloads and runs this in one go.)</sub>
+<sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own. It only wires up your agent — it does **not** index any code; building each project's graph is the separate `codegraph init` in step 3. (Shortcut: `npx @colbymchenry/codegraph` downloads and runs this in one go.)</sub>
 
 ### 3. Initialize each project
 
@@ -262,7 +262,7 @@ agent writes src/Widget.ts
   → next agent query sees it
 ```
 
-**Verify any time** with `codegraph_status` (via MCP) or `codegraph status` (CLI). If anything is pending, you'll see a `### Pending sync:` section naming the files and their edit age.
+**Verify any time** with `codegraph status` (CLI). If anything is pending, you'll see a `### Pending sync:` section naming the files and their edit age.
 
 The handful of cases where manual `codegraph sync` makes sense: the watcher is disabled (sandboxed environments, or `CODEGRAPH_NO_DAEMON=1`), or you're scripting against the index outside an agent session and want a pre-flight sync at the start of your script.
 
@@ -300,7 +300,7 @@ CodeGraph detects web-framework routing files and emits `route` nodes linked by 
 
 ## Mixed iOS / React Native / Expo bridging
 
-Real iOS and React Native codebases live across multiple languages — a Swift caller invokes an Objective-C selector that's been auto-bridged, a JS file calls into a native module via the React Native bridge, a JSX component delegates to a native view manager. Static tree-sitter extraction stops at each language boundary. CodeGraph bridges them so `trace`, `callers`, `callees`, and `impact` connect end-to-end across the gap.
+Real iOS and React Native codebases live across multiple languages — a Swift caller invokes an Objective-C selector that's been auto-bridged, a JS file calls into a native module via the React Native bridge, a JSX component delegates to a native view manager. Static tree-sitter extraction stops at each language boundary. CodeGraph bridges them so `codegraph_explore` connects the flow end-to-end across the gap — call paths and blast radius cross the boundary instead of stopping at it.
 
 | Boundary | JS / Swift side | Native side | How |
 |---|---|---|---|
@@ -339,9 +339,10 @@ The installer will:
 - Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes Agent**, **Gemini CLI**, **Antigravity IDE**, **Kiro**
 - Prompt to install `codegraph` on your PATH (so agents can launch the MCP server)
 - Ask whether configs apply to all your projects or just this one
-- Write each chosen agent's MCP server config, plus a small marker-fenced CodeGraph section in the agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`) — that's how subagents and non-MCP agents learn the `codegraph explore` / `codegraph node` commands, since the MCP server's own guidance only reaches the main agent. Removed cleanly by `codegraph uninstall`.
+- Write each chosen agent's MCP server config, plus a small marker-fenced CodeGraph section in the agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`) — that's how subagents and non-MCP agents learn the `codegraph explore` command, since the MCP server's own guidance only reaches the main agent. Removed cleanly by `codegraph uninstall`.
 - Set up auto-allow permissions when Claude Code is one of the targets
-- Initialize your current project (local installs only)
+
+The installer **wires up your agents only — it does not index your code.** After it finishes, build each project's graph yourself with `codegraph init` (step 3). One global `codegraph install` covers every project; you run `codegraph init` once per project.
 
 **Non-interactive (scripting / CI):**
 
@@ -401,18 +402,13 @@ npm install -g @colbymchenry/codegraph
 {
   "permissions": {
     "allow": [
-      "mcp__codegraph__codegraph_search",
-      "mcp__codegraph__codegraph_explore",
-      "mcp__codegraph__codegraph_callers",
-      "mcp__codegraph__codegraph_callees",
-      "mcp__codegraph__codegraph_impact",
-      "mcp__codegraph__codegraph_node",
-      "mcp__codegraph__codegraph_status",
-      "mcp__codegraph__codegraph_files"
+      "mcp__codegraph__*"
     ]
   }
 }
 ```
+
+<sub>One wildcard auto-approves every CodeGraph tool — `codegraph_explore` is the only one listed by default, but if you re-enable others via `CODEGRAPH_MCP_TOOLS` they're already permitted, no prompt.</sub>
 
 </details>
 
@@ -422,11 +418,11 @@ npm install -g @colbymchenry/codegraph
 CodeGraph's MCP server delivers its usage guidance to your agent **automatically**, in the MCP `initialize` response. In short, it tells the agent to:
 
 - **Answer structural questions directly with CodeGraph** — it *is* the pre-built index, so a grep/read loop just repeats work it already did. Treat the returned source as already read.
-- **Pick the tool by intent:** `codegraph_explore` for almost anything — "how does X work", a flow/"how does X reach Y", or surveying an area (one call returns the relevant symbols' source grouped by file); `codegraph_search` to just locate a symbol; `codegraph_callers` for every call site (including callback registrations); `codegraph_node` for one symbol's full source + callers, or to read a file like the Read tool.
+- **Reach for `codegraph_explore` for almost anything** — "how does X work", a flow/"how does X reach Y", or surveying an area. One call returns the relevant symbols' verbatim source grouped by file, the call paths between them (dynamic-dispatch hops included), and a blast-radius summary. Name a file or symbol in the query to read its current line-numbered source.
 - **Trust the results — don't re-verify with grep**, and check the staleness banner after edits.
 - In a workspace with no index, CodeGraph announces itself inactive and serves no tools — indexing stays your decision.
 
-The exact text is `src/mcp/server-instructions.ts` — the single source of truth for the main agent. Because subagents and non-MCP harnesses never see the MCP guidance, the installer also writes a four-line marker-fenced section into the agent's instructions file pointing at the `codegraph explore` / `codegraph node` CLI equivalents.
+The exact text is `src/mcp/server-instructions.ts` — the single source of truth for the main agent. Because subagents and non-MCP harnesses never see the MCP guidance, the installer also writes a short marker-fenced section into the agent's instructions file pointing at the `codegraph explore` CLI equivalent.
 
 </details>
 
@@ -447,7 +443,7 @@ The exact text is `src/mcp/server-instructions.ts` — the single source of trut
 ┌───────────────────────────────────────────────────────────────────┐
 │                        CodeGraph MCP Server                       │
 │                                                                   │
-│       explore · search · callers · callees · impact · node        │
+│ explore  ·  one call → verbatim source + call flow + blast radius │
 │                                 │                                 │
 │                                 ▼                                 │
 │                       SQLite knowledge graph                      │
@@ -471,7 +467,7 @@ The exact text is `src/mcp/server-instructions.ts` — the single source of trut
 codegraph                         # Run interactive installer
 codegraph install                 # Run installer (explicit)
 codegraph uninstall               # Remove CodeGraph from your agents (inverse of install)
-codegraph init [path]             # Initialize in a project (--index to also index)
+codegraph init [path]             # Initialize a project + build its graph (one step)
 codegraph uninit [path]           # Remove CodeGraph from a project (--force to skip prompt)
 codegraph index [path]            # Full index (--force to re-index, --quiet for less output)
 codegraph sync [path]             # Incremental update
@@ -524,16 +520,13 @@ fi
 
 ## MCP Tools
 
-When running as an MCP server, CodeGraph exposes a focused set of four tools — measured agent behavior showed a leaner list steers agents to the right tool and saves context every session:
+When running as an MCP server, CodeGraph exposes a **single tool** — `codegraph_explore`. Measured agent behavior showed that one strong tool steers agents better than a menu of narrower ones — fewer mis-picks, and it saves context every session:
 
 | Tool | Purpose |
 |------|---------|
-| `codegraph_explore` | **Primary.** Answer almost any question in one call — "how does X work", a flow ("how does X reach Y"), or surveying an area — returning the relevant symbols' verbatim source grouped by file, plus a relationship map and blast radius. Surfaces dynamic-dispatch hops (callbacks, React re-render, interface→impl) grep can't follow. |
-| `codegraph_node` | One symbol's full source + caller/callee trail (every overload for an ambiguous name) — or pass a file path to **read a whole file like the Read tool** (same line-numbered output, `offset`/`limit`), with its dependents attached. |
-| `codegraph_search` | Find symbols by name across the codebase |
-| `codegraph_callers` | Every call site of a function — including where it's registered as a callback — with one section per definition when several share a name |
+| `codegraph_explore` | Answer almost any question in one call — "how does X work", a flow ("how does X reach Y"), or surveying an area — returning the relevant symbols' verbatim source grouped by file, plus the call paths between them and a blast-radius summary. Surfaces dynamic-dispatch hops (callbacks, React re-render, interface→impl) grep can't follow. Name a file or symbol in the query to read its current line-numbered source, the same shape the Read tool gives you. |
 
-Four more tools (`codegraph_callees`, `codegraph_impact`, `codegraph_files`, `codegraph_status`) stay fully functional but unlisted by default — measured across eval runs, agents never or rarely picked them, and their information already arrives inline on the four above (explore's blast-radius section, node's dependents note, a symbol's body as its callee list). Re-enable any of them with the `CODEGRAPH_MCP_TOOLS` environment variable (e.g. `CODEGRAPH_MCP_TOOLS=explore,node,search,callers,impact`), or use their CLI equivalents (`codegraph callees` / `impact` / `files` / `status`).
+The other tools (`codegraph_node`, `codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact`, `codegraph_files`, `codegraph_status`) stay fully functional but **unlisted by default** — everything they return already arrives inline on `codegraph_explore` (its blast-radius section, the relationship map, a symbol's body as its callee list). Re-enable any of them for the MCP surface with the `CODEGRAPH_MCP_TOOLS` environment variable (e.g. `CODEGRAPH_MCP_TOOLS=explore,node,search,callers`), or use their CLI equivalents (`codegraph node` / `query` / `callers` / `callees` / `impact` / `files` / `status`).
 
 In a workspace with no `.codegraph/` index, the server announces itself inactive and lists **no** tools — agents work normally with their built-in tools, and indexing stays your decision.
 

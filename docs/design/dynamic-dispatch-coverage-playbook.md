@@ -7,6 +7,9 @@ each one the same way, so cross-symbol *flows* exist in the graph everywhere.
 
 > This is the top-level playbook. The deep design for one mechanism (the callback
 > synthesizer) is in [`callback-edge-synthesis.md`](./callback-edge-synthesis.md).
+> The cross-cutting **dispatch-shape** queue (Redux/RTK Query/NgRx/MediatR/registries —
+> organized by indirection shape, not language×framework) is in
+> [`dispatch-synthesizer-backlog.md`](./dispatch-synthesizer-backlog.md).
 > Full investigation context + findings: auto-memory `project_codegraph_read_displacement`.
 
 > **Update (2026-06-01):** the `codegraph_trace` and `codegraph_context` MCP tools were

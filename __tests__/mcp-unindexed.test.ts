@@ -116,7 +116,7 @@ describe('Unindexed-workspace session policy', () => {
     expect(instructions).toMatch(/inactive/i);
     expect(instructions).toMatch(/codegraph init/);
     // The full playbook must NOT be sent into a session where every call fails
-    expect(instructions).not.toMatch(/Tool selection by intent/);
+    expect(instructions).not.toMatch(/How to query/);
     expect(instructions).not.toMatch(/codegraph_explore/);
   });
 
@@ -128,7 +128,7 @@ describe('Unindexed-workspace session policy', () => {
     expect((res.result as { tools: unknown[] }).tools).toEqual([]);
   });
 
-  it('an INDEXED workspace still gets the full playbook and all tools', async () => {
+  it('an INDEXED workspace still gets the full playbook and the explore tool', async () => {
     fs.writeFileSync(path.join(tempDir, 'index.ts'), 'export function hello(): string { return "hi"; }\n');
     const cg = await CodeGraph.init(tempDir, { index: true });
     cg.close();
@@ -136,15 +136,15 @@ describe('Unindexed-workspace session policy', () => {
     child = spawnServer(tempDir);
     const init = await request(child, { id: 0, method: 'initialize', params: initializeParams(tempDir) });
     const instructions = (init.result as { instructions: string }).instructions;
-    expect(instructions).toMatch(/Tool selection by intent/);
+    expect(instructions).toMatch(/How to query/);
     expect(instructions).not.toMatch(/inactive/i);
 
     const list = await request(child, { id: 1, method: 'tools/list' });
     const tools = (list.result as { tools: Array<{ name: string }> }).tools;
-    // A 1-file project triggers the pre-existing tiny-repo tool gating (a
-    // reduced core set) — the contract under test is "indexed → tools are
-    // PRESENT", in contrast to the unindexed empty list above.
-    expect(tools.length).toBeGreaterThanOrEqual(3);
+    // The default surface is pared to explore alone (see DEFAULT_MCP_TOOLS) — the
+    // contract under test is "indexed → tools are PRESENT", in contrast to the
+    // unindexed empty list above.
+    expect(tools.length).toBeGreaterThanOrEqual(1);
     expect(tools.map((t) => t.name)).toContain('codegraph_explore');
   });
 });
