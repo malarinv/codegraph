@@ -1923,12 +1923,93 @@ function rtkQueryEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
   return edges;
 }
 
+// ── Pinia useStore().action() dispatch bridge ────────────────────────────────
+// A Pinia store factory `export const useXStore = defineStore(...)` exposes its
+// actions as methods on the store instance; a consumer does `const s = useXStore()`
+// then `s.action()`. The call is a method-on-instance with no static edge to the
+// action (which lives in the store's module). Bridge it: map each factory → its
+// file, bind `const <var> = useXStore()` per consumer file, and link the enclosing
+// function → the `<var>.method()` action node IN THE STORE'S FILE. The same-store-
+// file gate keeps it precise (a Pinia built-in like `$patch` or an unrelated
+// same-named method resolves to nothing). Covers both the options and setup store
+// forms uniformly (the action is a function node in the store file either way).
+const PINIA_CONSUMER_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/;
+const PINIA_FACTORY_RE = /\b(?:export\s+)?const\s+(\w+)\s*=\s*defineStore\s*\(/g;
+const PINIA_BIND_RE = /\bconst\s+(\w+)\s*=\s*(?:await\s+)?(\w+)\s*\(/g;
+const PINIA_CALL_RE = /(\w+)\s*\.\s*(\w+)\s*\(/g;
+const PINIA_FANOUT_CAP = 80;
+
+function piniaStoreEdges(ctx: ResolutionContext): Edge[] {
+  // 1. Map each `const useXStore = defineStore(...)` factory → its store file.
+  const factoryFile = new Map<string, string>();
+  for (const file of ctx.getAllFiles()) {
+    if (!PINIA_CONSUMER_EXT.test(file)) continue;
+    const content = ctx.readFile(file);
+    if (!content || !content.includes('defineStore')) continue;
+    PINIA_FACTORY_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = PINIA_FACTORY_RE.exec(content))) factoryFile.set(m[1]!, file);
+  }
+  if (!factoryFile.size) return [];
+
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const file of ctx.getAllFiles()) {
+    if (!PINIA_CONSUMER_EXT.test(file)) continue;
+    const content = ctx.readFile(file);
+    if (!content || !content.includes('Store')) continue;
+    const safe = stripCommentsForRegex(content, /\.(?:jsx?|mjs|cjs)$/.test(file) ? 'javascript' : 'typescript');
+
+    // 2. Bind store vars in this file: `const <var> = <known-factory>(...)`.
+    const varStore = new Map<string, string>();
+    PINIA_BIND_RE.lastIndex = 0;
+    let bm: RegExpExecArray | null;
+    while ((bm = PINIA_BIND_RE.exec(safe))) {
+      const sf = factoryFile.get(bm[2]!);
+      if (sf) varStore.set(bm[1]!, sf);
+    }
+    if (!varStore.size) continue;
+
+    // 3. Link `<var>.<method>(` → the action function node in the store's file.
+    const nodesInFile = ctx.getNodesInFile(file);
+    const fallbackDispatcher = nodesInFile.find((n) => n.kind === 'component'); // .vue top-level setup
+    PINIA_CALL_RE.lastIndex = 0;
+    let cm: RegExpExecArray | null;
+    let added = 0;
+    while ((cm = PINIA_CALL_RE.exec(safe)) && added < PINIA_FANOUT_CAP) {
+      const storeFile = varStore.get(cm[1]!);
+      if (!storeFile) continue;
+      const method = cm[2]!;
+      const line = safe.slice(0, cm.index).split('\n').length;
+      const disp = enclosingFn(nodesInFile, line) ?? fallbackDispatcher;
+      if (!disp) continue;
+      const target = ctx
+        .getNodesByName(method)
+        .find((n) => n.kind === 'function' && n.filePath === storeFile);
+      if (!target || target.id === disp.id) continue;
+      const key = `${disp.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: disp.id,
+        target: target.id,
+        kind: 'calls',
+        line,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'pinia-store', via: method, registeredAt: `${file}:${line}` },
+      });
+      added++;
+    }
+  }
+  return edges;
+}
+
 /**
  * Synthesize dispatcher→callback edges (field observers + EventEmitters +
  * React re-render + JSX children + Vue templates + SvelteKit load + RN event
  * channel + Fabric native-impl + MyBatis Java↔XML + Gin middleware chain +
  * Redux-thunk dispatch chain + object-literal registry dispatch + RTK Query
- * generated-hook → endpoint).
+ * generated-hook → endpoint + Pinia useStore().action() dispatch).
  * Returns the count added. Never throws into indexing — callers wrap in try/catch.
  */
 export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionContext): number {
@@ -1969,6 +2050,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
   const thunkEdges = reduxThunkEdges(queries, ctx);
   const registryEdges = objectRegistryEdges(ctx);
   const rtkEdges = rtkQueryEdges(queries, ctx);
+  const piniaEdges = piniaStoreEdges(ctx);
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -1995,6 +2077,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     ...thunkEdges,
     ...registryEdges,
     ...rtkEdges,
+    ...piniaEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;
