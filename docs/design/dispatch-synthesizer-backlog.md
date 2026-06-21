@@ -55,7 +55,7 @@ Status legend (matches the playbook): ✅ done+validated · 🟡 shipped but und
 | Shape | Ecosystem | The static anchor that bridges it | Mechanism | Status |
 |---|---|---|---|---|
 | **Name→class registry / command bus** | any (TS/JS first) | object-literal registry `{key: Handler}` + computed-key dispatch `(new) reg[var](…)` | S (fan-out, `object-registry`) | ✅ **SHIPPED v1 (2026-06-20)** — `objectRegistryEdges`. Links each dispatcher fn → each registered handler's callable entry (a class's `execute`/run/handle method — preferring the method chained at the dispatch — or the function value). Precise on **xrengine** (CommandManager, 64 edges, class registry → `.execute`), **Prebid.js** (7: builder/consent/message dispatch, fn registry), **warp-drive** (1). **0 false positives** after: minified-file skip (avg line >200), **depth-aware** entry parse (top-level `key: Ident` only — method-shorthand/nested-object bodies don't leak), callable-only targets (no data `constant`), dynamic-dispatch gate. Handles constructor + field-initializer (`this.` normalized) forms. **Deferred (recall, documented):** assign-then-call (`const h=reg[k]; h()` — warp-drive's main `COMMANDS`), augmentation (`reg[k]=H` — Prebid single-entry), method-shorthand entry recall, and the **cross-file barrel-namespace** variant (trezor `getMethod`: `import * as M; M[method]→new` + computed dynamic import + camel↔Pascal — the hard tier, still 🔬). |
-| **RTK Query** | TS / Redux Toolkit | `createApi({ endpoints: b => ({ getX: b.query(...) }) })` → generated `useGetXQuery` hook → component; endpoint name ↔ hook name (`getX`↔`useGetXQuery`) is convention | X (extract endpoints) + S (endpoint→hook) | 🔬 **found on shapeshift** (14 `createApi` files, currently invisible). The modern RTK default — likely higher traffic than hand thunks now. |
+| **RTK Query** | TS / Redux Toolkit | `createApi({ endpoints: b => ({ getX: b.query(...) }) })` → generated `useGetXQuery` hook → component; endpoint name ↔ hook name (`getX`↔`useGetXQuery`) is convention | X (extract endpoints) + S (endpoint→hook) | ✅ **SHIPPED (2026-06-20)** — `synthesizedBy:'rtk-query'`. **X:** extraction mints a function node per endpoint (named by its key, spanning the `queryFn`/`query` handler so its calls attribute; both `endpoints: b => ({…})` arrow and `endpoints(b){ return {…} }` method forms; a factory-handler endpoint `queryFn: makeFn(url)` falls back to a bare node spanning the builder call) **and** per generated-hook binding from `export const {…} = api` (carrying the sentinel signature `= RTK Query generated hook`). **S:** `rtkQueryEdges` bridges hook→same-file endpoint by the naming convention (strip `use` + optional `Lazy` + `Query`/`Mutation`, lc head). Component→hook is normal import/call resolution; hook→endpoint surfaces in explore as `dynamic: rtk query`. Validated **100% precision** (hooks == synth edges, **0 cross-file**) on **basetool** (small, 54 edges, both forms + factory fallback), **minusx-metabase** (small, 11), **shapeshift** (large, 13); **0** on the uwave-web control (no `createApi` → a complete no-op, 0 nodes/edges added). Sentinel gate correctly ignores hand-written look-alikes (shapeshift's `useFoxyQuery` is a real custom hook, never bridged). **Deferred:** cross-module `injectEndpoints` where the hook destructuring's RHS isn't the same bare api const (synth requires same-file endpoint). |
 | **Vuex / Pinia** | Vue | `store.dispatch('ns/action')` / `commit('mutation')` → action/mutation by string key (namespaced) | S (string-keyed, like `event-emitter`) | ⬜ |
 | **NgRx effects** | Angular | `createEffect(() => actions.pipe(ofType(LoginAction), …))` → effect handler; `Store.dispatch(new LoginAction())` → effect by action type/class | S (type/class-keyed) | ⬜ |
 
@@ -80,6 +80,8 @@ Status legend (matches the playbook): ✅ done+validated · 🟡 shipped but und
 | Shape | `synthesizedBy` | Validated on |
 |---|---|---|
 | Redux thunk | `redux-thunk` | ✅ **generalizes (2026-06-20)** — precise on uwave-web (small, 5 edges), session-desktop (medium, 2), trezor (large, 211); control shapeshift (RTK Query, no thunks) = 0. Receiver-agnostic (`api.dispatch`/`thunkApi.dispatch`/`window.…dispatch` all matched). **⚠️ 2 follow-ups below.** |
+| Object-literal registry | `object-registry` | ✅ **shipped (2026-06-20)** — xrengine `CommandManager` (64), Prebid.js (7), warp-drive (1); 0 false positives after 4 precision gates. |
+| RTK Query | `rtk-query` | ✅ **shipped (2026-06-20)** — 100% precision (hooks == synth edges, 0 cross-file) on basetool (54), minusx-metabase (11), shapeshift (13); 0 on uwave-web control. Extraction mints endpoint + generated-hook nodes; synth bridges hook→endpoint by convention. |
 | (see playbook §6 / `callback-synthesizer.ts` for the other ~20 channels) | | |
 
 ### redux-thunk follow-ups (found by the n>1 validation — this is exactly what it's for)
@@ -141,5 +143,10 @@ For each shape, before marking ✅:
       n8n/VS-Code-class registries). The **facade** (`connect-common/factory.ts`) is
       **low-value** — it collapses every method to a single `call` fan-in with no
       per-method disambiguation; bridging it buys ~nothing. Build the registry, skip the facade.
-- [ ] **RTK Query (workstream 2 spillover):** shapeshift handed us a free, real,
-      already-indexed target. Strong candidate right after redux-thunk is de-risked.
+- [x] **RTK Query (workstream 2 spillover):** ✅ **shipped (2026-06-20)** —
+      `synthesizedBy:'rtk-query'`, validated on basetool / minusx-metabase /
+      shapeshift (+ uwave control). See the Tier-A row for the mechanism.
+      **Next RTK spillover:** the cross-module `injectEndpoints` case (hooks
+      destructured off an enhanced api in a different file than the base) — the
+      synth's same-file gate skips it today; would need a same-`reducerPath` or
+      import-following relaxation, validated on a repo that splits endpoints.

@@ -37,6 +37,14 @@ import {
 export { generateNodeId } from './tree-sitter-helpers';
 
 /**
+ * RTK Query generated-hook naming convention: `use` + PascalCase endpoint (with
+ * an optional `Lazy` variant prefix) + `Query`/`Mutation`. Matches the hook
+ * bindings to extract from an `export const {...} = api` destructuring. Kept in
+ * sync with the same convention in `callback-synthesizer.ts` (the synth side).
+ */
+const RTK_HOOK_NAME_RE = /^use[A-Z][A-Za-z0-9]*(?:Query|Mutation)$/;
+
+/**
  * Extract the name from a node based on language
  */
 function extractName(node: SyntaxNode, source: string, extractor: LanguageExtractor): string {
@@ -1946,6 +1954,156 @@ export class TreeSitterExtractor {
   }
 
   /**
+   * RTK Query: from a `createApi({ ..., endpoints: build => ({...}) })` or a
+   * `baseApi.injectEndpoints({ endpoints: build => ({...}) })` call initializer,
+   * return the object literal of endpoint definitions (the object the `endpoints`
+   * arrow returns). Returns null for any other call — the common case — so this
+   * stays cheap and silent. Keyed on the RTK entry-point names (`createApi` /
+   * `injectEndpoints`) like the framework extractors key on their library APIs.
+   */
+  private findRtkEndpointsObject(callNode: SyntaxNode): SyntaxNode | null {
+    const callee = getChildByField(callNode, 'function');
+    if (!callee) return null;
+    const calleeName =
+      callee.type === 'identifier'
+        ? getNodeText(callee, this.source)
+        : callee.type === 'member_expression'
+          ? getNodeText(getChildByField(callee, 'property') ?? callee, this.source)
+          : '';
+    if (calleeName !== 'createApi' && calleeName !== 'injectEndpoints') return null;
+    const args = getChildByField(callNode, 'arguments');
+    if (!args) return null;
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i);
+      if (arg?.type !== 'object' && arg?.type !== 'object_expression') continue;
+      for (let j = 0; j < arg.namedChildCount; j++) {
+        const member = arg.namedChild(j);
+        // Two equally-common spellings: `endpoints: build => ({...})` (pair with an
+        // arrow value) and `endpoints(build) { return {...} }` (method shorthand).
+        if (member?.type === 'pair') {
+          const key = getChildByField(member, 'key');
+          if (!key || getNodeText(key, this.source) !== 'endpoints') continue;
+          const value = getChildByField(member, 'value');
+          if (value && (value.type === 'arrow_function' || value.type === 'function_expression')) {
+            return this.functionReturnedObject(value);
+          }
+        } else if (member?.type === 'method_definition') {
+          const key = getChildByField(member, 'name');
+          if (!key || getNodeText(key, this.source) !== 'endpoints') continue;
+          return this.functionReturnedObject(member);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Extract each RTK Query endpoint (`getX: build.query({...})` / `build.mutation`)
+   * as a function node named by the endpoint key, spanning its primary handler
+   * (the `queryFn`/`query` arrow) so the fetch logic's calls attribute to the
+   * endpoint. Without this an endpoint exists only as an object-literal property —
+   * never a node — so the generated `useXQuery` hook can't be bridged to it.
+   */
+  private extractRtkEndpoints(obj: SyntaxNode): void {
+    for (let i = 0; i < obj.namedChildCount; i++) {
+      const member = obj.namedChild(i);
+      if (member?.type !== 'pair') continue;
+      const key = getChildByField(member, 'key');
+      const value = getChildByField(member, 'value');
+      if (!key || value?.type !== 'call_expression') continue;
+      // The value must be a builder dispatch `<builder>.query|mutation(...)`.
+      const callee = getChildByField(value, 'function');
+      if (callee?.type !== 'member_expression') continue;
+      const method = getNodeText(getChildByField(callee, 'property') ?? callee, this.source);
+      if (method !== 'query' && method !== 'mutation' && method !== 'infiniteQuery') continue;
+      const handler = this.rtkEndpointHandler(value);
+      if (handler) {
+        this.extractFunction(handler, this.objectKeyName(key));
+      } else {
+        // Factory / config-only handler (`queryFn: makeQueryFn(url)`): no function
+        // literal to name. Mint a bare endpoint node spanning the builder call so
+        // the generated hook still bridges to it, and walk the call so its handler
+        // factory (and any inline transform) is captured as an outgoing edge.
+        const epNode = this.createNode('function', this.objectKeyName(key), value, {
+          signature: getNodeText(value, this.source).slice(0, 80),
+        });
+        if (epNode) {
+          this.nodeStack.push(epNode.id);
+          this.visitFunctionBody(value, epNode.id);
+          this.nodeStack.pop();
+        }
+      }
+    }
+  }
+
+  /**
+   * The primary handler arrow of a `build.query({ queryFn|query: (…) => … })`
+   * endpoint — prefers `queryFn`, then `query`, else the first function-valued
+   * property. Returns null when the endpoint is config-only (no handler arrow).
+   */
+  private rtkEndpointHandler(callNode: SyntaxNode): SyntaxNode | null {
+    const args = getChildByField(callNode, 'arguments');
+    if (!args) return null;
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i);
+      if (arg?.type !== 'object' && arg?.type !== 'object_expression') continue;
+      let queryFn: SyntaxNode | null = null;
+      let query: SyntaxNode | null = null;
+      let firstFn: SyntaxNode | null = null;
+      for (let j = 0; j < arg.namedChildCount; j++) {
+        const member = arg.namedChild(j);
+        // The handler may be `queryFn: () => …` / `query: () => …` (pair) or the
+        // method-shorthand `query(arg) { … }` / `queryFn(arg) { … }`.
+        let fn: SyntaxNode | null = null;
+        let kn = '';
+        if (member?.type === 'pair') {
+          const v = getChildByField(member, 'value');
+          if (v?.type === 'arrow_function' || v?.type === 'function_expression') {
+            fn = v;
+            const k = getChildByField(member, 'key');
+            kn = k ? getNodeText(k, this.source) : '';
+          }
+        } else if (member?.type === 'method_definition') {
+          fn = member;
+          const k = getChildByField(member, 'name');
+          kn = k ? getNodeText(k, this.source) : '';
+        }
+        if (!fn) continue;
+        if (kn === 'queryFn') queryFn = fn;
+        else if (kn === 'query') query = fn;
+        if (!firstFn) firstFn = fn;
+      }
+      if (queryFn) return queryFn;
+      if (query) return query;
+      if (firstFn) return firstFn;
+    }
+    return null;
+  }
+
+  /**
+   * RTK Query generated-hook bindings. `export const { useGetXQuery,
+   * useUpdateYMutation } = someApi` destructures the hooks RTK generates per
+   * endpoint off a createApi result. They are real exported symbols that
+   * components import, but destructured bindings aren't otherwise extracted —
+   * mint a function node per binding matching the RTK hook convention so the hook
+   * resolves and the synthesizer can bridge it to its endpoint. Gated tight by the
+   * caller (object-pattern off a bare identifier) + the name convention here, so
+   * ordinary destructures stay unextracted.
+   */
+  private extractRtkHookBindings(pattern: SyntaxNode, isExported: boolean): void {
+    for (let i = 0; i < pattern.namedChildCount; i++) {
+      const binding = pattern.namedChild(i);
+      if (binding?.type !== 'shorthand_property_identifier_pattern') continue;
+      const name = getNodeText(binding, this.source);
+      if (!RTK_HOOK_NAME_RE.test(name)) continue;
+      this.createNode('function', name, binding, {
+        isExported,
+        signature: '= RTK Query generated hook',
+      });
+    }
+  }
+
+  /**
    * Extract a variable declaration (const, let, var, etc.)
    *
    * Extracts top-level and module-level variable declarations.
@@ -1977,8 +2135,15 @@ export class TreeSitterExtractor {
 
           if (nameNode) {
             // Skip destructured patterns (e.g., `let { x, y } = $props()` in Svelte)
-            // These produce ugly multi-line names like "{ class: className }"
+            // These produce ugly multi-line names like "{ class: className }".
+            // EXCEPT `export const { useGetXQuery } = someApi` — the RTK Query
+            // generated hooks: real exported symbols destructured off a createApi
+            // result. Mint a node per binding matching the hook convention (gated
+            // on a bare-identifier RHS so ordinary destructures stay skipped).
             if (nameNode.type === 'object_pattern' || nameNode.type === 'array_pattern') {
+              if (nameNode.type === 'object_pattern' && valueNode?.type === 'identifier') {
+                this.extractRtkHookBindings(nameNode, isExported);
+              }
               continue;
             }
             const name = getNodeText(nameNode, this.source);
@@ -2027,20 +2192,34 @@ export class TreeSitterExtractor {
                   : null;
             const extractObjectMethods = isExported && !!objectOfFns;
 
+            // RTK Query: `createApi`/`injectEndpoints` define endpoints as
+            // object-literal properties whose values are `build.query/mutation(...)`
+            // calls — nested under an `endpoints` arrow, so neither the
+            // object-of-functions path above nor the normal walk extracts them.
+            // Extract each endpoint as a function node (named by its key), and skip
+            // walking the createApi call body (its handler arrows are extracted
+            // individually below, exactly like the store-factory case).
+            const rtkEndpoints =
+              valueNode?.type === 'call_expression' ? this.findRtkEndpointsObject(valueNode) : null;
+
             // Visit the initializer body for calls — EXCEPT object literals (their
             // function-valued properties are extracted below) and the store-factory
-            // call whose returned object we extract method-by-method below (walking
-            // the whole call would re-visit those method arrows and mis-attribute
-            // their inner calls to the file/module scope).
+            // / createApi call whose returned object we extract method-by-method
+            // below (walking the whole call would re-visit those method arrows and
+            // mis-attribute their inner calls to the file/module scope).
             if (valueNode &&
                 valueNode.type !== 'object' &&
                 valueNode.type !== 'object_expression' &&
-                !(extractObjectMethods && valueNode.type === 'call_expression')) {
+                !(extractObjectMethods && valueNode.type === 'call_expression') &&
+                !rtkEndpoints) {
               this.visitFunctionBody(valueNode, '');
             }
 
             if (extractObjectMethods && objectOfFns) {
               this.extractObjectLiteralFunctions(objectOfFns);
+            }
+            if (rtkEndpoints) {
+              this.extractRtkEndpoints(rtkEndpoints);
             }
           }
         }
