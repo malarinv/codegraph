@@ -147,11 +147,23 @@ For each shape, before marking ✅:
       `createAsyncThunk`-using app (grep-confirmed), re-index, repeat the protocol.
       Promote `redux-thunk` 🟡→✅ or fix the overfit. *(None of the 4 already-cloned
       eval repos contain `createAsyncThunk`.)*
-- [ ] **Decide trezor end (workstream 3):** the **name→class registry** synthesizer is
-      the valuable, generalizable Tier-A item (closes trezor's `getMethod` end *and*
-      n8n/VS-Code-class registries). The **facade** (`connect-common/factory.ts`) is
-      **low-value** — it collapses every method to a single `call` fan-in with no
-      per-method disambiguation; bridging it buys ~nothing. Build the registry, skip the facade.
+- [x] **Decide trezor end (workstream 3):** ✅ **RESOLVED (2026-06-21) — SHELVED as single-lineage / likely-overfit.**
+      The same-file object-literal half shipped as `object-registry` (xrengine/Prebid/warp-drive). The
+      remaining **cross-file barrel-namespace** half (`import * as M from './api'` → `M[runtimeKey]` →
+      `new` → `.run()`) was the open Tier-A item. A grep-confirmed discovery across **15 independent diverse
+      repos + GitHub-wide code search** found the STRICT shape in exactly **2 repos — trezor-suite AND
+      OneKey hardware-js-sdk — but OneKey is a `@trezor/connect` FORK** (same `findMethod`/`MethodConstructor`/
+      `ApiMethods[method]`/`new`+`BaseMethod.run()` skeleton, 130 vs 61 methods). So it's **2 indexable repos
+      but ONE design lineage = effectively n=1**. The hypothesis that it "*also* closes n8n/VS-Code registries"
+      is **DISPROVEN**: every independent "registry by runtime key" is a DIFFERENT shape the trezor-tuned synth
+      won't catch — n8n = dynamic `import()`-of-computed-PATH + DI (`Container.get`), polkadot = array-of-
+      constructors + numeric index, ccxt = object-literal/external-pkg (already covered by `object-registry`),
+      typeorm/bcoin/xrpl = `switch`. The barrel synth is the HARD tier (cross-file barrel re-export enumeration +
+      computed index + camel↔Pascal + entry-method fan-out) — **meaningful complexity for a single-lineage win**,
+      which the overfit discipline (see #1 above — the redux-thunk-on-trezor-alone lesson) says **don't build**.
+      Corpus `/tmp/cg-barrel-eval/` (trezor-suite, onekey-hardware + 15 non-matches). Reopen ONLY if an
+      independent (non-trezor-lineage) repo with the strict shape turns up. The **facade**
+      (`connect-common/factory.ts`) remains **low-value** (single `call` fan-in, no per-method disambiguation) — skip.
 - [x] **RTK Query (workstream 2 spillover):** ✅ **shipped (2026-06-20)** —
       `synthesizedBy:'rtk-query'`, validated on basetool / minusx-metabase /
       shapeshift (+ uwave control). See the Tier-A row for the mechanism.
