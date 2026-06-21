@@ -1066,6 +1066,24 @@ export class TreeSitterExtractor {
       const parentId = this.nodeStack[this.nodeStack.length - 1];
       if (parentId) this.emitReExportRefs(node, parentId);
     }
+    // Vuex MODULE default export — `export default { namespaced, actions: {…},
+    // mutations: {…} }` (the canonical Vuex module shape). Object-literal methods
+    // aren't otherwise extracted, so scan the config's actions/mutations/getters
+    // collections and extract their methods as nodes. Store-file gated (the
+    // ≥2-signal heuristic) so a plain default-exported object is untouched; skip
+    // the subtree afterward (the collection methods are now handled).
+    else if (
+      nodeType === 'export_statement' &&
+      (this.language === 'typescript' || this.language === 'tsx' ||
+       this.language === 'javascript' || this.language === 'jsx') &&
+      this.looksLikeVueStoreFile()
+    ) {
+      const exported = getChildByField(node, 'value');
+      if (exported && (exported.type === 'object' || exported.type === 'object_expression')) {
+        this.extractStoreCollectionMethods(exported);
+        skipChildren = true;
+      }
+    }
     // Check for function calls
     else if (this.extractor.callTypes.includes(nodeType)) {
       this.extractCall(node);
@@ -2181,6 +2199,23 @@ export class TreeSitterExtractor {
       }
     }
     return objects;
+  }
+
+  /** Extract the methods of a store-config object's `actions`/`mutations`/`getters`
+   *  properties. Used for the canonical Vuex MODULE shape `export default {
+   *  namespaced, actions: {…}, mutations: {…} }` — object-literal methods aren't
+   *  otherwise extracted, so the actions/mutations would never be nodes. */
+  private extractStoreCollectionMethods(configObj: SyntaxNode): void {
+    for (let j = 0; j < configObj.namedChildCount; j++) {
+      const member = configObj.namedChild(j);
+      if (member?.type !== 'pair') continue;
+      const key = getChildByField(member, 'key');
+      if (!key || !VUE_STORE_COLLECTION_NAMES.has(getNodeText(key, this.source))) continue;
+      const value = getChildByField(member, 'value');
+      if (value && (value.type === 'object' || value.type === 'object_expression')) {
+        this.extractObjectLiteralFunctions(value);
+      }
+    }
   }
 
   /** The SETUP function of a Pinia setup store (`defineStore('id', () => {…})`)
