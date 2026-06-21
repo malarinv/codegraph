@@ -44,6 +44,10 @@ export { generateNodeId } from './tree-sitter-helpers';
  */
 const RTK_HOOK_NAME_RE = /^use[A-Z][A-Za-z0-9]*(?:Query|Mutation)$/;
 
+/** React HOC callees whose result is itself a component — a PascalCase const
+ *  initialized with one of these is a component, not a constant (#841). */
+const REACT_COMPONENT_HOCS = new Set(['forwardRef', 'memo', 'React.forwardRef', 'React.memo']);
+
 /** Vue store collections whose object-literal members are the symbols an agent
  *  looks for. Extracted as function nodes so `actions`/`mutations`/`getters` are
  *  findable + readable (the foundation under any later dispatch-bridge synth). */
@@ -1422,6 +1426,71 @@ export class TreeSitterExtractor {
   }
 
   /**
+   * Detect a React component declared via an HOC wrapper whose result is itself a
+   * component: `forwardRef(...)`, `memo(...)`, `React.forwardRef/memo(...)`, and
+   * styled-components / emotion `styled.tag\`…\`` / `styled(Base)\`…\``. These
+   * initializers are a call / tagged-template (not a bare arrow), so the const is
+   * otherwise classified `constant` — and a constant is skipped by both the
+   * JSX-render edge synthesizer and component resolution, so `<Button/>` usages
+   * get no edge and callers/impact silently return empty (#841).
+   *
+   * Returns `{ inner }` — the inline render function to extract as the component
+   * body, or `null` when the wrapper has no inline function (`memo(Imported)`,
+   * `styled.button\`…\``) and only a bodyless component node is minted — or
+   * `undefined` when this initializer is not a recognized component wrapper.
+   */
+  private reactComponentHoc(valueNode: SyntaxNode): { inner: SyntaxNode | null } | undefined {
+    if (valueNode.type !== 'call_expression') return undefined;
+    const callee = getChildByField(valueNode, 'function');
+    if (!callee) return undefined;
+    const calleeText = getNodeText(callee, this.source);
+    // styled-components / emotion: `styled.button\`…\`` / `styled(Base)\`…\``.
+    // tree-sitter models these tagged templates as a call_expression whose callee
+    // is the `styled.x` / `styled(Base)` tag (\b avoids matching `styledFoo`).
+    // No inline render fn — the argument is the CSS template.
+    if (/^styled\b/.test(calleeText)) return { inner: null };
+    // React HOCs: `forwardRef`/`memo`/`React.forwardRef`/`React.memo`.
+    if (!REACT_COMPONENT_HOCS.has(calleeText)) return undefined;
+    // The first arrow / function-expression argument is the render fn (if inline;
+    // `memo(Imported)` passes a bare identifier and has none).
+    const args = getChildByField(valueNode, 'arguments');
+    let inner: SyntaxNode | null = null;
+    if (args) {
+      for (let i = 0; i < args.namedChildCount; i++) {
+        const a = args.namedChild(i);
+        if (a && (a.type === 'arrow_function' || a.type === 'function_expression')) {
+          inner = a;
+          break;
+        }
+      }
+    }
+    return { inner };
+  }
+
+  /**
+   * Emit a `component` node for an HOC-wrapped React component declaration (see
+   * reactComponentHoc). Named by the declarator (`Button`) and located at it so
+   * the node range spans the body. When the wrapper has an inline render
+   * function, its body is walked so the component's callees (hooks, helpers) are
+   * captured under the component node — matching how a plain
+   * `const Foo = () => …` arrow component already behaves.
+   */
+  private extractReactComponentNode(
+    name: string,
+    declarator: SyntaxNode,
+    innerFn: SyntaxNode | null,
+    extra: { docstring?: string; signature?: string; isExported?: boolean }
+  ): void {
+    const compNode = this.createNode('component', name, declarator, extra);
+    if (!compNode || !innerFn || !this.extractor) return;
+    this.nodeStack.push(compNode.id);
+    const body = this.extractor.resolveBody?.(innerFn, this.extractor.bodyField)
+      ?? getChildByField(innerFn, this.extractor.bodyField);
+    if (body) this.visitFunctionBody(body, compNode.id);
+    this.nodeStack.pop();
+  }
+
+  /**
    * Extract a class
    */
   private extractClass(node: SyntaxNode, kind: NodeKind = 'class'): void {
@@ -2315,6 +2384,26 @@ export class TreeSitterExtractor {
             // Capture first 100 chars of initializer for context (stored in signature for searchability)
             const initValue = valueNode ? getNodeText(valueNode, this.source).slice(0, 100) : undefined;
             const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+
+            // React HOC-wrapped components (`forwardRef`/`memo`/`styled`) — see
+            // reactComponentHoc. The initializer is a call / tagged-template (not
+            // a bare arrow), so without this the const is a plain `constant`,
+            // which the JSX-render synthesizer and component resolution both skip
+            // → `<Button/>` usages get no edge and callers/impact return empty
+            // (the whole shadcn/ui design-system pattern, #841). PascalCase-gated
+            // to the component naming convention so a memoization util
+            // (`const cache = memo(fn)`) stays a constant.
+            if (valueNode && /^[A-Z]/.test(name)) {
+              const hoc = this.reactComponentHoc(valueNode);
+              if (hoc) {
+                this.extractReactComponentNode(name, child, hoc.inner, {
+                  docstring,
+                  signature: initSignature,
+                  isExported,
+                });
+                continue;
+              }
+            }
 
             const varNode = this.createNode(kind, name, child, {
               docstring,
