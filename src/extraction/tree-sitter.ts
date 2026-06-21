@@ -44,6 +44,16 @@ export { generateNodeId } from './tree-sitter-helpers';
  */
 const RTK_HOOK_NAME_RE = /^use[A-Z][A-Za-z0-9]*(?:Query|Mutation)$/;
 
+/** Vue store collections whose object-literal members are the symbols an agent
+ *  looks for. Extracted as function nodes so `actions`/`mutations`/`getters` are
+ *  findable + readable (the foundation under any later dispatch-bridge synth). */
+const VUE_STORE_COLLECTION_NAMES = new Set(['actions', 'mutations', 'getters']);
+/** Store-definition callees whose config object carries those collections. */
+const VUE_STORE_FACTORY_CALLEES = new Set(['defineStore', 'createStore']);
+/** Distinct signals that a file is a Vuex/Pinia store (≥2 ⇒ treat a bare
+ *  `const actions = {…}` as a store collection — see looksLikeVueStoreFile). */
+const VUE_STORE_FILE_SIGNAL = /\bdefineStore\b|\bcreateStore\b|\bVuex\b|\bmutations\b|\bactions\b|\bgetters\b|\bnamespaced\b/g;
+
 /**
  * Extract the name from a node based on language
  */
@@ -325,6 +335,8 @@ export class TreeSitterExtractor {
   // (see flushFnRefCandidates).
   private fnRefSpec: FnRefSpec | undefined;
   private fnRefCandidates: Array<FnRefCandidate & { fromNodeId: string }> = [];
+  // Memoized "is this a Vue store file" verdict (per-extractor = per-file).
+  private vueStoreFile: boolean | null = null;
 
   constructor(filePath: string, source: string, language?: Language) {
     this.filePath = filePath;
@@ -2103,6 +2115,118 @@ export class TreeSitterExtractor {
     }
   }
 
+  /** Cheap per-file heuristic: the file carries ≥2 distinct Vue-store signals
+   *  (defineStore/createStore/Vuex, or the actions/mutations/getters/namespaced
+   *  vocabulary). Gates the non-exported `const actions = {…}` Vuex-module form so
+   *  a stray `const actions` in unrelated code is never mistaken for a store. */
+  private looksLikeVueStoreFile(): boolean {
+    if (this.vueStoreFile !== null) return this.vueStoreFile;
+    const seen = new Set<string>();
+    VUE_STORE_FILE_SIGNAL.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = VUE_STORE_FILE_SIGNAL.exec(this.source))) {
+      seen.add(m[0]);
+      if (seen.size >= 2) break;
+    }
+    this.vueStoreFile = seen.size >= 2;
+    return this.vueStoreFile;
+  }
+
+  /** True if an object literal has ≥1 inline function member (`key: () => …` /
+   *  `method(){}`) — distinguishes an inline action map (zustand/SvelteKit form
+   *  actions) from a Pinia SETUP store's all-shorthand `return { foo, bar }`
+   *  (whose functions are body-local consts, walked normally instead). */
+  private objectHasInlineFunctions(obj: SyntaxNode): boolean {
+    for (let i = 0; i < obj.namedChildCount; i++) {
+      const member = obj.namedChild(i);
+      if (member?.type === 'method_definition') return true;
+      if (member?.type === 'pair') {
+        const v = getChildByField(member, 'value');
+        if (v?.type === 'arrow_function' || v?.type === 'function_expression') return true;
+      }
+    }
+    return false;
+  }
+
+  /** Vue store action/mutation/getter collections defined INLINE in a store call:
+   *  `defineStore({ actions: {…}, getters: {…} })` (Pinia options form),
+   *  `defineStore('id', { actions: {…} })`, `createStore({ mutations: {…} })`,
+   *  `new Vuex.Store({ actions: {…} })`. Returns the object literals under those
+   *  keys so their methods become nodes. Gated on the store-factory callee. */
+  private findVueStoreCollectionObjects(callNode: SyntaxNode): SyntaxNode[] {
+    const callee = getChildByField(callNode, 'function') ?? getChildByField(callNode, 'constructor');
+    if (!callee) return [];
+    const calleeName =
+      callee.type === 'identifier'
+        ? getNodeText(callee, this.source)
+        : callee.type === 'member_expression'
+          ? getNodeText(getChildByField(callee, 'property') ?? callee, this.source)
+          : '';
+    if (!VUE_STORE_FACTORY_CALLEES.has(calleeName) && calleeName !== 'Store') return [];
+    const args = getChildByField(callNode, 'arguments');
+    if (!args) return [];
+    const objects: SyntaxNode[] = [];
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i);
+      if (arg?.type !== 'object' && arg?.type !== 'object_expression') continue;
+      for (let j = 0; j < arg.namedChildCount; j++) {
+        const member = arg.namedChild(j);
+        if (member?.type !== 'pair') continue;
+        const key = getChildByField(member, 'key');
+        if (!key || !VUE_STORE_COLLECTION_NAMES.has(getNodeText(key, this.source))) continue;
+        const value = getChildByField(member, 'value');
+        if (value && (value.type === 'object' || value.type === 'object_expression')) {
+          objects.push(value);
+        }
+      }
+    }
+    return objects;
+  }
+
+  /** The SETUP function of a Pinia setup store (`defineStore('id', () => {…})`)
+   *  — an arrow/function arg with a block body. Returns null for the options form
+   *  (`defineStore({…})`) and for any non-defineStore call. The setup body's local
+   *  function consts are the store's actions; the generic body walk doesn't reach
+   *  them (nested functions are separate scopes), so they're extracted explicitly. */
+  private findPiniaSetupFn(callNode: SyntaxNode): SyntaxNode | null {
+    const callee = getChildByField(callNode, 'function');
+    if (!callee || callee.type !== 'identifier' || getNodeText(callee, this.source) !== 'defineStore') return null;
+    const args = getChildByField(callNode, 'arguments');
+    if (!args) return null;
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i);
+      if (arg?.type !== 'arrow_function' && arg?.type !== 'function_expression') continue;
+      const body = getChildByField(arg, 'body');
+      if (body?.type === 'statement_block') return arg; // block body ⇒ setup form
+    }
+    return null;
+  }
+
+  /** Extract a Pinia setup store's actions: the body-local `const foo = () => …`
+   *  / `function foo(){}` declarations, named by the binding. (State refs and other
+   *  consts are left to the normal value-extraction; only the functions matter as
+   *  the store's callable surface.) */
+  private extractPiniaSetupBody(setupFn: SyntaxNode): void {
+    const body = getChildByField(setupFn, 'body');
+    if (!body || body.type !== 'statement_block') return;
+    for (let i = 0; i < body.namedChildCount; i++) {
+      const stmt = body.namedChild(i);
+      if (!stmt) continue;
+      if (stmt.type === 'function_declaration') {
+        this.extractFunction(stmt);
+      } else if (this.extractor!.variableTypes.includes(stmt.type)) {
+        for (let j = 0; j < stmt.namedChildCount; j++) {
+          const decl = stmt.namedChild(j);
+          if (decl?.type !== 'variable_declarator') continue;
+          const v = getChildByField(decl, 'value');
+          if (v?.type === 'arrow_function' || v?.type === 'function_expression') {
+            this.extractFunction(v); // name resolved from the parent declarator
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Extract a variable declaration (const, let, var, etc.)
    *
@@ -2190,7 +2314,13 @@ export class TreeSitterExtractor {
                 : valueNode?.type === 'call_expression'
                   ? this.findInitializerReturnedObject(valueNode)
                   : null;
-            const extractObjectMethods = isExported && !!objectOfFns;
+            // Only treat as an inline object-of-functions when the object actually
+            // HAS inline functions. A Pinia SETUP store `defineStore('id', () => {
+            // const foo = …; return { foo } })` returns an ALL-SHORTHAND object
+            // whose functions are body-local consts — it must fall through to a
+            // normal body walk (extracting those consts), not be skipped here.
+            const hasInlineFns = !!objectOfFns && this.objectHasInlineFunctions(objectOfFns);
+            const extractObjectMethods = isExported && !!objectOfFns && hasInlineFns;
 
             // RTK Query: `createApi`/`injectEndpoints` define endpoints as
             // object-literal properties whose values are `build.query/mutation(...)`
@@ -2202,16 +2332,39 @@ export class TreeSitterExtractor {
             const rtkEndpoints =
               valueNode?.type === 'call_expression' ? this.findRtkEndpointsObject(valueNode) : null;
 
+            // Pinia SETUP store: `defineStore('id', () => { const foo = …; return {…} })`.
+            // Its actions are body-local consts the generic walk can't reach.
+            const piniaSetup =
+              valueNode?.type === 'call_expression' ? this.findPiniaSetupFn(valueNode) : null;
+
+            // Vue store collections — make `actions`/`mutations`/`getters` findable
+            // function nodes (the foundation under any later dispatch-bridge synth).
+            // Two positions: INLINE in a store call (`defineStore({ actions: {…} })`
+            // / `createStore` / `new Vuex.Store`), and the non-exported Vuex-MODULE
+            // form (`const actions = {…}` at a store file's top level, wired via a
+            // `export default { actions }`). The Pinia SETUP form is handled by the
+            // body walk above (its actions are local consts).
+            const storeCollections: SyntaxNode[] = [];
+            if (valueNode?.type === 'call_expression' || valueNode?.type === 'new_expression') {
+              storeCollections.push(...this.findVueStoreCollectionObjects(valueNode));
+            }
+            if (objectOfFns && !extractObjectMethods &&
+                VUE_STORE_COLLECTION_NAMES.has(name) && this.looksLikeVueStoreFile()) {
+              storeCollections.push(objectOfFns);
+            }
+
             // Visit the initializer body for calls — EXCEPT object literals (their
             // function-valued properties are extracted below) and the store-factory
-            // / createApi call whose returned object we extract method-by-method
-            // below (walking the whole call would re-visit those method arrows and
-            // mis-attribute their inner calls to the file/module scope).
+            // / createApi / store-collection call whose nested objects we extract
+            // method-by-method below (walking the whole call would re-visit those
+            // method arrows and mis-attribute their inner calls to the file scope).
             if (valueNode &&
                 valueNode.type !== 'object' &&
                 valueNode.type !== 'object_expression' &&
                 !(extractObjectMethods && valueNode.type === 'call_expression') &&
-                !rtkEndpoints) {
+                !rtkEndpoints &&
+                !piniaSetup &&
+                storeCollections.length === 0) {
               this.visitFunctionBody(valueNode, '');
             }
 
@@ -2220,6 +2373,12 @@ export class TreeSitterExtractor {
             }
             if (rtkEndpoints) {
               this.extractRtkEndpoints(rtkEndpoints);
+            }
+            if (piniaSetup) {
+              this.extractPiniaSetupBody(piniaSetup);
+            }
+            for (const coll of storeCollections) {
+              this.extractObjectLiteralFunctions(coll);
             }
           }
         }
