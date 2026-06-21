@@ -2092,12 +2092,107 @@ function vuexDispatchEdges(ctx: ResolutionContext): Edge[] {
   return edges;
 }
 
+// ── Celery task dispatch (Python) ─────────────────────────────────────────────
+// Celery decouples a task's call site from its body through async dispatch:
+//   # tasks.py
+//   @shared_task                       # also @app.task / @celery_app.task / @<app>.task / @task
+//   def process(account_ids): ...
+//   # views.py — a DIFFERENT module
+//   process.apply_async(kwargs={...})  # or process.delay(...) — dynamic, no static edge
+// Bridge it: link the enclosing function/method at each `.delay(`/`.apply_async(` site → the
+// task function body. Precision rests on the DECORATOR gate — the dispatched name must resolve
+// to a Python function carrying a celery task decorator (read from the source lines above its
+// `def`, since the def's own startLine excludes the decorator). A `.delay()` on a non-task
+// object resolves to no task node → no edge, so a Celery-free repo yields 0. Same-file /
+// unique-candidate disambiguation like vuex. (Canvas forms — `group(t).delay()`, `t.s()`/`.si()`
+// — have no single identifier before `.delay`/`.apply_async`, so they're skipped, not mis-bridged.)
+const CELERY_DISPATCH_RE = /\b([A-Za-z_]\w*)\s*\.\s*(?:delay|apply_async)\s*\(/g;
+// A task decorator: bare `@shared_task`/`@task` or attribute `@app.task`/`@celery_app.task`,
+// each optionally called with args. `\b`-bounded and `@`-anchored so `@mytask`, or a symbol
+// merely named `task`, can't match. No `/g`, so `.test()` is stateless across reuse.
+const CELERY_TASK_DECORATOR_RE = /@\s*(?:[A-Za-z_][\w.]*\.)?(?:shared_task|task)\b/;
+const CELERY_PY_EXT = /\.py$/;
+const CELERY_FANOUT_CAP = 80;
+const CELERY_DECORATOR_LOOKBACK = 12; // max lines above a `def` to scan for its decorators
+
+function celeryDispatchEdges(ctx: ResolutionContext): Edge[] {
+  // Memoize the decorator check per task-candidate node: it reads the file and scans a few
+  // lines above the def. Only called on names that are actually `.delay`/`.apply_async`
+  // receivers, so the candidate set stays small.
+  const taskCache = new Map<string, boolean>();
+  const isCeleryTask = (node: Node): boolean => {
+    let v = taskCache.get(node.id);
+    if (v !== undefined) return v;
+    v = false;
+    if (node.kind === 'function' && CELERY_PY_EXT.test(node.filePath)) {
+      const content = ctx.readFile(node.filePath);
+      if (content) {
+        const lines = content.split('\n');
+        // startLine is the `def` line (decorators sit ABOVE it). Walk upward, stopping at the
+        // previous declaration so a non-task def can never inherit the prior def's decorator.
+        const stop = Math.max(0, node.startLine - 1 - CELERY_DECORATOR_LOOKBACK);
+        for (let i = node.startLine - 2; i >= stop; i--) {
+          const t = (lines[i] ?? '').trim();
+          if (/^(?:async\s+def|def|class)\b/.test(t)) break; // previous decl → stop
+          if (CELERY_TASK_DECORATOR_RE.test(t)) { v = true; break; }
+        }
+      }
+    }
+    taskCache.set(node.id, v);
+    return v;
+  };
+
+  const resolve = (name: string, dispatchFile: string): Node | null => {
+    const cands = ctx.getNodesByName(name).filter((n) => n.kind === 'function' && isCeleryTask(n));
+    if (!cands.length) return null;
+    if (cands.length === 1) return cands[0]!;
+    // Cross-module name collision: prefer a task defined in the dispatching file, else bail
+    // (ambiguous — precision over recall, like vuex's root-key resolution).
+    return cands.find((c) => c.filePath === dispatchFile) ?? null;
+  };
+
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const file of ctx.getAllFiles()) {
+    if (!CELERY_PY_EXT.test(file)) continue;
+    const content = ctx.readFile(file);
+    if (!content || (!content.includes('.delay(') && !content.includes('.apply_async('))) continue;
+    const safe = stripCommentsForRegex(content, 'python');
+    const nodesInFile = ctx.getNodesInFile(file);
+    CELERY_DISPATCH_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    let added = 0;
+    while ((m = CELERY_DISPATCH_RE.exec(safe)) && added < CELERY_FANOUT_CAP) {
+      const name = m[1]!;
+      const line = safe.slice(0, m.index).split('\n').length;
+      const disp = enclosingFn(nodesInFile, line);
+      if (!disp) continue; // module-level dispatch — no source symbol to attribute
+      const target = resolve(name, file);
+      if (!target || target.id === disp.id) continue;
+      const key = `${disp.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: disp.id,
+        target: target.id,
+        kind: 'calls',
+        line,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'celery-dispatch', via: name, registeredAt: `${file}:${line}` },
+      });
+      added++;
+    }
+  }
+  return edges;
+}
+
 /**
  * Synthesize dispatcher→callback edges (field observers + EventEmitters +
  * React re-render + JSX children + Vue templates + SvelteKit load + RN event
  * channel + Fabric native-impl + MyBatis Java↔XML + Gin middleware chain +
  * Redux-thunk dispatch chain + object-literal registry dispatch + RTK Query
- * generated-hook → endpoint + Pinia useStore().action() + Vuex string dispatch).
+ * generated-hook → endpoint + Pinia useStore().action() + Vuex string dispatch +
+ * Celery task .delay()/.apply_async() → task body).
  * Returns the count added. Never throws into indexing — callers wrap in try/catch.
  */
 export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionContext): number {
@@ -2140,6 +2235,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
   const rtkEdges = rtkQueryEdges(queries, ctx);
   const piniaEdges = piniaStoreEdges(ctx);
   const vuexEdges = vuexDispatchEdges(ctx);
+  const celeryEdges = celeryDispatchEdges(ctx);
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -2168,6 +2264,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     ...rtkEdges,
     ...piniaEdges,
     ...vuexEdges,
+    ...celeryEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;
