@@ -115,6 +115,8 @@ When an AI agent needs to understand code — to answer a question or make a cha
 
 **CodeGraph hands the agent the exact code it needs in one call.** It's a pre-built knowledge graph of every symbol, call edge, and dependency in your codebase — so instead of crawling files, the agent asks one question and gets back the relevant source, the call paths between those symbols (including dynamic-dispatch hops grep can't follow), and the blast radius of a change. **Surgical context, not a file-by-file search** — which means fewer tool calls and faster answers on every codebase, large or small.
 
+<img width="1536" height="1024" alt="token-cost-savings-scale" src="https://github.com/user-attachments/assets/eb74a11a-a3ab-4b01-80a6-19f78352ae8e" />
+
 > **A note on cost:** CodeGraph's win on *every* codebase is precision and speed — fewer tool calls, faster answers. It cuts token and dollar cost too, but those savings are **scale-dependent**: small and noisy on a modest codebase, and material only once a repo is large and tangled — at the scale of a Google or Microsoft monorepo, multiplied by a whole team's daily agent usage — for them to compound into a real line item. On a 500-file project, adopt CodeGraph for the speed; the cost savings show up when the codebase (and the team) gets big.
 
 ### Benchmark Results
