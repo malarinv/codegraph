@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.1.0] - 2026-06-23
+
 ### New Features
 
 - **Claude Code:** an optional front-load hook makes your agent reach for CodeGraph automatically. When you ask a structural question — "how does X work", "what calls Y", "trace the flow from A to B" — CodeGraph injects the relevant source and call paths into the prompt up front, so the agent answers from the graph instead of grepping around to rebuild it. You're asked during `codegraph install` (default yes; Claude Code only, since it's the agent with prompt hooks), it's removed by `codegraph uninstall`, and `codegraph upgrade` turns it on for existing Claude setups. It's strictly additive and degradable — non-structural prompts and un-indexed projects are left alone — and you can switch it off any time without uninstalling by setting `CODEGRAPH_NO_PROMPT_HOOK=1`.
@@ -54,7 +57,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A C++ class or struct annotated with an export/visibility macro — `class MYLIB_EXPORT Foo : public Bar { … }`, the common DLL-export / visibility pattern in headers — is no longer mis-indexed as a function spanning the whole class body. Not knowing the macro is a macro, the parser read it as a type and the whole declaration as a function, so the class surfaced as a phantom `function` that showed up as a false caller in `codegraph callers`, `codegraph impact`, and blast-radius analysis, and skewed symbol counts. CodeGraph now recognizes this misparse and drops the bogus node. Thanks @spwlyzx. (#946)
 - `codegraph status` no longer reports phantom pending changes for files CodeGraph deliberately keeps out of the index — a tracked file inside a committed dependency dir (a checked-in `vendor/` or `node_modules/`), or a tracked file under a `.gitignore`d directory. A full index correctly excludes these, and `codegraph sync` never indexes them, but the fast change-detector behind `codegraph status` flagged every edit to such a file as "modified" (and a new one as "added") — so the pending-changes count never cleared no matter how many times you synced. Change detection now applies the same ignore rules the full index does, so `status` agrees with `sync`, and tools built on CodeGraph's change-detection API get the same corrected list. (#766)
 - Files reached through a symlinked directory that points outside your project now index instead of being silently skipped. When a folder in your repo is a symlink to a location outside the repo root — the standard layout for Dota 2 custom games and similar SDK-linked projects, where `game/` and `content/` link into the engine tree — CodeGraph followed the symlink to discover those files but then blocked every one of them while reading, logging `Path traversal blocked in batch reader` and indexing nothing under them. The reader now agrees with the directory scan and indexes those files. The guard against `../` path escapes is unchanged, and the protection that keeps your agent from being served file contents from outside the repo is also unchanged — only the indexer's own read path follows these in-repo symlinks. (#935)
-
 
 ## [1.0.1] - 2026-06-13
 
@@ -457,3 +459,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [0.9.9]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.9
 [1.0.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.0.0
 [1.0.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.0.1
+[1.1.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.0
