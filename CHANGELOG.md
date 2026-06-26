@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- CodeGraph no longer times out when many agents query it at once. The shared background server that serves all your editor and agent sessions used to run every query on a single thread, so a burst of concurrent requests — for example a swarm of subagents exploring a large monorepo together — queued up behind one another and, while the heavy ones ran, froze the connection so finished answers couldn't even be sent back until the whole batch drained. Past a handful of simultaneous callers that routinely surfaced as MCP request timeouts. The shared server now answers queries across a pool of worker threads, so concurrent requests run in parallel and the connection stays responsive the whole time; when it's genuinely saturated a call returns a brief "busy, retry shortly" note (not an error) instead of hanging past your client's timeout. The pool sizes itself to your machine — roughly one worker per core, leaving one for coordination — and a single editor session is unaffected (no pool, no overhead). Set `CODEGRAPH_QUERY_POOL_SIZE` to choose a specific number of workers, or `0` to revert to single-threaded in-process queries.
+
 
 ## [1.1.1] - 2026-06-24
 
