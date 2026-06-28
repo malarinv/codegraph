@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.1.2] - 2026-06-28
+
 ### New Features
 
 - You can now exclude committed directories from the index with an `exclude` list in `codegraph.json` — even when they're git-tracked. `.gitignore` can't drop a directory git already tracks, so a vendored theme or SDK that's checked into your repo (a committed Metronic theme under `static/`, a bundled vendor library) had no supported way to be kept out — it just bloated the graph and slowed indexing. Add a root `codegraph.json` with, e.g., `{ "exclude": ["static/", "**/vendor/**"] }` and those paths are skipped on indexing, sync, and file-watching, on both git and non-git projects. Patterns are gitignore-style and matched against repo-root-relative paths. This complements the existing `includeIgnored` (its opposite — opt *in* to gitignored embedded repos). (#999)
@@ -26,7 +29,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The background auto-sync server now starts for projects kept on an ExFAT or FAT external drive (and some network mounts). Those filesystems don't support the operations the server relies on to coordinate and to listen locally, so it failed immediately and re-logged the same error on every retry — background indexing was broken, so you had to run `codegraph sync` by hand after changes. (The MCP tools, the prompt hook, and manual `codegraph index`/`sync` were unaffected, since none of them need the server.) The server now works around those limitations automatically — falling back to a different coordination method and relocating its local socket to your system temp directory — so background indexing works there exactly like anywhere else, with no configuration needed. Verified end-to-end on real removable-drive filesystems on macOS, Linux, and Windows. Thanks @zengwenliang416 for the detailed report. (#997)
 - If you use CodeGraph as a library, the `QueryBuilder.deleteResolvedReferences()` helper no longer throws "too many SQL variables" when handed a very large list of ids — it issued one unbounded query, so a list longer than SQLite's parameter limit aborted the call. It now splits the work into batches like every other bulk query in the API. CodeGraph's own indexing and reference resolution never called this method (they use a different, already-batched path), so the CLI and MCP server were unaffected. Thanks @inth3shadows for the static analysis. (#1001)
 - Swift computed properties are now indexed, so you can search for them. A computed property — a `var isCloudProxy: Bool { … }` read all over a codebase, a SwiftUI view's `var body: some View { … }`, a protocol's `var title: String { get }` requirement — produced no symbol at all, so `codegraph query` and `codegraph_explore` answered "No results found" for it, and an agent that trusts an empty result would wrongly conclude the property doesn't exist. Computed properties (and protocol property requirements) are now graph symbols you can find and explore like anything else. A computed property's getter is also read as its body, so a SwiftUI view's `body` links to the subviews and helpers it builds — making a view's render flow traceable through the property. Stored properties were already indexed; this closes the computed-property gap. Thanks @monochrome3694 for the precise report and repro. (#1020)
-
 
 ## [1.1.1] - 2026-06-24
 
@@ -487,3 +489,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.0.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.0.1
 [1.1.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.0
 [1.1.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.1
+[1.1.2]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.2
