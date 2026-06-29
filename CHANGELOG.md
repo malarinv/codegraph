@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.1.3] - 2026-06-29
+
 ### Fixes
 
 - CodeGraph now indexes nested repositories that git records as gitlinks, so a workspace built by stacking several repos inside one another indexes completely from a single `codegraph init` at the top. When a repo contains another git repo that was `git add`ed into it — so git tracks it as a `160000` "commit" pointer rather than a folder of files — or a submodule that isn't an active, initialized submodule in your checkout, that nested repo's source used to be skipped entirely: indexing the top level stopped at the nested repo's boundary and pulled in only the outer repo's own files, so a stacked-repo project came up nearly empty (one report saw ~10 files indexed at the root). CodeGraph now descends into each such nested repo that has a real working tree on disk and indexes it as its own embedded repository, recursively, so every layer of a stacked workspace is covered. Active submodules (already handled) and plain untracked nested clones are unchanged; a nested repo under a dependency directory such as `vendor/` or `node_modules/` stays excluded; and a submodule with nothing checked out on disk is correctly left alone rather than reported as empty. Thanks @ofergr and @kun-yx for the reports. (#1031, #1033)
@@ -21,7 +24,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `codegraph query` no longer prints meaningless relevance percentages like "12042%" next to each result. The number was a raw full-text search score — useful only for ordering the results, not as a real 0–100% figure — so multiplying it by 100 produced wild values that made the output look broken. Results are already listed best-match first, so the CLI now just shows them in that order with no score, matching what the search tool reports to AI agents. If you script against `codegraph query --json`, the raw `score` is still included for sorting or thresholding. Thanks @jcrabapple for the report. (#1045)
 - `codegraph explore` no longer reports an alarming, inflated result count on broad natural-language queries. The "Found N symbols across M files" summary used to count every symbol the search swept in while ranking, so a broad query (for example "publish status to the API") on a large project could announce hundreds of symbols across a big fraction of the codebase — reading as if you had to wade through all of them — even though only the most relevant handful are actually shown with their source. The summary now counts just the files explore returns source for, so the number matches what you see. Ranking and results are unchanged: the right symbols still come first, and any further relevant files are still listed by name under "Not shown above" so nothing is hidden. Thanks @jcrabapple for the report. (#1046)
 - Android resource files no longer bloat the index. A `res/` tree — layouts, drawables, value bags (strings, colors, styles), menus, navigation graphs — contains no code symbols, but on an Android app it can be the overwhelming majority of files (one project: 26,000+ XML files, ~97% of everything, contributing zero symbols), which inflated the database, slowed indexing, and padded file counts and `codegraph explore`/search results with entries that have nothing to find. CodeGraph now skips Android resource directories by default — `res/layout/`, `res/values/`, `res/drawable/`, `res/menu/`, and the rest, including their locale/density/version variants like `res/values-es/` or `res/drawable-hdpi/`. Your actual code is untouched, and so is the one kind of XML that does carry symbols — MyBatis mapper files, which live under `src/main/resources/`, not `res/`. `res/raw/` is deliberately kept (it can hold real assets), and you can re-include any excluded directory with a `.gitignore` negation such as `!res/values/`. Thanks @jcrabapple for the report. (#1047)
-
 
 ## [1.1.2] - 2026-06-28
 
@@ -503,3 +505,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.0
 [1.1.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.1
 [1.1.2]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.2
+[1.1.3]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.3
