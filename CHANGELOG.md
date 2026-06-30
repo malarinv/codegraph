@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.1.6] - 2026-06-30
+
 ### Fixes
 
 - The standalone installer (`install.sh`) no longer leaves old versions piling up on disk. Each upgrade installed the new release into its own directory and re-pointed the launcher at it, but never removed the previous ones — so on macOS and Linux a full vendored Node runtime (tens of MB per version) accumulated with every update. The installer now keeps only the version it just installed and removes the older ones automatically (the npm installer's download-fallback cache prunes the same way). Windows installs already replaced a single directory in place, so they were never affected. Anything still left behind under `~/.codegraph/versions` from earlier upgrades is safe to delete. Thanks @lalanbv for the report. (#1074)
@@ -526,3 +529,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.3]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.3
 [1.1.4]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.4
 [1.1.5]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.5
+[1.1.6]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.6
