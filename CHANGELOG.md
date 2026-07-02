@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.2.0] - 2026-07-02
+
 ### New Features
 
 - Method calls made through a local variable now resolve to the method in many more languages. When code does `const logger = new Logger(); logger.log();` (or the equivalent), CodeGraph infers the local variable's type from its declaration or initializer and links the call to the right method — so these calls now show up in callers, impact/blast-radius, and `codegraph_explore` flow traces instead of being dropped. Previously only C++ handled this; it now also covers TypeScript, JavaScript, Python, Java, C#, Kotlin, Swift, Go, Rust, Dart, Scala, and PHP. (#1108)
@@ -27,7 +30,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The set of C++ libraries whose macros are recognized for full return-type recovery was expanded well beyond Unreal Engine — now spanning Mozilla, Protobuf, {fmt}, nlohmann/json, GLM, Bullet, Skia, OpenCV, EASTL, Cocos2d-x, GLib, SQLite, and the common Windows calling conventions (so `HRESULT WINAPI CreateThing(...)` indexes as `CreateThing` returning `HRESULT`). Functions from libraries not on the list still get their name recovered automatically; being listed additionally recovers the return type. (#1103)
 - Graph traversal and blast-radius results no longer drop or miscount relationships in a handful of edge cases. When a symbol could be reached by more than one path, an impact/blast-radius query could leave out a direct dependency between two symbols that were already linked another way; separately, the lower-level graph traversal used by the library API could keep only one of several relationships between the same pair of symbols (for example a symbol that both calls and references another), count a caller reached through two different call sites twice, or return slightly more results than the requested size limit on a very highly-connected symbol. These were long-standing and mostly masked by later de-duplication, so day-to-day query results were largely unaffected, but the traversal now returns the complete, correctly-bounded set. Thanks @inth3shadows for the precise, individually-traced reports. (#1086, #1087, #1088, #1089, #1090)
 - Method calls to same-named classes in different files now resolve to the right definition. If two files each declared, say, a `Logger` class with its own `log()` method, a call could be linked to whichever definition happened to be indexed first — so a call in one file wrongly pointed at the class in another, mixing up that method's callers and blast radius. This affected calls written as `obj.log()`, `Logger.log()`, and `Logger::log()` across many languages, including C++, Python, TypeScript, Java, C#, and Rust. When a method name is ambiguous, CodeGraph now prefers the definition in the calling file itself — the correct target in the common case — while Java/Kotlin calls that an `import` already pins to another file are unaffected. Thanks @inth3shadows for the minimal repro and root-cause analysis. (#1079)
-
 
 ## [1.1.6] - 2026-06-30
 
@@ -549,3 +551,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.4]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.4
 [1.1.5]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.5
 [1.1.6]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.6
+[1.2.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.2.0
