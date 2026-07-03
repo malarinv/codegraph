@@ -815,7 +815,11 @@ export class ReferenceResolver {
     // If that didn't find the file, do NOT fall back to the symbol
     // name-matcher — it would mis-connect e.g. "inc/db.php" to an unrelated
     // db.php elsewhere in the tree (a wrong edge is worse than none, #660).
-    if (isPhpIncludePathRef(ref) || isCobolCopybookRef(ref)) {
+    // Terraform refs are directory-scoped by language semantics — the
+    // framework resolver IS the whole rulebook (`var.X` can never legally
+    // bind outside its module directory), so the name-matcher's
+    // qualified-name fallback would only ever add wrong cross-module edges.
+    if (isPhpIncludePathRef(ref) || isCobolCopybookRef(ref) || ref.language === 'terraform') {
       return candidates.length > 0
         ? candidates.reduce((best, curr) =>
             curr.confidence > best.confidence ? curr : best

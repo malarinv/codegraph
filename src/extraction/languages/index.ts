@@ -33,6 +33,7 @@ import { cobolExtractor } from './cobol';
 import { vbnetExtractor } from './vbnet';
 import { erlangExtractor } from './erlang';
 import { solidityExtractor } from './solidity';
+import { terraformExtractor } from './terraform';
 
 export const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
   typescript: typescriptExtractor,
@@ -63,4 +64,5 @@ export const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
   vbnet: vbnetExtractor,
   erlang: erlangExtractor,
   solidity: solidityExtractor,
+  terraform: terraformExtractor,
 };

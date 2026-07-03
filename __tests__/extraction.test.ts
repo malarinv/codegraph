@@ -131,6 +131,13 @@ describe('Language Detection', () => {
     expect(detectLanguage('contracts/Vault.sol')).toBe('solidity');
   });
 
+  it('should detect Terraform files', () => {
+    expect(detectLanguage('main.tf')).toBe('terraform');
+    expect(detectLanguage('variables.tf')).toBe('terraform');
+    expect(detectLanguage('terraform.tfvars')).toBe('terraform');
+    expect(detectLanguage('versions.tofu')).toBe('terraform');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.css')).toBe('unknown');
     expect(detectLanguage('data.json')).toBe('unknown');
@@ -9830,6 +9837,289 @@ init(_) -> {ok, #{}}.
       const result = extractFromSource('src/b.erl', code);
       const fns = result.nodes.filter((n) => n.kind === 'function');
       expect(fns).toHaveLength(0);
+    });
+  });
+});
+
+describe('Terraform Extraction', () => {
+  describe('Language detection', () => {
+    it('should detect Terraform files', () => {
+      expect(detectLanguage('main.tf')).toBe('terraform');
+      expect(detectLanguage('terraform.tfvars')).toBe('terraform');
+      expect(detectLanguage('versions.tofu')).toBe('terraform');
+    });
+
+    it('should report Terraform as supported', () => {
+      expect(isLanguageSupported('terraform')).toBe(true);
+      expect(getSupportedLanguages()).toContain('terraform');
+    });
+  });
+
+  describe('Block extraction', () => {
+    it('should extract a resource block as a class with qualified type.name', () => {
+      const code = `
+resource "aws_s3_bucket" "my_bucket" {
+  bucket = "example"
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const res = result.nodes.find((n) => n.name === 'aws_s3_bucket.my_bucket');
+      expect(res).toBeDefined();
+      expect(res?.kind).toBe('class');
+      expect(res?.qualifiedName).toBe('aws_s3_bucket.my_bucket');
+      expect(res?.signature).toBe('resource "aws_s3_bucket" "my_bucket"');
+      expect(res?.language).toBe('terraform');
+    });
+
+    it('should extract a data block under the data.* qualified name', () => {
+      const code = `
+data "aws_caller_identity" "current" {}
+`;
+      const result = extractFromSource('main.tf', code);
+      const node = result.nodes.find((n) => n.qualifiedName === 'data.aws_caller_identity.current');
+      expect(node).toBeDefined();
+      expect(node?.kind).toBe('class');
+    });
+
+    it('should extract a variable block as variable with qualified name var.X', () => {
+      const code = `
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+`;
+      const result = extractFromSource('variables.tf', code);
+      const v = result.nodes.find((n) => n.qualifiedName === 'var.region');
+      expect(v).toBeDefined();
+      expect(v?.kind).toBe('variable');
+      expect(v?.name).toBe('region');
+    });
+
+    it('should extract an output block as variable with qualified name output.X', () => {
+      const code = `
+output "bucket_arn" {
+  value = aws_s3_bucket.my_bucket.arn
+}
+`;
+      const result = extractFromSource('outputs.tf', code);
+      const out = result.nodes.find((n) => n.qualifiedName === 'output.bucket_arn');
+      expect(out).toBeDefined();
+      expect(out?.kind).toBe('variable');
+    });
+
+    it('should extract a module block as module with qualified name module.X', () => {
+      const code = `
+module "vpc" {
+  source = "./modules/vpc"
+  cidr   = var.vpc_cidr
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const m = result.nodes.find((n) => n.qualifiedName === 'module.vpc');
+      expect(m).toBeDefined();
+      expect(m?.kind).toBe('module');
+    });
+
+    it('should extract a provider block as namespace', () => {
+      const code = `
+provider "aws" {
+  region = "us-east-1"
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const p = result.nodes.find((n) => n.qualifiedName === 'provider.aws');
+      expect(p).toBeDefined();
+      expect(p?.kind).toBe('namespace');
+    });
+
+    it('should extract every locals attribute as its own constant with local.K qualified name', () => {
+      const code = `
+locals {
+  prefix      = "prod"
+  full_name   = "\${local.prefix}-app"
+  max_retries = 3
+}
+`;
+      const result = extractFromSource('locals.tf', code);
+      const names = result.nodes
+        .filter((n) => n.kind === 'constant')
+        .map((n) => n.qualifiedName)
+        .sort();
+      expect(names).toEqual(['local.full_name', 'local.max_retries', 'local.prefix']);
+    });
+
+    it('should ignore a terraform settings block', () => {
+      const code = `
+terraform {
+  required_version = ">= 1.5"
+}
+`;
+      const result = extractFromSource('versions.tf', code);
+      const symbols = result.nodes.filter((n) => n.kind !== 'file');
+      expect(symbols).toHaveLength(0);
+    });
+
+    it('should index .tfvars top-level attributes via the same parser path', () => {
+      // .tfvars files have no blocks — just bare attributes, each of which
+      // SETS the root module variable of that name. No symbols are declared,
+      // but every top-level assignment references its variable so "what sets
+      // var.region" is answerable.
+      const code = `
+region      = "us-east-1"
+environment = "prod"
+`;
+      const result = extractFromSource('terraform.tfvars', code);
+      expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+      const symbols = result.nodes.filter((n) => n.kind !== 'file');
+      expect(symbols).toHaveLength(0);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('var.region');
+      expect(refs).toContain('var.environment');
+    });
+  });
+
+  describe('Reference extraction', () => {
+    it('should emit a reference for var.X used inside a resource', () => {
+      const code = `
+variable "region" {}
+resource "aws_s3_bucket" "b" {
+  bucket = var.region
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('var.region');
+    });
+
+    it('should emit a reference for module.M.<output> as module.M', () => {
+      const code = `
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}
+`;
+      const result = extractFromSource('outputs.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('module.vpc');
+    });
+
+    it('should emit a scoped module.M:output.X ref alongside module.M for output chains', () => {
+      const code = `
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}
+`;
+      const result = extractFromSource('outputs.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('module.vpc:output.vpc_id');
+      // A bare module.M use (no output segment) stays a single ref.
+      const bare = extractFromSource('main.tf', 'output "m" {\n  value = module.vpc\n}\n');
+      const bareRefs = bare.unresolvedReferences.map((r) => r.referenceName);
+      expect(bareRefs).toContain('module.vpc');
+      expect(bareRefs.some((r) => r.includes(':output.'))).toBe(false);
+    });
+
+    it('should wire module blocks: scoped input refs, meta-args skipped, local source imported', () => {
+      const code = `
+module "vpc" {
+  source     = "./modules/vpc"
+  version    = "1.0.0"
+  count      = 2
+  depends_on = [aws_iam_role.net]
+  cidr       = var.vpc_cidr
+  name       = "prod"
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      // Input attributes wire to the child module's variables (scoped spelling).
+      expect(refs).toContain('module.vpc:var.cidr');
+      expect(refs).toContain('module.vpc:var.name');
+      // Meta-arguments configure the call, not child variables.
+      expect(refs).not.toContain('module.vpc:var.source');
+      expect(refs).not.toContain('module.vpc:var.version');
+      expect(refs).not.toContain('module.vpc:var.count');
+      expect(refs).not.toContain('module.vpc:var.depends_on');
+      // A local ./ source emits the module→file imports ref.
+      const fileRef = result.unresolvedReferences.find((r) => r.referenceName === 'module.vpc:file');
+      expect(fileRef).toBeDefined();
+      expect(fileRef?.referenceKind).toBe('imports');
+      // Attribute VALUES still reference the parent scope as before.
+      expect(refs).toContain('var.vpc_cidr');
+      expect(refs).toContain('aws_iam_role.net');
+    });
+
+    it('should not emit a module.M:file ref for registry or git sources', () => {
+      const code = `
+module "s3" {
+  source  = "terraform-aws-modules/s3-bucket/aws"
+  version = "4.0.0"
+  bucket  = "x"
+}
+module "net" {
+  source = "git::https://example.com/net.git"
+  cidr   = "10.0.0.0/16"
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs.some((r) => r.endsWith(':file'))).toBe(false);
+      // Input wiring is still emitted — the resolver drops it when the
+      // source turns out to be out-of-repo.
+      expect(refs).toContain('module.s3:var.bucket');
+    });
+
+    it('should emit data.T.N references stripped of the trailing attribute', () => {
+      const code = `
+output "account" {
+  value = data.aws_caller_identity.current.account_id
+}
+`;
+      const result = extractFromSource('outputs.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('data.aws_caller_identity.current');
+    });
+
+    it('should emit T.N references for managed-resource attribute access', () => {
+      const code = `
+resource "aws_iam_policy" "p" {
+  policy = aws_s3_bucket.my.arn
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('aws_s3_bucket.my');
+    });
+
+    it('should emit local.K references from locals attribute expressions', () => {
+      const code = `
+locals {
+  prefix = "prod"
+  name   = "\${local.prefix}-app"
+}
+`;
+      const result = extractFromSource('locals.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('local.prefix');
+    });
+
+    it('should skip built-in heads (each, count, self, path, terraform.workspace)', () => {
+      const code = `
+resource "aws_instance" "x" {
+  count       = each.value
+  name        = path.module
+  workspace   = terraform.workspace
+  self_ref    = self.id
+  index_value = count.index
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      // None of the built-ins should produce project references.
+      expect(refs.some((r) => r.startsWith('each.'))).toBe(false);
+      expect(refs.some((r) => r.startsWith('count.'))).toBe(false);
+      expect(refs.some((r) => r.startsWith('self.'))).toBe(false);
+      expect(refs.some((r) => r.startsWith('path.'))).toBe(false);
+      expect(refs.some((r) => r.startsWith('terraform.'))).toBe(false);
     });
   });
 });

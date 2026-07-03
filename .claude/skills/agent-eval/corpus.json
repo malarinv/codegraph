@@ -538,5 +538,28 @@
       "files": "~2700",
       "question": "When a cutlass device-level GEMM (cutlass::gemm::device::Gemm) is invoked, how does it reach the GPU kernel? Trace from the operator() call to the kernel entry point and its launch site."
     }
+  ],
+  "Terraform": [
+    {
+      "name": "terraform-aws-vpc",
+      "repo": "https://github.com/terraform-aws-modules/terraform-aws-vpc",
+      "size": "Small",
+      "files": "~77",
+      "question": "How does the private_subnets variable shape the NAT gateway setup? Trace from the variable through the subnet and NAT gateway resources to the outputs that expose the private subnets."
+    },
+    {
+      "name": "cloud-foundation-fabric",
+      "repo": "https://github.com/GoogleCloudPlatform/cloud-foundation-fabric",
+      "size": "Medium",
+      "files": "~990",
+      "question": "In the project module (modules/project), how does the iam variable turn into actual IAM bindings on the project, and what depends on the module's project_id output elsewhere in the repo?"
+    },
+    {
+      "name": "terraform-aws-components",
+      "repo": "https://github.com/cloudposse/terraform-aws-components",
+      "size": "Large",
+      "files": "~1800",
+      "question": "In the eks/cluster component, how does the cluster IAM role get created and reach the EKS cluster resource, and which outputs expose cluster identity to other components?"
+    }
   ]
 }

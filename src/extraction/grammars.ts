@@ -46,6 +46,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   vbnet: 'tree-sitter-vbnet.wasm',
   erlang: 'tree-sitter-erlang.wasm',
   solidity: 'tree-sitter-solidity.wasm',
+  terraform: 'tree-sitter-terraform.wasm',
 };
 
 /**
@@ -157,6 +158,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // shape as the `.yml` variants — the YAML/properties extractor emits one node
   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
   '.properties': 'properties',
+  // Terraform / OpenTofu / HCL config — tree-sitter-terraform dialect of HCL.
+  '.tf': 'terraform',
+  '.tfvars': 'terraform',
+  '.tofu': 'terraform',
 };
 
 /**
@@ -283,8 +288,11 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
       // build (ABI 13) has no primary-constructor support and parses
       // `class Foo(...)` as an ERROR that swallows the whole class (#237); we
       // vendor the upstream ABI-15 tree-sitter-c-sharp 0.23.5 wasm, which parses
-      // primary constructors natively.
-      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet' || lang === 'erlang')
+      // primary constructors natively. Terraform: tree-sitter-wasms does not
+      // ship HCL/Terraform at all, so we vendor the prebuilt
+      // tree-sitter-terraform.wasm from @tree-sitter-grammars/tree-sitter-hcl
+      // 1.2.0 (Apache-2.0) — byte-identical to the npm package's artifact.
+      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet' || lang === 'erlang' || lang === 'terraform')
         ? path.join(__dirname, 'wasm', wasmFile)
         : require.resolve(`tree-sitter-wasms/out/${wasmFile}`);
       const language = await WasmLanguage.load(wasmPath);
@@ -509,6 +517,7 @@ export function getLanguageDisplayName(language: Language): string {
     cobol: 'COBOL',
     vbnet: 'Visual Basic .NET',
     erlang: 'Erlang',
+    terraform: 'Terraform',
     unknown: 'Unknown',
   };
   return names[language] || language;
