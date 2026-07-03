@@ -382,6 +382,20 @@ export class TreeSitterExtractor {
   private errors: ExtractionError[] = [];
   private extractor: LanguageExtractor | null = null;
   private nodeStack: string[] = []; // Stack of parent node IDs
+  // C/C++ enclosing `namespace ns { … }` names, prepended to every contained
+  // symbol's qualifiedName (see visitNode). Prefix-only by design — no
+  // namespace NODE is created: `namespace cutlass {` opens in thousands of
+  // files, and a node per block would flood search with same-named symbols
+  // (the #1093 crowd-out failure mode). Always empty outside C/C++.
+  private namespacePrefix: string[] = [];
+  // C++ local function-pointer bindings, per enclosing symbol:
+  // `auto kernel = &flash_fwd_kernel<…>;` recorded as callerId → kernel →
+  // {flash_fwd_kernel}, so a later `kernel<<<grid, block>>>(params)` (or plain
+  // `kernel(args)`) in the same body emits calls refs to the real target(s)
+  // instead of an unresolvable local name. Branch reassignments accumulate —
+  // each assigned target is a genuine possible callee. Same-body locality is
+  // the precision guard (the #932 table-dispatch philosophy scoped to locals).
+  private cppLocalFnPtrs = new Map<string, Map<string, Set<string>>>();
   private methodIndex: Map<string, string> | null = null; // lookup key → node ID for Pascal defProc lookup
   // Function-as-value capture (#756): per-language spec + candidates collected
   // during the walk, gated & flushed into unresolvedReferences at end-of-file
@@ -909,6 +923,31 @@ export class TreeSitterExtractor {
       if (skipChildren) return;
     }
 
+    // C++ namespace blocks: carry the namespace name as a qualifiedName prefix
+    // while walking the body, so `namespace flash { void compute_attn(); }`
+    // indexes compute_attn with qualifiedName `flash::compute_attn` and a
+    // namespace-qualified call (`flash::compute_attn(...)`) resolves by exact
+    // qualified match instead of never resolving — C++ namespaces previously
+    // left no trace in qualifiedNames at all, so every `ns::fn()` call site
+    // was a permanently dead edge (surfaced by #387 flow validation on
+    // flash-attention/cutlass, whose kernel dispatch is namespace-qualified).
+    // C++17 nested forms (`namespace a::b {`) prefix as written. An anonymous
+    // namespace falls through to the generic walk — its contents stay bare,
+    // matching how call sites spell them.
+    if (this.language === 'cpp' && nodeType === 'namespace_definition') {
+      const nameNode = getChildByField(node, 'name');
+      const nsName = nameNode ? getNodeText(nameNode, this.source) : '';
+      if (nsName) {
+        this.namespacePrefix.push(nsName);
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const child = node.namedChild(i);
+          if (child) this.visitNode(child);
+        }
+        this.namespacePrefix.pop();
+        return;
+      }
+    }
+
     // Function-as-value capture (#756) — independent of the dispatch ladder
     // below (the captured container types have no other handler there), so it
     // can never shadow or be shadowed by an extraction branch.
@@ -1345,7 +1384,8 @@ export class TreeSitterExtractor {
   private buildQualifiedName(name: string): string {
     // Build a qualified name from the semantic hierarchy only (no file path).
     // The file path is stored separately in filePath and pollutes FTS if included here.
-    const parts: string[] = [];
+    // C/C++ enclosing namespaces prefix first (empty for every other language).
+    const parts: string[] = [...this.namespacePrefix];
     for (const nodeId of this.nodeStack) {
       const node = this.nodes.find((n) => n.id === nodeId);
       if (node && node.kind !== 'file') {
@@ -4183,6 +4223,44 @@ export class TreeSitterExtractor {
       if (conv && conv[1]) calleeName = conv[1];
     }
 
+    // C/C++ templated callees — a direct templated call (`fn<T, 256>(args)`,
+    // the shape every CUDA kernel-launch site takes once its `<<<…>>>` config
+    // is blanked) or a qualified one (`ns::fn<T>(args)`) — carry template
+    // arguments in the callee text, which can never match the bare name the
+    // function was DEFINED as, so the call edge silently never resolves. Strip
+    // them: the same normalization base-class `extends` refs already get
+    // (#1043). `operator<`/`operator<<` callees are excluded — their `<` is the
+    // operator itself, not a template-argument list.
+    if (
+      calleeName &&
+      calleeName.includes('<') &&
+      (this.language === 'cpp' || this.language === 'c') &&
+      !calleeName.includes('operator')
+    ) {
+      calleeName = stripCppTemplateArgs(calleeName);
+    }
+
+    // C++ call/launch through a local function pointer: `auto kernel =
+    // &flash_fwd_kernel<…>; … kernel<<<grid, block>>>(params);` — the callee
+    // is an unresolvable local name. When the same enclosing symbol bound the
+    // local from `&fn` (each branch assignment counts), emit the call against
+    // every recorded target instead of the local.
+    if (calleeName && this.language === 'cpp' && /^[A-Za-z_]\w*$/.test(calleeName)) {
+      const targets = this.cppLocalFnPtrs.get(callerId)?.get(calleeName);
+      if (targets && targets.size > 0) {
+        for (const target of targets) {
+          this.unresolvedReferences.push({
+            fromNodeId: callerId,
+            referenceName: target,
+            referenceKind: 'calls',
+            line: node.startPosition.row + 1,
+            column: node.startPosition.column,
+          });
+        }
+        return;
+      }
+    }
+
     if (calleeName) {
       this.unresolvedReferences.push({
         fromNodeId: callerId,
@@ -4704,6 +4782,42 @@ export class TreeSitterExtractor {
     flush();
   }
 
+  /**
+   * Record a C++ local function-pointer binding (`local = &fn` / `&fn<…>` /
+   * `&ns::fn<…>`) for the CURRENT enclosing symbol, so calls through the local
+   * resolve to the real target (see cppLocalFnPtrs). Only the address-of shape
+   * is accepted — a bare-identifier RHS (`auto x = y;`) is any value copy, and
+   * linking through it would guess.
+   */
+  private recordCppFnPtrBinding(localName: string, value: SyntaxNode | null): void {
+    if (!value || value.type !== 'pointer_expression') return;
+    if (value.child(0)?.type !== '&') return; // `*p` dereference, not address-of
+    const arg = getChildByField(value, 'argument') ?? value.namedChild(0);
+    if (
+      !arg ||
+      (arg.type !== 'identifier' &&
+        arg.type !== 'template_function' &&
+        arg.type !== 'qualified_identifier')
+    ) {
+      return;
+    }
+    const callerId = this.nodeStack[this.nodeStack.length - 1];
+    if (!callerId) return;
+    const target = stripCppTemplateArgs(getNodeText(arg, this.source));
+    if (!target || target === localName) return;
+    let locals = this.cppLocalFnPtrs.get(callerId);
+    if (!locals) {
+      locals = new Map();
+      this.cppLocalFnPtrs.set(callerId, locals);
+    }
+    let targets = locals.get(localName);
+    if (!targets) {
+      targets = new Set();
+      locals.set(localName, targets);
+    }
+    targets.add(target);
+  }
+
   private visitFunctionBody(body: SyntaxNode, _functionId: string): void {
     if (!this.extractor) return;
 
@@ -4761,6 +4875,35 @@ export class TreeSitterExtractor {
       // (`Calculator calc(make())`) keeps its own `calls` ref.
       if (nodeType === 'declaration' && this.language === 'cpp' && this.isCppStackConstruction(node)) {
         this.extractInstantiation(node);
+      }
+
+      // C++ local function-pointer bindings (see cppLocalFnPtrs): record
+      // `auto kernel = &fn<…>;` declarations and `kernel = &other_fn<…>;`
+      // branch reassignments so a call/launch through the local links to the
+      // real target(s). The body walker sees these in source order, and C++
+      // requires declaration-before-use, so the map is always populated before
+      // the call that consumes it.
+      if (this.language === 'cpp' && this.nodeStack.length > 0) {
+        if (nodeType === 'declaration') {
+          for (let i = 0; i < node.namedChildCount; i++) {
+            const child = node.namedChild(i);
+            if (child?.type !== 'init_declarator') continue;
+            const decl = getChildByField(child, 'declarator');
+            if (decl?.type !== 'identifier') continue;
+            this.recordCppFnPtrBinding(
+              getNodeText(decl, this.source),
+              getChildByField(child, 'value')
+            );
+          }
+        } else if (nodeType === 'assignment_expression') {
+          const left = getChildByField(node, 'left');
+          if (left?.type === 'identifier') {
+            this.recordCppFnPtrBinding(
+              getNodeText(left, this.source),
+              getChildByField(node, 'right')
+            );
+          }
+        }
       }
 
       // Static-member / value-read: `Enum.value`, `Type.CONST`, `Foo::BAR`.

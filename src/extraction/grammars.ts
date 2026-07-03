@@ -125,6 +125,13 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // structs, and calls. MSL-specific `[[attribute]]` annotations are blanked
   // pre-parse for `.metal` files (see blankMetalAttributes in c-cpp.ts). (#1121)
   '.metal': 'cpp',
+  // CUDA ≈ C++ plus execution-space specifiers (`__global__` …) and
+  // `<<<grid, block>>>` kernel-launch syntax: the C++ grammar extracts its
+  // functions/structs/classes/calls once blankCudaConstructs (pre-parse; gated
+  // by these extensions OR by content for CUDA living in `.h`/`.hpp` headers —
+  // see c-cpp.ts) blanks the CUDA-only tokens. (#387)
+  '.cu': 'cpp',
+  '.cuh': 'cpp',
   // XML: file-level tracking; the MyBatis extractor matches `<mapper namespace="...">`
   // shape and emits SQL-statement nodes (other XML returns empty).
   '.xml': 'xml',

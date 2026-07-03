@@ -515,5 +515,28 @@
       "files": "~400",
       "question": "How does an OpenZeppelin AccessControl-protected function check the caller's role? Trace from the onlyRole modifier through hasRole to the role storage."
     }
+  ],
+  "CUDA": [
+    {
+      "name": "llm.c",
+      "repo": "https://github.com/karpathy/llm.c",
+      "size": "Small",
+      "files": "~76",
+      "question": "How does the attention forward pass reach the GPU in the CUDA training path? Trace from attention_forward to the kernels it launches, and explain where softmax happens."
+    },
+    {
+      "name": "flash-attention",
+      "repo": "https://github.com/Dao-AILab/flash-attention",
+      "size": "Medium",
+      "files": "~900",
+      "question": "How does a Python call to flash_attn_func reach the CUDA kernel that computes forward attention? Trace the dispatch path from the Python API through the C++ binding to the kernel launch."
+    },
+    {
+      "name": "cutlass",
+      "repo": "https://github.com/NVIDIA/cutlass",
+      "size": "Large",
+      "files": "~2700",
+      "question": "When a cutlass device-level GEMM (cutlass::gemm::device::Gemm) is invoked, how does it reach the GPU kernel? Trace from the operator() call to the kernel entry point and its launch site."
+    }
   ]
 }
