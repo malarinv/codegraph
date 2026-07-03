@@ -140,6 +140,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // tree-sitter-erlang grammar (the ELP grammar).
   '.erl': 'erlang',
   '.hrl': 'erlang',
+  // escripts parse natively — the grammar has a first-class `shebang` node.
+  // (`.app`/`.app.src` resource files route via isErlangAppFile below: their
+  // last-dot extension is too generic for this map.)
+  '.escript': 'erlang',
   // Spring config: `application.properties` / `application-*.properties`. Same
   // shape as the `.yml` variants — the YAML/properties extractor emits one node
   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
@@ -158,6 +162,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
 export function isSourceFile(filePath: string, overrides?: Record<string, Language>): boolean {
   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
   if (isShopifyLiquidJson(filePath)) return true; // Shopify OS 2.0 JSON templates / section groups
+  if (isErlangAppFile(filePath)) return true; // OTP `.app`/`.app.src` resource files
   const dot = filePath.lastIndexOf('.');
   if (dot < 0) return false;
   const ext = filePath.slice(dot).toLowerCase();
@@ -173,6 +178,18 @@ export function isShopifyLiquidJson(filePath: string): boolean {
   // Allow nested template dirs (`templates/customers/login.json`), not just
   // top-level (`templates/product.json`).
   return /(^|\/)(templates|sections)\/.+\.json$/i.test(filePath);
+}
+
+/**
+ * OTP application resource file: `<app>.app.src` (checked into every rebar3/
+ * erlang.mk app) or its compiled `<app>.app`. Erlang TERMS, not forms — the
+ * grammar parses them as top-level expressions, and the Erlang extractor's
+ * application-tuple handler turns `{mod, {Mod, _}}` and `{applications, […]}`
+ * into entry-module and dependency edges. Routed by full suffix because the
+ * last-dot extension (`.src`) is far too generic for EXTENSION_MAP.
+ */
+export function isErlangAppFile(filePath: string): boolean {
+  return /\.app(?:\.src)?$/i.test(filePath);
 }
 
 /**
@@ -322,6 +339,9 @@ export function detectLanguage(filePath: string, source?: string, overrides?: Re
   // Shopify OS 2.0 JSON templates / section groups → the Liquid extractor (it
   // links each section `"type"` to its `sections/<type>.liquid`).
   if (isShopifyLiquidJson(filePath)) return 'liquid';
+  // OTP `.app`/`.app.src` resource files — Erlang terms the grammar parses as
+  // top-level expressions (last-dot ext `.src` is too generic for the map).
+  if (isErlangAppFile(filePath)) return 'erlang';
   const lang = (overrides && overrides[ext]) || EXTENSION_MAP[ext] || 'unknown';
 
   // .h files could be C, C++, or Objective-C — check source content

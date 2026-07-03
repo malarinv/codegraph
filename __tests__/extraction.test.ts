@@ -110,6 +110,14 @@ describe('Language Detection', () => {
   it('should detect Erlang files', () => {
     expect(detectLanguage('src/my_server.erl')).toBe('erlang');
     expect(detectLanguage('include/records.hrl')).toBe('erlang');
+    expect(detectLanguage('bin/release_tool.escript')).toBe('erlang');
+    // OTP app resource files route by full suffix — `.src` alone is too generic.
+    expect(detectLanguage('src/myapp.app.src')).toBe('erlang');
+    expect(detectLanguage('ebin/myapp.app')).toBe('erlang');
+    expect(detectLanguage('legacy/module.src')).toBe('unknown');
+    expect(isSourceFile('src/myapp.app.src')).toBe(true);
+    expect(isSourceFile('ebin/myapp.app')).toBe(true);
+    expect(isSourceFile('legacy/module.src')).toBe(false);
   });
 
   it('should return unknown for unsupported extensions', () => {
@@ -9131,6 +9139,54 @@ second(X) -> X.
       ).map((r) => r.referenceName);
       expect(calls).toContain('first');
       expect(calls).toContain('second');
+    });
+  });
+
+  describe('escript and app resource files', () => {
+    it('should extract functions and calls from an escript behind a shebang', () => {
+      const code = `#!/usr/bin/env escript
+%%! -smp enable
+
+main([Path]) ->
+    Result = analyze(Path),
+    io:format("~p~n", [Result]).
+
+analyze(Path) ->
+    {ok, Bin} = file:read_file(Path),
+    byte_size(Bin).
+`;
+      const result = extractFromSource('bin/tool.escript', code);
+      const fns = result.nodes.filter((n) => n.kind === 'function').map((n) => n.name);
+      expect(fns).toContain('main');
+      expect(fns).toContain('analyze');
+      const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+      expect(calls).toContain('analyze');
+      expect(calls).toContain('io::format');
+    });
+
+    it('should link an app resource file to its callback module and dependency apps', () => {
+      const code = `{application, sample, [
+    {description, "Sample application"},
+    {vsn, "1.0.0"},
+    {registered, [sample_server]},
+    {mod, {sample_app, []}},
+    {applications, [kernel, stdlib, sample_core]},
+    {included_applications, [sample_extra]},
+    {env, [{limit, 100}]},
+    {modules, []}
+]}.
+`;
+      const result = extractFromSource('src/sample.app.src', code);
+      const refs = result.unresolvedReferences.map((r) => `${r.referenceKind}:${r.referenceName}`);
+      // The application-callback module is the app's entry point.
+      expect(refs).toContain('references:sample_app');
+      // Dependencies resolve to umbrella siblings; kernel/stdlib just drop.
+      expect(refs).toContain('imports:kernel');
+      expect(refs).toContain('imports:sample_core');
+      expect(refs).toContain('imports:sample_extra');
+      // Registered names, env values, and the like carry no graph structure.
+      expect(refs.filter((r) => r.endsWith(':sample_server'))).toHaveLength(0);
+      expect(refs.filter((r) => r.endsWith(':limit'))).toHaveLength(0);
     });
   });
 

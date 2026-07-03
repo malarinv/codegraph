@@ -142,6 +142,35 @@ describe('Resolution Module', () => {
       // In-repo behaviour module resolves to its namespace.
       const resolved = matchReference(mkRef('my_behaviour'), context);
       expect(resolved?.targetNodeId).toBe(behaviourModule.id);
+
+      // The same module-only rule covers refs emitted by .app/.app.src
+      // resource files: on emqx, the `ssl` OTP app dependency resolved to a
+      // test helper FUNCTION named ssl. A colliding non-module name stays
+      // unresolved; a real umbrella-sibling module resolves.
+      nodes.push({
+        id: 'function:test/ldap_SUITE.erl:ssl:12',
+        kind: 'function',
+        name: 'ssl',
+        qualifiedName: 'ldap_SUITE::ssl',
+        filePath: 'test/ldap_SUITE.erl',
+        language: 'erlang',
+        startLine: 12,
+        endLine: 14,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+      });
+      const appRef = (name: string) => ({
+        fromNodeId: 'file:src/myapp.app.src',
+        referenceName: name,
+        referenceKind: 'imports' as const,
+        line: 6,
+        column: 0,
+        filePath: 'src/myapp.app.src',
+        language: 'erlang' as const,
+      });
+      expect(matchReference(appRef('ssl'), context)).toBeNull();
+      expect(matchReference(appRef('my_behaviour'), context)?.targetNodeId).toBe(behaviourModule.id);
     });
 
     it('should prefer same-module candidates over cross-module matches', () => {

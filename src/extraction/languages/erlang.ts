@@ -213,6 +213,52 @@ function handleBehaviour(node: SyntaxNode, ctx: ExtractorContext): boolean {
   return true;
 }
 
+/**
+ * OTP application resource file (`<app>.app.src` / `<app>.app`): a single
+ * `{application, Name, Props}.` term the grammar parses as a top-level
+ * expression. Two properties carry graph structure — `{mod, {Mod, _Args}}`
+ * names the application-callback module (the app's entry point), and
+ * `{applications, [...]}` / `{included_applications, [...]}` declare the apps
+ * this one depends on. In an umbrella repo those resolve to the sibling app's
+ * module of the same name (the OTP convention); kernel/stdlib and other
+ * out-of-repo apps stay unresolved.
+ */
+function handleAppResourceTuple(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
+  const props = node.namedChildren[2];
+  if (!parentId || props?.type !== 'list') return true;
+  const ref = (nameNode: SyntaxNode, kind: 'references' | 'imports'): void => {
+    const name = atomText(nameNode, ctx.source);
+    if (!name) return;
+    ctx.addUnresolvedReference({
+      fromNodeId: parentId,
+      referenceName: name,
+      referenceKind: kind,
+      line: nameNode.startPosition.row + 1,
+      column: nameNode.startPosition.column,
+    });
+  };
+  for (const prop of props.namedChildren) {
+    if (prop.type !== 'tuple' || prop.namedChildren.length < 2) continue;
+    const key = prop.namedChildren[0];
+    const value = prop.namedChildren[1];
+    if (!key || key.type !== 'atom' || !value) continue;
+    const keyName = atomText(key, ctx.source);
+    if (keyName === 'mod' && value.type === 'tuple') {
+      const mod = value.namedChildren[0];
+      if (mod?.type === 'atom') ref(mod, 'references');
+    } else if (
+      (keyName === 'applications' || keyName === 'included_applications') &&
+      value.type === 'list'
+    ) {
+      for (const app of value.namedChildren) {
+        if (app.type === 'atom') ref(app, 'imports');
+      }
+    }
+  }
+  return true; // nothing else in an app term carries graph structure
+}
+
 export const erlangExtractor: LanguageExtractor = {
   functionTypes: ['fun_decl'], // dispatched via visitNode (name lives on the clause)
   classTypes: [],
@@ -282,6 +328,18 @@ export const erlangExtractor: LanguageExtractor = {
       case 'spec':
       case 'callback':
         return true;
+      // `{application, Name, Props}.` at the top of an .app/.app.src resource
+      // file (never a valid form in a module, so the gate is file + position).
+      case 'tuple':
+        if (
+          node.parent?.type === 'source_file' &&
+          /\.app(?:\.src)?$/i.test(ctx.filePath) &&
+          node.namedChildren[0]?.type === 'atom' &&
+          atomText(node.namedChildren[0]!, ctx.source) === 'application'
+        ) {
+          return handleAppResourceTuple(node, ctx);
+        }
+        return false;
       default:
         return false;
     }

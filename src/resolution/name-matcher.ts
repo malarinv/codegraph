@@ -1758,8 +1758,14 @@ export function matchReference(
   // `-behaviour(supervisor)` resolved to a `-define(supervisor, …)` macro
   // constant in an unrelated app. Resolve only to the behaviour module's
   // namespace; an out-of-repo behaviour (OTP's gen_server/supervisor) stays
-  // unresolved rather than guessed.
-  if (ref.language === 'erlang' && ref.referenceKind === 'implements') {
+  // unresolved rather than guessed. The same module-only rule applies to every
+  // ref an `.app`/`.app.src` resource file emits — its `{mod, …}` callback and
+  // `{applications, …}` dependency names can only mean modules, and on emqx
+  // the `ssl` OTP app otherwise resolved to a test helper FUNCTION named ssl.
+  if (
+    ref.language === 'erlang' &&
+    (ref.referenceKind === 'implements' || /\.app(?:\.src)?$/i.test(ref.filePath))
+  ) {
     const modules = context
       .getNodesByName(ref.referenceName)
       .filter((n) => n.language === 'erlang' && n.kind === 'namespace');
