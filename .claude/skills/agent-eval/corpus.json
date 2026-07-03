@@ -492,5 +492,28 @@
       "files": "~2450",
       "question": "How does a PUBLISH packet from an MQTT client reach the sessions of matching subscribers? Trace the flow from the connection/channel layer through the broker's routing to session delivery."
     }
+  ],
+  "Solidity": [
+    {
+      "name": "solmate",
+      "repo": "https://github.com/transmissions11/solmate",
+      "size": "Small",
+      "files": "~60",
+      "question": "How does solmate's ERC20 transferFrom enforce allowance and update balances? Trace the flow including the permit() signature path."
+    },
+    {
+      "name": "solady",
+      "repo": "https://github.com/Vectorized/solady",
+      "size": "Medium",
+      "files": "~270",
+      "question": "How does solady's ERC20 implementation handle a permit() call — from signature recovery through nonce update to allowance write?"
+    },
+    {
+      "name": "openzeppelin-contracts",
+      "repo": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+      "size": "Large",
+      "files": "~400",
+      "question": "How does an OpenZeppelin AccessControl-protected function check the caller's role? Trace from the onlyRole modifier through hasRole to the role storage."
+    }
   ]
 }

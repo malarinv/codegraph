@@ -45,6 +45,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   cobol: 'tree-sitter-cobol.wasm',
   vbnet: 'tree-sitter-vbnet.wasm',
   erlang: 'tree-sitter-erlang.wasm',
+  solidity: 'tree-sitter-solidity.wasm',
 };
 
 /**
@@ -114,6 +115,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.luau': 'luau',
   '.m': 'objc',
   '.mm': 'objc',
+  '.sol': 'solidity',
   // CFML: .cfc/.cfm parse with the tag-aware `cfml` grammar (custom CfmlExtractor
   // dialect-switches to cfscript for bare-script content); .cfs is pure CFScript.
   '.cfc': 'cfml',
@@ -489,6 +491,7 @@ export function getLanguageDisplayName(language: Language): string {
     lua: 'Lua',
     luau: 'Luau',
     objc: 'Objective-C',
+    solidity: 'Solidity',
     yaml: 'YAML',
     twig: 'Twig',
     xml: 'XML',

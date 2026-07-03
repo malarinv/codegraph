@@ -32,6 +32,7 @@ import { cfqueryExtractor } from './cfquery';
 import { cobolExtractor } from './cobol';
 import { vbnetExtractor } from './vbnet';
 import { erlangExtractor } from './erlang';
+import { solidityExtractor } from './solidity';
 
 export const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
   typescript: typescriptExtractor,
@@ -61,4 +62,5 @@ export const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
   cobol: cobolExtractor,
   vbnet: vbnetExtractor,
   erlang: erlangExtractor,
+  solidity: solidityExtractor,
 };
