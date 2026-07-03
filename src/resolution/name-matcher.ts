@@ -1753,6 +1753,26 @@ export function matchReference(
     return matchFunctionRef(ref, context);
   }
 
+  // Erlang `-behaviour(m)` refs target a MODULE. Letting them fall through to
+  // bare-name matching grabs any same-named symbol — on emqx,
+  // `-behaviour(supervisor)` resolved to a `-define(supervisor, …)` macro
+  // constant in an unrelated app. Resolve only to the behaviour module's
+  // namespace; an out-of-repo behaviour (OTP's gen_server/supervisor) stays
+  // unresolved rather than guessed.
+  if (ref.language === 'erlang' && ref.referenceKind === 'implements') {
+    const modules = context
+      .getNodesByName(ref.referenceName)
+      .filter((n) => n.language === 'erlang' && n.kind === 'namespace');
+    const chosen = preferCallSiteFile(modules, ref.filePath)[0];
+    if (!chosen) return null;
+    return {
+      original: ref,
+      targetNodeId: chosen.id,
+      confidence: 0.9,
+      resolvedBy: 'exact-match',
+    };
+  }
+
   // Try strategies in order of confidence
   let result: ResolvedRef | null;
 

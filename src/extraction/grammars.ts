@@ -44,6 +44,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   cfquery: 'tree-sitter-cfquery.wasm',
   cobol: 'tree-sitter-cobol.wasm',
   vbnet: 'tree-sitter-vbnet.wasm',
+  erlang: 'tree-sitter-erlang.wasm',
 };
 
 /**
@@ -135,6 +136,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // VB.NET: vendored grammar (patched govindbanura/tree-sitter-vbnet) — classes,
   // modules, interfaces, structures, properties, events, Handles clauses, LINQ.
   '.vb': 'vbnet',
+  // Erlang: modules (.erl) and header files (.hrl). Vendored WhatsApp/
+  // tree-sitter-erlang grammar (the ELP grammar).
+  '.erl': 'erlang',
+  '.hrl': 'erlang',
   // Spring config: `application.properties` / `application-*.properties`. Same
   // shape as the `.yml` variants — the YAML/properties extractor emits one node
   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
@@ -253,7 +258,7 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
       // `class Foo(...)` as an ERROR that swallows the whole class (#237); we
       // vendor the upstream ABI-15 tree-sitter-c-sharp 0.23.5 wasm, which parses
       // primary constructors natively.
-      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet')
+      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet' || lang === 'erlang')
         ? path.join(__dirname, 'wasm', wasmFile)
         : require.resolve(`tree-sitter-wasms/out/${wasmFile}`);
       const language = await WasmLanguage.load(wasmPath);
@@ -473,6 +478,7 @@ export function getLanguageDisplayName(language: Language): string {
     cfquery: 'CFQuery (SQL)',
     cobol: 'COBOL',
     vbnet: 'Visual Basic .NET',
+    erlang: 'Erlang',
     unknown: 'Unknown',
   };
   return names[language] || language;
