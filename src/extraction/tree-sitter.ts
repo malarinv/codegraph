@@ -67,6 +67,13 @@ const VUE_STORE_FILE_SIGNAL = /\bdefineStore\b|\bcreateStore\b|\bVuex\b|\bmutati
  * Used by the erlang branch of extractCall to lift a static MFA pair into a
  * call edge (the spawned/applied function is otherwise invisible to the graph).
  */
+/** Compiler-predefined Erlang macros — no `-define` exists to link a use to. */
+const ERLANG_PREDEFINED_MACROS = new Set([
+  'MODULE', 'MODULE_STRING', 'FILE', 'LINE', 'MACHINE',
+  'FUNCTION_NAME', 'FUNCTION_ARITY', 'OTP_RELEASE',
+  'FEATURE_AVAILABLE', 'FEATURE_ENABLED',
+]);
+
 const ERLANG_MFA_CALLS = new Set([
   'spawn', 'spawn_link', 'spawn_monitor', 'spawn_opt', 'apply',
   'erlang:spawn', 'erlang:spawn_link', 'erlang:spawn_monitor', 'erlang:spawn_opt', 'erlang:apply',
@@ -3747,6 +3754,29 @@ export class TreeSitterExtractor {
           fromNodeId: callerId,
           referenceName: refName,
           referenceKind: 'references',
+          line,
+          column,
+        });
+        return;
+      }
+      if (node.type === 'macro_call_expr') {
+        // Macro use site → the `-define` constant node. Function-like uses
+        // (`?LOG_AUDIT(X)` — args present) are inlined code, so they join the
+        // call chain and connect through the macro node to the body's calls
+        // (attributed there by handlePpDefine); bare reads (`?TIMEOUT`) are
+        // `references`, answering "where is this macro used" without
+        // polluting call paths. Compiler-predefined macros carry no
+        // definition to link. The use site's ARGUMENTS are children and keep
+        // walking, so a call nested in `?assertEqual(ok, do_thing())` still
+        // attributes to the enclosing function.
+        const macroName = getChildByField(node, 'name');
+        if (!macroName) return;
+        const name = getNodeText(macroName, this.source);
+        if (ERLANG_PREDEFINED_MACROS.has(name)) return;
+        this.unresolvedReferences.push({
+          fromNodeId: callerId,
+          referenceName: name,
+          referenceKind: getChildByField(node, 'args') ? 'calls' : 'references',
           line,
           column,
         });

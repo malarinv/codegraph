@@ -9134,6 +9134,81 @@ second(X) -> X.
     });
   });
 
+  describe('Macro linkage', () => {
+    it('should attribute macro-body calls to the macro and link function-like uses into the chain', () => {
+      const code = `-module(m).
+-export([do_thing/1]).
+
+-define(LOG_AUDIT(Event), audit_logger:log(Event, ?MODULE)).
+
+do_thing(X) ->
+    ?LOG_AUDIT({thing, X}),
+    ok.
+`;
+      const result = extractFromSource('src/m.erl', code);
+      const macro = result.nodes.find((n) => n.kind === 'constant' && n.name === 'LOG_AUDIT');
+      const doThing = result.nodes.find((n) => n.kind === 'function' && n.name === 'do_thing');
+      const refsFrom = (id?: string) =>
+        result.unresolvedReferences.filter((r) => r.fromNodeId === id).map((r) => `${r.referenceKind}:${r.referenceName}`);
+      // The body's remote call belongs to the macro node — true exactly once.
+      expect(refsFrom(macro?.id)).toContain('calls:audit_logger::log');
+      // The use site joins the call chain: do_thing -calls→ LOG_AUDIT.
+      expect(refsFrom(doThing?.id)).toContain('calls:LOG_AUDIT');
+    });
+
+    it('should reference bare macro reads without polluting call chains', () => {
+      const code = `-module(m).
+-export([wait/0]).
+
+-define(TIMEOUT, 5000).
+
+wait() ->
+    receive after ?TIMEOUT -> ok end.
+`;
+      const result = extractFromSource('src/m.erl', code);
+      const refs = result.unresolvedReferences.map((r) => `${r.referenceKind}:${r.referenceName}`);
+      expect(refs).toContain('references:TIMEOUT');
+      expect(refs).not.toContain('calls:TIMEOUT');
+    });
+
+    it('should skip compiler-predefined macros and keep walking macro-use arguments', () => {
+      const code = `-module(m).
+-export([check/0]).
+
+check() ->
+    ?assertEqual(ok, prepare()),
+    {?MODULE, ?LINE, ?FUNCTION_NAME}.
+
+prepare() -> ok.
+`;
+      const result = extractFromSource('src/m.erl', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      // The nested call inside the macro's arguments still attributes to check/0.
+      expect(refs).toContain('prepare');
+      // ?assertEqual (an OTP header macro) is emitted and simply never resolves…
+      expect(refs).toContain('assertEqual');
+      // …but predefined macros have no definition to link.
+      expect(refs).not.toContain('MODULE');
+      expect(refs).not.toContain('LINE');
+      expect(refs).not.toContain('FUNCTION_NAME');
+    });
+
+    it('should chain macro-to-macro uses', () => {
+      const code = `-module(m).
+
+-define(TARGET, target_fn()).
+-define(ALIAS, ?TARGET).
+`;
+      const result = extractFromSource('src/m.erl', code);
+      const target = result.nodes.find((n) => n.kind === 'constant' && n.name === 'TARGET');
+      const alias = result.nodes.find((n) => n.kind === 'constant' && n.name === 'ALIAS');
+      const refsFrom = (id?: string) =>
+        result.unresolvedReferences.filter((r) => r.fromNodeId === id).map((r) => `${r.referenceKind}:${r.referenceName}`);
+      expect(refsFrom(target?.id)).toContain('calls:target_fn');
+      expect(refsFrom(alias?.id)).toContain('references:TARGET');
+    });
+  });
+
   describe('Behaviour extraction', () => {
     it('should emit an implements reference for -behaviour', () => {
       const code = `-module(m).

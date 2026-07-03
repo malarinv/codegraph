@@ -175,12 +175,24 @@ function handleTypeAlias(node: SyntaxNode, ctx: ExtractorContext): boolean {
 function handlePpDefine(node: SyntaxNode, ctx: ExtractorContext): boolean {
   const lhs = getChildByField(node, 'lhs');
   const nameNode = lhs ? getChildByField(lhs, 'name') : null;
-  if (nameNode) {
-    ctx.createNode('constant', getNodeText(nameNode, ctx.source), node, {
-      signature: collapseWs(getNodeText(node, ctx.source)).slice(0, 200),
-    });
+  if (!nameNode) return true;
+  const macro = ctx.createNode('constant', getNodeText(nameNode, ctx.source), node, {
+    signature: collapseWs(getNodeText(node, ctx.source)).slice(0, 200),
+  });
+  // The replacement's calls execute at expansion sites, but attributing them
+  // to the MACRO node keeps them true exactly once: `-define(LOG_AUDIT(E),
+  // audit_logger:log(E))` gives the LOG_AUDIT constant a `calls` edge to the
+  // logger, and each `?LOG_AUDIT(...)` use site links to the constant (see the
+  // macro_call_expr case in extractCall) — so the chain
+  // `caller → LOG_AUDIT → audit_logger:log` traverses without minting a
+  // per-use duplicate of the body's calls.
+  const replacement = getChildByField(node, 'replacement');
+  if (macro && replacement) {
+    ctx.pushScope(macro.id);
+    ctx.visitFunctionBody(replacement, macro.id);
+    ctx.popScope();
   }
-  return true; // the replacement's calls only exist at expansion sites
+  return true;
 }
 
 function handleBehaviour(node: SyntaxNode, ctx: ExtractorContext): boolean {
@@ -218,6 +230,7 @@ export const erlangExtractor: LanguageExtractor = {
     'record_update_expr', // X#rec{...}
     'record_index_expr', // #rec.field
     'record_field_expr', // X#rec.field
+    'macro_call_expr', // ?MACRO / ?MACRO(...) — links use sites to the -define constant
   ],
   variableTypes: [],
   nameField: 'name',
