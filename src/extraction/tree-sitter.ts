@@ -3509,28 +3509,39 @@ export class TreeSitterExtractor {
    * Extract a function call
    */
   /**
-   * Whether an Erlang gen_server target expression statically refers to the
-   * module it appears in: `?MODULE`, a macro the file defines as `?MODULE`
-   * (`-define(SERVER, ?MODULE)` — the standard idiom), or the module's own
-   * name as an atom. The self-macro set is memoized per file (single entry —
-   * extraction is file-sequential).
+   * The module an Erlang gen_server target expression statically names, or
+   * null when it's dynamic (pid/var/tuple form). Static shapes:
+   *   - a bare atom — either this module or another one; OTP's dominant
+   *     registration convention (`{local, ?MODULE}`) names a server process
+   *     after its module, so `gen_server:call(other_mod, …)` reaches
+   *     `other_mod`'s handlers. A registered name that matches no module
+   *     resolves to nothing downstream (the qualified ref just drops).
+   *   - `?MODULE`, or a macro the file defines as `?MODULE`
+   *     (`-define(SERVER, ?MODULE)` — the standard self idiom)
+   *   - a macro the file defines as a bare atom
+   *     (`-define(STORE, kv_store)` — the cross-module variant)
+   * The macro tables are memoized per file (single entry — extraction is
+   * file-sequential).
    */
-  private erlangSelfMacroFile = '';
+  private erlangServerMacroFile = '';
   private erlangSelfMacros = new Set<string>();
+  private erlangAtomMacros = new Map<string, string>();
 
-  private isErlangSelfReference(target: SyntaxNode): boolean {
+  private resolveErlangGenServerTarget(target: SyntaxNode): string | null {
     const ownModule = (this.filePath.split('/').pop() ?? '').replace(/\.erl$/, '');
     if (target.type === 'atom') {
-      return getNodeText(target, this.source) === ownModule;
+      const name = getNodeText(target, this.source).replace(/^'([\s\S]*)'$/, '$1');
+      return name || null;
     }
-    if (target.type !== 'macro_call_expr') return false;
+    if (target.type !== 'macro_call_expr') return null;
     const nameNode = getChildByField(target, 'name');
-    if (!nameNode) return false;
+    if (!nameNode) return null;
     const macroName = getNodeText(nameNode, this.source);
-    if (macroName === 'MODULE') return true;
-    if (this.erlangSelfMacroFile !== this.filePath) {
-      this.erlangSelfMacroFile = this.filePath;
+    if (macroName === 'MODULE') return ownModule || null;
+    if (this.erlangServerMacroFile !== this.filePath) {
+      this.erlangServerMacroFile = this.filePath;
       this.erlangSelfMacros = new Set<string>();
+      this.erlangAtomMacros = new Map<string, string>();
       let root: SyntaxNode = target;
       while (root.parent) root = root.parent;
       for (let i = 0; i < root.namedChildCount; i++) {
@@ -3539,17 +3550,23 @@ export class TreeSitterExtractor {
         const lhs = getChildByField(form, 'lhs');
         const defName = lhs ? getChildByField(lhs, 'name') : null;
         const replacement = getChildByField(form, 'replacement');
+        if (!defName || !replacement) continue;
         if (
-          defName &&
-          replacement?.type === 'macro_call_expr' &&
+          replacement.type === 'macro_call_expr' &&
           getChildByField(replacement, 'name') &&
           getNodeText(getChildByField(replacement, 'name')!, this.source) === 'MODULE'
         ) {
           this.erlangSelfMacros.add(getNodeText(defName, this.source));
+        } else if (replacement.type === 'atom') {
+          this.erlangAtomMacros.set(
+            getNodeText(defName, this.source),
+            getNodeText(replacement, this.source).replace(/^'([\s\S]*)'$/, '$1'),
+          );
         }
       }
     }
-    return this.erlangSelfMacros.has(macroName);
+    if (this.erlangSelfMacros.has(macroName)) return ownModule || null;
+    return this.erlangAtomMacros.get(macroName) ?? null;
   }
 
   private extractCall(node: SyntaxNode): void {
@@ -3652,15 +3669,15 @@ export class TreeSitterExtractor {
             line,
             column,
           });
-          // gen_server self-dispatch: `gen_server:call(?SERVER, Msg)` /
-          // `gen_server:cast(?MODULE, Msg)` — the OTP API-wrapper idiom (a
-          // module's public functions wrap gen_server requests to itself, and
-          // the real work happens in its own handle_call/handle_cast). The
-          // target is static when the first argument is ?MODULE, a macro the
-          // file defines as ?MODULE (the standard `-define(SERVER, ?MODULE)`),
-          // or the module's own name as an atom — emit the qualified callback
-          // ref so the module's public API connects to its handlers. Any other
-          // target (pid/var/registered name of another process) stays silent.
+          // gen_server dispatch: `gen_server:call(?SERVER, Msg)` /
+          // `gen_server:cast(other_mod, Msg)` — a request routes to the TARGET
+          // module's handle_call/handle_cast. The target is static when the
+          // first argument names a module: ?MODULE or a ?MODULE-defined macro
+          // (the self API-wrapper idiom), a bare atom (OTP's `{local, ?MODULE}`
+          // convention names a server after its module, so a cross-module
+          // registered name reaches that module's handlers — and a registered
+          // name matching no module resolves to nothing), or a macro defined
+          // as a bare atom. Pid/var/tuple targets stay silent.
           if (
             moduleExpr?.type === 'atom' &&
             erlAtom(moduleExpr) === 'gen_server' &&
@@ -3668,17 +3685,15 @@ export class TreeSitterExtractor {
           ) {
             const argsNode = getChildByField(node, 'args');
             const target = argsNode?.namedChild(0) ?? null;
-            if (target && this.isErlangSelfReference(target)) {
-              const ownModule = (this.filePath.split('/').pop() ?? '').replace(/\.erl$/, '');
-              if (ownModule) {
-                this.unresolvedReferences.push({
-                  fromNodeId: callerId,
-                  referenceName: `${ownModule}::${fnBare === 'cast' ? 'handle_cast' : 'handle_call'}`,
-                  referenceKind: 'calls',
-                  line,
-                  column,
-                });
-              }
+            const targetModule = target ? this.resolveErlangGenServerTarget(target) : null;
+            if (targetModule) {
+              this.unresolvedReferences.push({
+                fromNodeId: callerId,
+                referenceName: `${targetModule}::${fnBare === 'cast' ? 'handle_cast' : 'handle_call'}`,
+                referenceKind: 'calls',
+                line,
+                column,
+              });
             }
           }
           // MFA-in-argument dispatch: the spawn/apply family names its real

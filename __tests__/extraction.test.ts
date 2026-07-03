@@ -8991,14 +8991,35 @@ handle_cast({put, K, V}, S) -> {noreply, maps:put(K, V, S)}.
       expect(calls).toContain('kv_store::handle_cast');
     });
 
-    it('should not connect gen_server calls to other processes', () => {
+    it('should connect gen_server calls to a registered-name module, directly or via an atom macro', () => {
+      const code = `-module(kv_client).
+-export([fetch/1, evict/1]).
+
+-define(STORE, kv_store).
+
+fetch(Key) ->
+    gen_server:call(kv_store, {get, Key}).
+
+evict(Key) ->
+    gen_server:cast(?STORE, {evict, Key}).
+`;
+      const result = extractFromSource('src/kv_client.erl', code);
+      const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+      // OTP's {local, ?MODULE} convention names a server after its module —
+      // a cross-module registered name targets that module's handlers. A name
+      // matching no module simply never resolves downstream.
+      expect(calls).toContain('kv_store::handle_call');
+      expect(calls).toContain('kv_store::handle_cast');
+    });
+
+    it('should not connect gen_server calls with dynamic targets', () => {
       const code = `-module(m).
 -export([go/2]).
 
 go(Pid, Msg) ->
     gen_server:call(Pid, Msg),
-    gen_server:call(other_registered_name, Msg),
-    gen_server:cast({global, some_name}, Msg).
+    gen_server:cast({global, some_name}, Msg),
+    gen_server:call({some_name, node()}, Msg).
 `;
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
