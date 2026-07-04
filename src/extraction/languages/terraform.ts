@@ -1,5 +1,5 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
-import { getNodeText } from '../tree-sitter-helpers';
+import { getNodeText, getChildByField } from '../tree-sitter-helpers';
 import type { LanguageExtractor } from '../tree-sitter-types';
 
 // Grammar: tree-sitter-terraform (vendored at src/extraction/wasm/tree-sitter-terraform.wasm,
@@ -150,7 +150,7 @@ function qualifyReference(head: string, attrs: string[]): string[] {
     case 'local':
       // local.K — locals attribute K
       return attrs[0] ? [`local.${attrs[0]}`] : [];
-    case 'module':
+    case 'module': {
       // module.M[.OUTPUT] — module "M". A two-segment chain (`module.M.out`)
       // additionally emits a scoped `module.M:output.out` ref that the
       // Terraform resolver bridges to the `output "out"` node inside the
@@ -160,9 +160,16 @@ function qualifyReference(head: string, attrs: string[]): string[] {
       // the module's source is a registry/git address the ref simply stays
       // unresolved and the boundary remains visible.
       if (!attrs[0]) return [];
-      return attrs[1]
-        ? [`module.${attrs[0]}`, `module.${attrs[0]}:output.${attrs[1]}`]
-        : [`module.${attrs[0]}`];
+      const refs = [`module.${attrs[0]}`];
+      if (attrs[1]) refs.push(`module.${attrs[0]}:output.${attrs[1]}`);
+      // module.M.outputs.X — the cloudposse/atmos remote-state shape (the
+      // remote-state module re-exposes another component's outputs under its
+      // `outputs` map). Emit a scoped candidate the resolver bridges to that
+      // component's own `output "X"` when the target is provably unique;
+      // anything dynamic or ambiguous stays unresolved.
+      if (attrs[1] === 'outputs' && attrs[2]) refs.push(`module.${attrs[0]}:remote-output.${attrs[2]}`);
+      return refs;
+    }
     case 'data':
       // data.TYPE.NAME[.ATTR] — data "TYPE" "NAME"
       return attrs[0] && attrs[1] ? [`data.${attrs[0]}.${attrs[1]}`] : [];
@@ -239,12 +246,50 @@ export const terraformExtractor: LanguageExtractor = {
       return true;
     }
 
+    // --- moved / import / removed: state-migration blocks. Their from/to
+    // attributes hold resource addresses, so a refactor's paper trail joins
+    // the graph ("what references aws_instance.old" includes the moved
+    // block's file). No symbol is declared — anchor the refs to the file
+    // node. Scoped module refs are suppressed: `module.a.aws_x.b` here names
+    // a resource INSIDE a module instance, not a module output.
+    if ((type === 'moved' || type === 'import' || type === 'removed') && labels.length === 0) {
+      const fileNodeId = ctx.nodeStack[0];
+      if (body && fileNodeId) {
+        emitReferencesInBody(body, ctx, fileNodeId, { suppressScoped: true });
+      }
+      return true;
+    }
+
+    // --- assert { condition = … } (inside check blocks): the condition's
+    // references are real dependencies of the check; anchor them to the file
+    // node. The check block itself declares no symbol and is left to the
+    // default walker, so its nested scoped `data` blocks still index.
+    if (type === 'assert' && labels.length === 0) {
+      const fileNodeId = ctx.nodeStack[0];
+      if (body && fileNodeId) {
+        emitReferencesInBody(body, ctx, fileNodeId, { suppressScoped: true });
+      }
+      return true;
+    }
+
     // --- resource / data / module / variable / output / provider ---
     const decl = describeBlock(type, labels);
     if (!decl) {
       // Unknown top-level block (e.g. nested block hoisted as top-level via
       // walker). Let the default walker continue.
       return false;
+    }
+
+    // provider "aws" { alias = "east" } is addressed as `aws.east`; carry the
+    // alias in the node so aliased and default configurations of the same
+    // provider stop colliding on one qualified name.
+    if (type === 'provider' && body && labels[0]) {
+      const alias = readStringAttr(body, 'alias', ctx.source);
+      if (alias) {
+        decl.name = `${labels[0]}.${alias}`;
+        decl.qualifiedName = `provider.${labels[0]}.${alias}`;
+        decl.signature = `provider "${labels[0]}" alias="${alias}"`;
+      }
     }
 
     const created = ctx.createNode(decl.kind, decl.name, node, {
@@ -259,7 +304,20 @@ export const terraformExtractor: LanguageExtractor = {
     if (body) {
       ctx.pushScope(created.id);
       try {
-        emitReferencesInBody(body, ctx, created.id);
+        // The `provider` / `providers` meta-arguments select a provider
+        // CONFIGURATION (`aws.east`), which the generic expression walk would
+        // misread as a resource reference — handle them explicitly and skip
+        // them in the walk.
+        const skipTopAttrs = new Set<string>();
+        if (type === 'resource' || type === 'data') {
+          emitProviderSelectionRef(body, ctx, created.id);
+          skipTopAttrs.add('provider');
+        }
+        if (type === 'module') {
+          emitModuleProvidersRefs(body, ctx, created.id);
+          skipTopAttrs.add('providers');
+        }
+        emitReferencesInBody(body, ctx, created.id, { skipTopAttrs });
         if (type === 'module' && labels[0]) {
           emitModuleWiring(labels[0], node, body, ctx, created.id);
         }
@@ -447,16 +505,33 @@ function emitLocals(
   }
 }
 
+interface EmitRefsOptions {
+  /** Drop `:`-scoped module refs (moved/import blocks name resources INSIDE a module instance). */
+  suppressScoped?: boolean;
+  /** Direct attributes of `body` to skip (meta-arguments handled explicitly elsewhere). */
+  skipTopAttrs?: Set<string>;
+}
+
 function emitReferencesInBody(
   body: SyntaxNode,
   ctx: Parameters<NonNullable<LanguageExtractor['visitNode']>>[1],
-  fromNodeId: string
+  fromNodeId: string,
+  opts?: EmitRefsOptions
 ): void {
-  const queue: SyntaxNode[] = [body];
+  const queue: SyntaxNode[] = [];
+  for (const c of body.namedChildren) {
+    if (!c) continue;
+    if (opts?.skipTopAttrs && c.type === 'attribute') {
+      const id = c.namedChildren.find((x) => x?.type === 'identifier');
+      if (id && opts.skipTopAttrs.has(getNodeText(id, ctx.source))) continue;
+    }
+    queue.push(c);
+  }
   while (queue.length) {
     const n = queue.shift()!;
     if (n.type === 'expression') {
       collectReferences(n, ctx.source, (qname, line, column) => {
+        if (opts?.suppressScoped && qname.includes(':')) return;
         ctx.addUnresolvedReference({
           fromNodeId,
           referenceName: qname,
@@ -472,4 +547,121 @@ function emitReferencesInBody(
       if (c) queue.push(c);
     }
   }
+}
+
+/**
+ * Value of a direct string attribute of a body (`alias = "east"`), or null.
+ */
+function readStringAttr(body: SyntaxNode, name: string, source: string): string | null {
+  for (const attr of body.namedChildren) {
+    if (!attr || attr.type !== 'attribute') continue;
+    const idNode = attr.namedChildren.find((c) => c?.type === 'identifier');
+    if (!idNode || getNodeText(idNode, source) !== name) continue;
+    const expr = attr.namedChildren.find((c) => c?.type === 'expression');
+    const lit = expr ? findStringLit(expr) : null;
+    return lit ? stringLitValue(lit, source) : null;
+  }
+  return null;
+}
+
+/**
+ * `provider = aws.east` (or bare `provider = google-beta`) in a resource/data
+ * block selects a provider CONFIGURATION — reference `provider.aws.east` /
+ * `provider.google-beta` so the selection links to the aliased provider block
+ * instead of being misread as a resource named `aws.east`.
+ */
+function emitProviderSelectionRef(
+  body: SyntaxNode,
+  ctx: Parameters<NonNullable<LanguageExtractor['visitNode']>>[1],
+  fromNodeId: string
+): void {
+  for (const attr of body.namedChildren) {
+    if (!attr || attr.type !== 'attribute') continue;
+    const idNode = attr.namedChildren.find((c) => c?.type === 'identifier');
+    if (!idNode || getNodeText(idNode, ctx.source) !== 'provider') continue;
+    const expr = attr.namedChildren.find((c) => c?.type === 'expression');
+    if (!expr) return;
+    const sel = providerSelectionFromExpr(expr, ctx.source);
+    if (sel) {
+      ctx.addUnresolvedReference({
+        fromNodeId,
+        referenceName: `provider.${sel}`,
+        referenceKind: 'references',
+        line: attr.startPosition.row + 1,
+        column: attr.startPosition.column,
+      });
+    }
+    return;
+  }
+}
+
+/**
+ * `providers = { aws = aws.east, aws.dns = aws.dns }` in a module block maps
+ * the child's provider slots (keys) to THIS scope's provider configurations
+ * (values) — reference each value.
+ */
+function emitModuleProvidersRefs(
+  body: SyntaxNode,
+  ctx: Parameters<NonNullable<LanguageExtractor['visitNode']>>[1],
+  fromNodeId: string
+): void {
+  for (const attr of body.namedChildren) {
+    if (!attr || attr.type !== 'attribute') continue;
+    const idNode = attr.namedChildren.find((c) => c?.type === 'identifier');
+    if (!idNode || getNodeText(idNode, ctx.source) !== 'providers') continue;
+    // Find every object_elem and read its `val` side only — the key names the
+    // CHILD module's provider requirement, not a configuration here.
+    const queue: SyntaxNode[] = [attr];
+    while (queue.length) {
+      const n = queue.shift()!;
+      if (n.type === 'object_elem') {
+        const val = getChildByField(n, 'val');
+        const sel = val ? providerSelectionFromExpr(val, ctx.source) : null;
+        if (sel) {
+          ctx.addUnresolvedReference({
+            fromNodeId,
+            referenceName: `provider.${sel}`,
+            referenceKind: 'references',
+            line: n.startPosition.row + 1,
+            column: n.startPosition.column,
+          });
+        }
+        continue;
+      }
+      for (const c of n.namedChildren) {
+        if (c) queue.push(c);
+      }
+    }
+    return;
+  }
+}
+
+/**
+ * Read a provider-configuration address (`aws`, `aws.east`, `google-beta`)
+ * from an expression. Anything more complex (conditionals, lookups) is
+ * dynamic — return null and leave it unresolved.
+ */
+function providerSelectionFromExpr(expr: SyntaxNode, source: string): string | null {
+  const queue: SyntaxNode[] = [expr];
+  while (queue.length) {
+    const n = queue.shift()!;
+    if (n.type === 'variable_expr') {
+      const id = n.namedChildren.find((c) => c?.type === 'identifier');
+      if (!id) return null;
+      const head = getNodeText(id, source);
+      const next = n.nextNamedSibling;
+      if (next?.type === 'get_attr') {
+        const attrId = next.namedChildren.find((c) => c?.type === 'identifier');
+        // A second segment means something dynamic (e.g. var.x.y) — bail.
+        if (!attrId || next.nextNamedSibling) return null;
+        return `${head}.${getNodeText(attrId, source)}`;
+      }
+      return next ? null : head;
+    }
+    if (n.type === 'function_call' || n.type === 'conditional' || n.type === 'for_expr') return null;
+    for (const c of n.namedChildren) {
+      if (c) queue.push(c);
+    }
+  }
+  return null;
 }

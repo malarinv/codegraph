@@ -38,8 +38,8 @@ import * as path from 'path';
 import type { Node } from '../../types';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types';
 
-/** `module.M:file` / `module.M:var.X` / `module.M:output.X` — extractor-emitted scoped refs. */
-const SCOPED_REF = /^module\.([^.:\s]+):(file$|var\.|output\.)/;
+/** `module.M:file` / `module.M:var.X` / `module.M:output.X` / `module.M:remote-output.X` — extractor-emitted scoped refs. */
+const SCOPED_REF = /^module\.([^.:\s]+):(file$|var\.|output\.|remote-output\.)/;
 
 export const terraformResolver: FrameworkResolver = {
   name: 'terraform',
@@ -85,17 +85,23 @@ export const terraformResolver: FrameworkResolver = {
     //    routinely kept in a subdirectory (`envs/prod.tfvars`). Walk up to
     //    the nearest ancestor directory that declares the variable.
     if (ref.filePath.endsWith('.tfvars') && qname.startsWith('var.')) {
-      for (let dir = parentOf(refDir); dir !== null; dir = parentOf(dir)) {
-        const inDir = candidates.filter((c) => dirOf(c.filePath) === dir);
-        if (inDir.length > 0) {
-          return {
-            original: ref,
-            targetNodeId: inDir[0]!.id,
-            confidence: 0.9,
-            resolvedBy: 'framework',
-          };
-        }
+      const up = nearestAncestorMatch(candidates, refDir);
+      if (up) {
+        return { original: ref, targetNodeId: up.id, confidence: 0.9, resolvedBy: 'framework' };
       }
+    }
+
+    // 2b. Provider configurations are the one construct Terraform inherits
+    //     across the module tree: they're declared in the root (or a parent)
+    //     module and passed down, so `provider = aws.east` inside a child
+    //     module legitimately names a configuration declared above it.
+    if (qname.startsWith('provider.')) {
+      const configs = candidates.filter((c) => c.kind === 'namespace');
+      const up = nearestAncestorMatch(configs, refDir);
+      if (up) {
+        return { original: ref, targetNodeId: up.id, confidence: 0.9, resolvedBy: 'framework' };
+      }
+      return null;
     }
 
     // 3. No same-directory declaration → no edge. A candidate in another
@@ -105,6 +111,15 @@ export const terraformResolver: FrameworkResolver = {
     return null;
   },
 };
+
+/** Nearest candidate walking UP the directory tree from refDir (exclusive). */
+function nearestAncestorMatch<T extends { filePath: string }>(candidates: T[], refDir: string): T | null {
+  for (let dir = parentOf(refDir); dir !== null; dir = parentOf(dir)) {
+    const inDir = candidates.filter((c) => dirOf(c.filePath) === dir);
+    if (inDir.length > 0) return inDir[0]!;
+  }
+  return null;
+}
 
 /**
  * Resolve `module.M:<child>` by locating the `module "M"` declaration in the
@@ -126,8 +141,50 @@ function resolveScopedModuleRef(
   const decl = decls.find((d) => dirOf(d.filePath) === refDir) ?? (decls.length === 1 ? decls[0]! : null);
   if (!decl) return null;
 
-  const source = readModuleSource(decl, context);
-  if (!source || !(source.startsWith('./') || source.startsWith('../'))) {
+  const source = readModuleAttr(decl, 'source', context);
+  if (!source) return null;
+
+  // --- cloudposse/atmos remote-state: module.M.outputs.X where M is the
+  // stack-config remote-state module reading another COMPONENT's state. The
+  // component name is static in the monorepo case (`component = "vpc"` or
+  // "eks/cluster"), so bridge to that component directory's own
+  // `output "X"` — but only when every gate holds: the module source is the
+  // remote-state module, the component is a string literal, and exactly ONE
+  // directory in the repo matches the component name and declares that
+  // output. Anything dynamic or ambiguous stays a visible boundary.
+  if (child.startsWith('remote-output.')) {
+    if (!/\/remote-state(\/|$)/.test(source)) return null;
+    let component = readModuleAttr(decl, 'component', context);
+    if (!component) {
+      // The other half of real-world declarations indirect through a
+      // variable with a literal default in the same directory
+      // (`component = var.vpc_component_name` + `default = "vpc"`) — the
+      // component's declared static wiring. One hop, same literal gate.
+      const viaVar = readNodeSpanMatch(decl, /^\s*component\s*=\s*var\.([A-Za-z0-9_-]+)\s*$/, context);
+      if (viaVar) {
+        const declared = context
+          .getNodesByQualifiedName(`var.${viaVar}`)
+          .filter((n) => dirOf(n.filePath) === dirOf(decl.filePath));
+        if (declared.length === 1) {
+          component = readNodeSpanMatch(declared[0]!, /^\s*default\s*=\s*"([^"]+)"/, context);
+        }
+      }
+    }
+    if (!component) return null;
+    const outName = child.slice('remote-output.'.length);
+    const outs = context
+      .getNodesByQualifiedName(`output.${outName}`)
+      .filter((o) => {
+        const d = dirOf(o.filePath);
+        return d === component || d.endsWith('/' + component);
+      });
+    if (outs.length === 0) return null;
+    const dirs = new Set(outs.map((o) => dirOf(o.filePath)));
+    if (dirs.size > 1) return null; // two directories claim this component name — never guess
+    return { original: ref, targetNodeId: outs[0]!.id, confidence: 0.9, resolvedBy: 'framework' };
+  }
+
+  if (!(source.startsWith('./') || source.startsWith('../'))) {
     // Registry / git / absolute sources are out-of-repo: stay unresolved.
     return null;
   }
@@ -154,17 +211,24 @@ function resolveScopedModuleRef(
 }
 
 /**
- * The `source = "…"` string of a module declaration, re-read from its file
- * (project paths are stored relative; node metadata isn't persisted, so the
- * declaration's line span + cached file lines are the durable carrier).
+ * A direct string-literal attribute (`source = "…"`, `component = "…"`) of a
+ * module declaration, re-read from its file (project paths are stored
+ * relative; node metadata isn't persisted, so the declaration's line span +
+ * cached file lines are the durable carrier). Non-literal values (variables,
+ * expressions) return null — dynamic wiring is never guessed.
  */
-function readModuleSource(decl: Node, context: ResolutionContext): string | null {
+function readModuleAttr(decl: Node, name: string, context: ResolutionContext): string | null {
+  return readNodeSpanMatch(decl, new RegExp(`^\\s*${name}\\s*=\\s*"([^"]+)"`), context);
+}
+
+/** First capture of `re` across the node's line span, or null. */
+function readNodeSpanMatch(node: Node, re: RegExp, context: ResolutionContext): string | null {
   const lines =
-    context.getFileLines?.(decl.filePath) ?? context.readFile(decl.filePath)?.split('\n') ?? null;
+    context.getFileLines?.(node.filePath) ?? context.readFile(node.filePath)?.split('\n') ?? null;
   if (!lines) return null;
-  const end = Math.min(decl.endLine, lines.length);
-  for (let i = Math.max(decl.startLine - 1, 0); i < end; i++) {
-    const m = lines[i]!.match(/^\s*source\s*=\s*"([^"]+)"/);
+  const end = Math.min(node.endLine, lines.length);
+  for (let i = Math.max(node.startLine - 1, 0); i < end; i++) {
+    const m = lines[i]!.match(re);
     if (m) return m[1]!;
   }
   return null;

@@ -10068,6 +10068,121 @@ module "net" {
       expect(refs).toContain('module.s3:var.bucket');
     });
 
+    it('should emit a remote-output candidate for module.M.outputs.X chains', () => {
+      const code = `
+resource "aws_eks_cluster" "this" {
+  vpc_id = module.vpc.outputs.vpc_id
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(refs).toContain('module.vpc');
+      expect(refs).toContain('module.vpc:remote-output.vpc_id');
+      // A plain two-segment chain must NOT produce a remote-output candidate.
+      const plain = extractFromSource('o.tf', 'output "x" {\n  value = module.vpc.vpc_id\n}\n');
+      const plainRefs = plain.unresolvedReferences.map((r) => r.referenceName);
+      expect(plainRefs.some((r) => r.includes(':remote-output.'))).toBe(false);
+    });
+
+    it('should reference resource addresses from moved/import/removed blocks, anchored to the file', () => {
+      const code = `
+resource "aws_instance" "new" {}
+moved {
+  from = aws_instance.old
+  to   = aws_instance.new
+}
+import {
+  to = aws_s3_bucket.b
+  id = "bucket-name"
+}
+removed {
+  from = module.legacy.aws_iam_role.r
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const refs = result.unresolvedReferences;
+      const names = refs.map((r) => r.referenceName);
+      expect(names).toContain('aws_instance.old');
+      expect(names).toContain('aws_instance.new');
+      expect(names).toContain('aws_s3_bucket.b');
+      expect(names).toContain('module.legacy');
+      // Scoped module refs are suppressed here: module.legacy.aws_iam_role.r
+      // names a resource inside a module instance, never a module output.
+      expect(names.some((n) => n.includes(':'))).toBe(false);
+      // Anchored to the file node, and no phantom symbols were declared.
+      const fileNode = result.nodes.find((n) => n.kind === 'file');
+      for (const r of refs.filter((x) => x.referenceName === 'aws_instance.old')) {
+        expect(r.fromNodeId).toBe(fileNode?.id);
+      }
+      expect(result.nodes.filter((n) => n.kind !== 'file')).toHaveLength(1); // just aws_instance.new
+    });
+
+    it('should collect check-assert condition references and still index check-scoped data blocks', () => {
+      const code = `
+check "health" {
+  data "http" "ping" {
+    url = var.endpoint
+  }
+  assert {
+    condition     = data.http.ping.status_code == 200 && var.strict
+    error_message = "unhealthy"
+  }
+}
+`;
+      const result = extractFromSource('checks.tf', code);
+      const names = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(names).toContain('data.http.ping');
+      expect(names).toContain('var.strict');
+      expect(names).toContain('var.endpoint');
+      // The scoped data source inside the check is a real symbol.
+      expect(result.nodes.find((n) => n.qualifiedName === 'data.http.ping')).toBeDefined();
+    });
+
+    it('should qualify aliased provider blocks and reference provider selections', () => {
+      const code = `
+provider "aws" {
+  region = "us-east-1"
+}
+provider "aws" {
+  alias  = "east"
+  region = "us-east-2"
+}
+resource "aws_s3_bucket" "b" {
+  provider = aws.east
+  bucket   = "x"
+}
+resource "google_service_account" "sa" {
+  provider = google-beta
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const providers = result.nodes.filter((n) => n.kind === 'namespace').map((n) => n.qualifiedName).sort();
+      expect(providers).toEqual(['provider.aws', 'provider.aws.east']);
+      const names = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(names).toContain('provider.aws.east');
+      expect(names).toContain('provider.google-beta');
+      // The selection must not be misread as a resource reference.
+      expect(names).not.toContain('aws.east');
+    });
+
+    it('should reference the values (not keys) of a module providers map', () => {
+      const code = `
+module "vpc" {
+  source    = "./modules/vpc"
+  providers = {
+    aws = aws.east
+  }
+}
+`;
+      const result = extractFromSource('main.tf', code);
+      const names = result.unresolvedReferences.map((r) => r.referenceName);
+      expect(names).toContain('provider.aws.east');
+      expect(names).not.toContain('provider.aws');
+      expect(names).not.toContain('aws.east');
+      // providers is a meta-argument — no input wiring for it.
+      expect(names).not.toContain('module.vpc:var.providers');
+    });
+
     it('should emit data.T.N references stripped of the trailing attribute', () => {
       const code = `
 output "account" {
