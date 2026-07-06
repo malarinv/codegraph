@@ -109,6 +109,51 @@ codegraph uninstall
 
 ---
 
+## Language Support
+
+Every language below gets the same treatment — full structural extraction and cross-file resolution into one graph, no per-language setup:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/typescript.svg?v=1" width="104" height="104" alt="TypeScript" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/javascript.svg?v=1" width="104" height="104" alt="JavaScript" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/arkts.svg?v=1" width="104" height="104" alt="ArkTS" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/python.svg?v=1" width="104" height="104" alt="Python" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/go.svg?v=1" width="104" height="104" alt="Go" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/rust.svg?v=1" width="104" height="104" alt="Rust" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/java.svg?v=1" width="104" height="104" alt="Java" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/csharp.svg?v=1" width="104" height="104" alt="C#" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/php.svg?v=1" width="104" height="104" alt="PHP" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/ruby.svg?v=1" width="104" height="104" alt="Ruby" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/c.svg?v=1" width="104" height="104" alt="C" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/cpp.svg?v=1" width="104" height="104" alt="C++" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/objective-c.svg?v=1" width="104" height="104" alt="Objective-C" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/metal.svg?v=1" width="104" height="104" alt="Metal" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/cuda.svg?v=1" width="104" height="104" alt="CUDA" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/swift.svg?v=1" width="104" height="104" alt="Swift" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/kotlin.svg?v=1" width="104" height="104" alt="Kotlin" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/scala.svg?v=1" width="104" height="104" alt="Scala" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/dart.svg?v=1" width="104" height="104" alt="Dart" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/svelte.svg?v=1" width="104" height="104" alt="Svelte" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/vue.svg?v=1" width="104" height="104" alt="Vue" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/astro.svg?v=1" width="104" height="104" alt="Astro" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/liquid.svg?v=1" width="104" height="104" alt="Liquid" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/delphi.svg?v=1" width="104" height="104" alt="Pascal / Delphi" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/lua.svg?v=1" width="104" height="104" alt="Lua" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/r.svg?v=1" width="104" height="104" alt="R" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/luau.svg?v=1" width="104" height="104" alt="Luau" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/cfml.svg?v=1" width="104" height="104" alt="CFML" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/cobol.svg?v=1" width="104" height="104" alt="COBOL" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/vbnet.svg?v=1" width="104" height="104" alt="Visual Basic .NET" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/erlang.svg?v=1" width="104" height="104" alt="Erlang" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/solidity.svg?v=1" width="104" height="104" alt="Solidity" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/terraform.svg?v=1" width="104" height="104" alt="Terraform / OpenTofu" />
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/nix.svg?v=1" width="104" height="104" alt="Nix" />
+</p>
+
+<sub>Per-language details — extensions, frameworks, and what exactly gets extracted — in [Supported Languages](#supported-languages).</sub>
+
+---
+
 ## Why CodeGraph?
 
 When an AI agent needs to understand code — to answer a question or make a change — it discovers structure the slow way: grep, glob, and Read, one file at a time, rebuilding call paths and dependencies by hand. That's a pile of tool calls and round-trips before it even starts the real work.
