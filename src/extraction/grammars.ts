@@ -48,6 +48,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   solidity: 'tree-sitter-solidity.wasm',
   terraform: 'tree-sitter-terraform.wasm',
   arkts: 'tree-sitter-arkts.wasm',
+  nix: 'tree-sitter-nix.wasm',
 };
 
 /**
@@ -138,6 +139,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // see c-cpp.ts) blanks the CUDA-only tokens. (#387)
   '.cu': 'cpp',
   '.cuh': 'cpp',
+  '.nix': 'nix',
   // XML: file-level tracking; the MyBatis extractor matches `<mapper namespace="...">`
   // shape and emits SQL-statement nodes (other XML returns empty).
   '.xml': 'xml',
@@ -303,7 +305,12 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
       // tarball's artifact. It extends the tree-sitter-javascript grammar the
       // same way tree-sitter-typescript does, adding `struct_declaration` and
       // the `arkui_component_expression` build() DSL.
-      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet' || lang === 'erlang' || lang === 'terraform' || lang === 'arkts')
+      // Nix: tree-sitter-wasms doesn't ship it; we vendor a wasm built from
+      // nix-community/tree-sitter-nix @ 3d0173d (MIT) with tree-sitter-cli
+      // 0.25.10 (`generate` + `build --wasm`, ABI 15 — upstream's checked-in
+      // parser.c is still ABI 13; all 54 upstream corpus tests pass on the
+      // regenerated parser).
+      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau' || lang === 'csharp' || lang === 'r' || lang === 'cfml' || lang === 'cfscript' || lang === 'cfquery' || lang === 'cobol' || lang === 'vbnet' || lang === 'erlang' || lang === 'terraform' || lang === 'arkts' || lang === 'nix')
         ? path.join(__dirname, 'wasm', wasmFile)
         : require.resolve(`tree-sitter-wasms/out/${wasmFile}`);
       const language = await WasmLanguage.load(wasmPath);
@@ -518,6 +525,7 @@ export function getLanguageDisplayName(language: Language): string {
     luau: 'Luau',
     objc: 'Objective-C',
     solidity: 'Solidity',
+    nix: 'Nix',
     yaml: 'YAML',
     twig: 'Twig',
     xml: 'XML',

@@ -953,6 +953,11 @@ export class CodeGraph {
     return this.queries.getNodesByName(name);
   }
 
+  /** Nodes whose name starts with `prefix` (index range scan, capped). */
+  getNodesByNamePrefix(prefix: string, limit = 20): Node[] {
+    return this.queries.getNodesByNamePrefix(prefix, limit);
+  }
+
   /**
    * Search nodes by text
    */

@@ -93,6 +93,7 @@ export const LANGUAGES = [
   'objc',
   'r',
   'solidity',
+  'nix',
   'yaml',
   'twig',
   'xml',

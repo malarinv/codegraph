@@ -1944,11 +1944,18 @@ export class ToolHandler {
         }
         // Same token, non-callable synth endpoints (capped, precision-gated on an
         // actual heuristic edge so plain config constants never qualify).
+        // Per-token sub-cap so one token's many endpoints (10 nix option writes
+        // of `programs.git.enable` across test configs) can't fill the pool
+        // before later tokens (`home.file`) get a slot.
         if (dynNamed.size < 12) {
+          let tokenDyn = 0;
           for (const n of hits) {
             if (CALLABLE.has(n.kind) || !DYN_KINDS.has(n.kind) || dynNamed.has(n.id)) continue;
-            if (hasHeuristicEdge(n.id)) dynNamed.set(n.id, n);
-            if (dynNamed.size >= 12) break;
+            if (hasHeuristicEdge(n.id)) {
+              dynNamed.set(n.id, n);
+              tokenDyn++;
+            }
+            if (dynNamed.size >= 12 || tokenDyn >= 4) break;
           }
         }
         if (named.size > 40) break;
@@ -4399,6 +4406,26 @@ export class ToolHandler {
    * results across all matching symbols (e.g., multiple classes with an `execute` method).
    */
   private findAllSymbols(cg: CodeGraph, symbol: string): { nodes: Node[]; note: string } {
+    // Nix option paths: the declaration is stored as `options.<path>` and
+    // config writes carry longer/quoted tails (`<path>."git/config".text`),
+    // so a dotted option token (`xdg.configFile`, `launchd.user.agents`) has
+    // no exact-name node and would degrade to bare-tail FTS soup — burying
+    // the declaration hub the nix-option-path edges hang off. Resolve the
+    // convention directly: declaration first, then the exact write, then a
+    // capped prefix scan of write sites. Three index hits; non-nix graphs
+    // fall straight through.
+    if (/^[a-z][\w'-]*(?:\.[\w'-]+)+$/.test(symbol)) {
+      const optionHits = [
+        ...cg.getNodesByName(`options.${symbol}`),
+        ...cg.getNodesByName(symbol),
+        ...cg.getNodesByNamePrefix(`${symbol}.`, 12),
+      ].filter((n) => n.language === 'nix');
+      if (optionHits.length > 0) {
+        const seen = new Set<string>();
+        const nodes = optionHits.filter((n) => !seen.has(n.id) && !!seen.add(n.id)).slice(0, 10);
+        return { nodes, note: '' };
+      }
+    }
     let results = cg.searchNodes(symbol, { limit: 50 });
 
     // Mirror the fallback in `findSymbol` for qualified queries — FTS
