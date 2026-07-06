@@ -4038,6 +4038,19 @@ export class ToolHandler {
       );
     }
 
+    // Non-zero at rest means a resolution pass was interrupted mid-run, so
+    // some files' call/impact edges are missing until the next sync sweeps
+    // the leftovers (#1187). Surface it — an agent trusting an incomplete
+    // blast radius is worse than one that knows to re-sync.
+    const pendingRefs = cg.getPendingReferenceCount();
+    if (pendingRefs > 0) {
+      lines.push(
+        `**Pending resolution:** ⚠ ${pendingRefs} references from an interrupted ` +
+        `index run — some caller/impact edges are missing until the next sync ` +
+        `(any file change triggers it, or run \`codegraph sync\`)`
+      );
+    }
+
     lines.push('', '**Nodes by Kind:**');
 
     for (const [kind, count] of Object.entries(stats.nodesByKind)) {

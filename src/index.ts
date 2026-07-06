@@ -608,7 +608,8 @@ export class CodeGraph {
         }
 
         // Resolve references if files were updated
-        if (result.filesAdded > 0 || result.filesModified > 0) {
+        const filesChanged = result.filesAdded > 0 || result.filesModified > 0;
+        if (filesChanged) {
           if (result.changedFilePaths) {
             // Scope resolution to changed files (git fast path — bounded set)
             const unresolvedRefs = this.queries.getUnresolvedReferencesByFiles(result.changedFilePaths);
@@ -644,7 +645,38 @@ export class CodeGraph {
               });
             });
           }
+        }
 
+        // Orphan sweep (#1187). A resolution pass that dies mid-run — the #850
+        // daemon liveness watchdog's SIGKILL (#1122), Ctrl-C, a crash — leaves
+        // the refs it never reached in unresolved_refs, and the git-scoped fast
+        // path above never revisits them (it reads only the changed files'
+        // rows). Those files' call edges were then missing PERMANENTLY, with
+        // nothing to see except a too-small blast radius, until a full
+        // re-index. A completed pass deletes every row it processed (resolved
+        // or not), so any row still present now is such an orphan — or a row
+        // parked by an older engine whose scoped pass kept unresolvable refs.
+        // Grind them down with the batched resolver; this also makes a bare
+        // `codegraph sync` the recovery command for a wedged index. On a
+        // healthy index this is one COUNT query.
+        const orphanCount = this.queries.getUnresolvedReferencesCount();
+        if (orphanCount > 0) {
+          options.onProgress?.({
+            phase: 'resolving',
+            current: 0,
+            total: orphanCount,
+          });
+
+          await this.resolveReferencesBatched((current, total) => {
+            options.onProgress?.({
+              phase: 'resolving',
+              current,
+              total,
+            });
+          });
+        }
+
+        if (filesChanged || orphanCount > 0) {
           // Second pass: chained calls whose method lives on a supertype the
           // receiver conforms to (protocol-extension / inherited). Needs the
           // implements/extends edges built above (#750).
@@ -655,7 +687,7 @@ export class CodeGraph {
         }
 
         // Refresh planner stats + checkpoint the WAL after bulk writes.
-        if (result.filesAdded > 0 || result.filesModified > 0 || result.filesRemoved > 0) {
+        if (filesChanged || result.filesRemoved > 0 || orphanCount > 0) {
           this.db.runMaintenance();
         }
 
@@ -871,6 +903,16 @@ export class CodeGraph {
    */
   async resolveReferencesBatched(onProgress?: (current: number, total: number) => void): Promise<ResolutionResult> {
     return this.resolver.resolveAndPersistBatched(onProgress);
+  }
+
+  /**
+   * References extracted but not yet resolved into edges. Zero on a healthy
+   * index — a completed resolution pass consumes every row. Non-zero at rest
+   * means a pass was interrupted mid-run (killed indexer, crash — #1187), so
+   * some files' call edges are missing; the next `sync` sweeps them.
+   */
+  getPendingReferenceCount(): number {
+    return this.queries.getUnresolvedReferencesCount();
   }
 
   /**

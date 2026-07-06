@@ -807,6 +807,9 @@ program
       const buildInfo = cg.getIndexBuildInfo();
       const reindexRecommended = cg.isIndexStale();
       const indexState = cg.getIndexState();
+      // Zero on a healthy index; non-zero at rest means a resolution pass was
+      // interrupted, so some files' call edges are missing (#1187).
+      const pendingRefs = cg.getPendingReferenceCount();
 
       // JSON output mode
       if (options.json) {
@@ -842,6 +845,10 @@ program
             // (a run was killed mid-index — the index is truncated) |
             // 'failed' | null (predates the marker).
             state: indexState,
+            // References awaiting resolution. Non-zero at rest means an
+            // interrupted resolution pass left edges missing; the next
+            // sync sweeps them (#1187).
+            pendingRefs,
           },
         }));
         cg.destroy();
@@ -861,6 +868,9 @@ program
         warn('The last index run silently dropped files — the index is partial. Re-run "codegraph index".');
       } else if (indexState === 'failed') {
         warn('The last index run failed — results may be incomplete. Re-run "codegraph index".');
+      }
+      if (pendingRefs > 0) {
+        warn(`${formatNumber(pendingRefs)} references from an interrupted run are awaiting resolution — some callers/impact edges are missing. Run "codegraph sync" to resolve them.`);
       }
       console.log();
 

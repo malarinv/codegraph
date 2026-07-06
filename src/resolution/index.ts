@@ -968,6 +968,23 @@ export class ReferenceResolver {
       );
     }
 
+    // Delete unresolvable refs too — parity with resolveAndPersistBatched.
+    // Keeping them bought nothing: a ref is only ever retried when its file
+    // is re-extracted, which cascade-deletes and re-inserts its rows anyway.
+    // And it broke the #1187 orphan sweep's invariant — after a COMPLETED
+    // pass the table must hold nothing that pass processed, so that any row
+    // still present belongs to an interrupted run and the sweep can key off
+    // a bare row count.
+    if (result.unresolved.length > 0) {
+      this.queries.deleteSpecificResolvedReferences(
+        result.unresolved.map((r) => ({
+          fromNodeId: r.fromNodeId,
+          referenceName: r.referenceName,
+          referenceKind: r.referenceKind,
+        }))
+      );
+    }
+
     return result;
   }
 
@@ -1152,11 +1169,13 @@ export class ReferenceResolver {
       // Yield so progress UI can render between batches
       await new Promise(resolve => setImmediate(resolve));
 
-      // If nothing was resolved or removed in this batch, we'd loop forever
-      // on the same rows. Break to avoid infinite loop.
-      if (result.resolved.length === 0 && result.unresolved.length === batch.length) {
-        break;
-      }
+      // NOTE: there used to be an extra early break here when a batch resolved
+      // nothing (`result.unresolved.length === batch.length`). That was wrong:
+      // an all-unresolvable batch still DELETES its rows (progress), yet the
+      // break abandoned every batch after it in the same run — on a repo whose
+      // first 5000 refs are all external/stdlib calls, resolution stopped at
+      // batch one and left the rest of the table as permanent orphans (#1187).
+      // The count-based guard below catches the true no-progress case.
 
       // Non-progress guard (defense-in-depth). Because we re-read from offset 0
       // each pass, the unresolved_refs table MUST shrink every iteration — both
