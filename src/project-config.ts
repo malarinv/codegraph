@@ -342,3 +342,55 @@ export function loadIncludePatterns(rootDir: string): string[] {
 export function clearProjectConfigCache(): void {
   cache.clear();
 }
+
+/**
+ * Add gitignore-style patterns to a project's `codegraph.json` `includeIgnored`
+ * list, creating the file if absent and preserving every other key. Used by the
+ * CLI to opt a "super-repo of gitignored child repos" (#1156) into the index on
+ * the user's say-so. Returns the count of patterns actually ADDED (ones already
+ * present are skipped, so a re-run is idempotent).
+ *
+ * A plain-JSON round-trip: a `codegraph.json` carrying comments (not valid JSON)
+ * already fails to load with a warning, so rather than silently clobber such a
+ * file this throws when an existing config won't parse — the caller falls back
+ * to printing the manual snippet. Invalidates the config cache so a subsequent
+ * index in the same process sees the new patterns.
+ */
+export function addIncludeIgnoredPatterns(rootDir: string, patterns: string[]): number {
+  const file = path.join(rootDir, PROJECT_CONFIG_FILENAME);
+  let config: Record<string, unknown> = {};
+  let raw: string | null = null;
+  try {
+    raw = fs.readFileSync(file, 'utf-8');
+  } catch {
+    raw = null; // missing file — create a fresh one below
+  }
+  if (raw !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`${PROJECT_CONFIG_FILENAME} is not valid JSON — fix it by hand, then re-run.`);
+    }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config = parsed as Record<string, unknown>;
+    }
+  }
+
+  const existing = Array.isArray(config.includeIgnored)
+    ? (config.includeIgnored as unknown[]).filter((p): p is string => typeof p === 'string')
+    : [];
+  const merged = [...existing];
+  const seen = new Set(existing);
+  let added = 0;
+  for (const p of patterns) {
+    if (seen.has(p)) continue;
+    seen.add(p);
+    merged.push(p);
+    added++;
+  }
+  config.includeIgnored = merged;
+  fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
+  clearProjectConfigCache();
+  return added;
+}

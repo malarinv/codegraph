@@ -799,6 +799,48 @@ export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
 }
 
 /**
+ * Cap on how many skipped gitignored repos the CLI hint enumerates — a huge
+ * gitignored data dir full of clones must never turn the hint scan into a long
+ * walk. Enough to make the point; the caller says "+N more" past this.
+ */
+const UNINDEXED_IGNORED_REPO_HINT_CAP = 100;
+
+/**
+ * The INVERSE of the gitignored side of {@link discoverEmbeddedRepoRoots}:
+ * nested git repositories under a gitignored directory that the project has NOT
+ * opted into via `codegraph.json` `includeIgnored`. These are real repos the
+ * default `init`/`index` deliberately skips because `.gitignore` excludes them
+ * (#970, #976) — most visibly the "super-repo `.gitignore`s its child repos"
+ * layout (#1156), where `init` at the parent correctly indexes ~nothing while
+ * `init` inside each child works. The CLI uses this to turn that silent empty
+ * index into an actionable hint: it names the skipped repos and offers to opt
+ * them in. Paths are `rootDir`-relative and trailing-slashed (valid
+ * `includeIgnored` patterns as-is). Returns `[]` for a non-git root (a
+ * filesystem walk already descends into nested repos there), skips built-in
+ * default-ignored dirs (`node_modules`, …), and is bounded so it never stalls
+ * on a giant ignored tree.
+ */
+export function findUnindexedIgnoredRepos(rootDir: string): string[] {
+  try {
+    execFileSync('git', ['rev-parse', '--git-dir'], { cwd: rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  } catch {
+    return [];
+  }
+  const defaults = defaultsOnlyIgnore();
+  const includeIgnored = loadIncludeIgnoredMatcher(rootDir);
+  const repos: string[] = [];
+  for (const dir of listIgnoredDirs(rootDir)) {
+    if (defaults.ignores(dir)) continue; // node_modules etc. — never project code
+    if (includeIgnored?.ignores(normalizePath(dir))) continue; // already opted in — nothing to nag about
+    for (const repo of findNestedGitRepos(path.join(rootDir, dir), dir)) {
+      repos.push(repo);
+      if (repos.length >= UNINDEXED_IGNORED_REPO_HINT_CAP) return repos;
+    }
+  }
+  return repos;
+}
+
+/**
  * Discover embedded repos hidden by `repoDir`'s OWN gitignore rules: for each
  * gitignored directory, search for nested `.git` roots. Returns repo paths
  * relative to `repoDir`, trailing-slashed.
