@@ -41,6 +41,29 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 
 </div>
 
+## Contents
+
+- [Get Started](#get-started)
+- [Language Support](#language-support)
+- [Why CodeGraph?](#why-codegraph)
+- [Key Features](#key-features)
+- [Framework-aware Routes](#framework-aware-routes)
+- [Mixed iOS / React Native / Expo bridging](#mixed-ios--react-native--expo-bridging)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [CLI Reference](#cli-reference)
+- [MCP Tools](#mcp-tools)
+- [Library Usage](#library-usage)
+- [Configuration](#configuration)
+- [Telemetry](#telemetry)
+- [Supported Platforms](#supported-platforms)
+- [Supported Agents](#supported-agents)
+- [Supported Languages](#supported-languages)
+- [Measured cross-file coverage](#measured-cross-file-coverage)
+- [Troubleshooting](#troubleshooting)
+- [Star History](#star-history)
+- [License](#license)
+
 ## Get Started
 
 ### 1. Install the CLI
