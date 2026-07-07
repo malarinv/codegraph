@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.3.0] - 2026-07-07
+
 ### New Features
 
 - CodeGraph now indexes **Nix** (`.nix`) — flakes, NixOS and home-manager modules, overlays, and package sets join the graph: `let` and attrset bindings, functions (simple, destructured `{ pkgs, ... }`, and curried), and `inherit` bindings all become searchable symbols, with call edges between bindings. File-level wiring follows the ways Nix actually connects files: `import ./relative/path.nix` (with `import ./dir` reaching the directory's `default.nix`), NixOS module `imports = [ ./hardware.nix ../common ]` lists, flake-style `modules = [ ./configuration.nix ]` lists, and the nixpkgs `callPackage ./pkgs/foo { }` idiom — so "what does this configuration actually pull in" and "what uses this module" are answerable on real setups. Dynamic references (`import <nixpkgs>`, variable paths, flake-input module references) are deliberately left unlinked rather than guessed. Thanks @TyceHerrman. (#324, #332, #648)
@@ -599,3 +602,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.5]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.5
 [1.1.6]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.6
 [1.2.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.2.0
+[1.3.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.0
