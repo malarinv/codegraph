@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.3.1] - 2026-07-09
+
 ### Fixes
 
 - Indexing very large codebases no longer dies at the end of the "Resolving refs" step. Two failure modes are fixed: on multi-million-symbol projects (e.g. the Linux kernel, ~95,000 files) the final analysis phase ran out of memory and crashed the process outright, and on large projects on slower machines (reported on a 24,000-file Java project on Windows) the same phase could stall long enough that the safety watchdog killed a healthy, still-progressing index at ~98% (#1212). The whole phase now streams its work instead of holding whole-graph snapshots in memory, keeps the process responsive throughout, and skips analysis passes for languages a project doesn't contain — which also makes the tail of indexing noticeably faster on single-language repos. The resulting graph is identical, and a genuinely wedged process is still detected and killed.
@@ -609,3 +612,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.6]: https://github.com/colbymchenry/codegraph/releases/tag/v1.1.6
 [1.2.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.2.0
 [1.3.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.0
+[1.3.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.1
