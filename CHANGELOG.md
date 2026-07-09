@@ -9,6 +9,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- Indexing very large codebases no longer dies at the end of the "Resolving refs" step. Two failure modes are fixed: on multi-million-symbol projects (e.g. the Linux kernel, ~95,000 files) the final analysis phase ran out of memory and crashed the process outright, and on large projects on slower machines (reported on a 24,000-file Java project on Windows) the same phase could stall long enough that the safety watchdog killed a healthy, still-progressing index at ~98% (#1212). The whole phase now streams its work instead of holding whole-graph snapshots in memory, keeps the process responsive throughout, and skips analysis passes for languages a project doesn't contain — which also makes the tail of indexing noticeably faster on single-language repos. The resulting graph is identical, and a genuinely wedged process is still detected and killed.
+- Indexing and `codegraph sync` stay responsive through their heaviest internal steps on huge projects: the post-index database maintenance (which on a multi-gigabyte index could stall the process for minutes and get a fully successful index killed by the safety watchdog at the finish line) now runs on a background thread, storing a giant generated file no longer freezes the process mid-extraction, and the reference-resolution bookkeeping between progress updates is broken into small responsive steps. The resulting graph is byte-for-byte identical.
+- Fixed a race that could leave a freshly-attached MCP session permanently silent: when a client's first messages arrived glued together during the daemon's connection handshake (roughly one attach in five on a busy machine), the daemon could drop them and stop reading that connection entirely — every tool call from that session then hung with no reply. The handshake now hands the connection over losslessly, and the fix is validated by hammering the previously-flaky attach test 25× under load.
+- The first tool call after the shared daemon starts no longer waits behind the query workers' cold start (which can take many seconds on a busy machine) — it's served directly until the first worker is warm, so a fresh session answers immediately.
 
 ## [1.3.0] - 2026-07-07
 
