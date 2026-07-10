@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- The MCP server now notices when a newer CodeGraph release exists and tells you — a long-running server used to drift behind releases silently until something broke. On startup it checks the latest release in the background (never blocking, at most once a day, cached across all servers on the machine) and surfaces a one-line "update available — run `codegraph upgrade`" notice in the server log, in the instructions your agent sees on connect, and in `codegraph_status`. Nothing updates by itself, and being offline just means no notice. Opt out with `CODEGRAPH_NO_UPDATE_CHECK=1`; `DO_NOT_TRACK=1` disables it too. (#1243)
+
 ### Fixes
 
 - `codegraph_explore` no longer lets ordinary English words in a natural-language question hijack the ranking when they happen to match a code symbol's name. A question like "how does the upgrade flow check the latest version" used to treat "check" as a symbol the agent asked for by name, rank that unrelated definition's file first, and crowd the files the question is actually about out of the answer entirely. Precisely written symbol names (camelCase, PascalCase, snake_case, qualified names) still get top billing exactly as before, as do plain-word symbol bags whose words belong together in the same file.
