@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.4.0] - 2026-07-10
+
 ### New Features
 
 - Indexing is dramatically faster on slow storage — mechanical HDDs, network folders, and virtualized disks. The database no longer folds its write journal back into the main file thousands of times during a bulk index (that folding was ~95% of all disk activity); it now streams writes sequentially and folds them back in a few large, coalesced passes that run off the main thread. In a disk-throttled benchmark matching the reported hardware, a mid-size Java project went from over 25 minutes to under a minute, and there is no change on fast disks. Opt out with `CODEGRAPH_NO_WAL_DEFER=1`; tune the fold-back threshold with `CODEGRAPH_WAL_VALVE_MB`. (#1231)
@@ -622,3 +625,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.2.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.2.0
 [1.3.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.0
 [1.3.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.1
+[1.4.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.0
