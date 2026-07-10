@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.4.1] - 2026-07-10
+
 ### New Features
 
 - The MCP server now notices when a newer CodeGraph release exists and tells you — a long-running server used to drift behind releases silently until something broke. On startup it checks the latest release in the background (never blocking, at most once a day, cached across all servers on the machine) and surfaces a one-line "update available — run `codegraph upgrade`" notice in the server log, in the instructions your agent sees on connect, and in `codegraph_status`. Nothing updates by itself, and being offline just means no notice. Opt out with `CODEGRAPH_NO_UPDATE_CHECK=1`; `DO_NOT_TRACK=1` disables it too. (#1243)
@@ -642,3 +645,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.3.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.0
 [1.3.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.1
 [1.4.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.0
+[1.4.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.1
