@@ -610,17 +610,32 @@ function upgradeWindowsBundle(
   return 0;
 }
 
+/**
+ * How to invoke npm. On Windows npm is a .cmd batch file, which Node refuses
+ * to spawn without a shell (EINVAL since the CVE-2024-27980 hardening) — a
+ * direct `npm.cmd` spawn fails on every current Node, so route it through
+ * cmd.exe, the same way the surface-refresh step invokes the .cmd launcher.
+ * (Verified live on the Windows VM: `spawnSync('npm.cmd')` → EINVAL;
+ * `cmd.exe /d /s /c npm …` → works.)
+ */
+export function npmInvocation(platform: NodeJS.Platform, npmArgs: string[]): { cmd: string; args: string[] } {
+  if (platform === 'win32') {
+    return { cmd: 'cmd.exe', args: ['/d', '/s', '/c', ['npm', ...npmArgs].join(' ')] };
+  }
+  return { cmd: 'npm', args: npmArgs };
+}
+
 function upgradeNpm(
   method: Extract<InstallMethod, { kind: 'npm' }>,
   versionSpec: string,
   deps: UpgradeDeps
 ): number {
-  const npm = deps.platform === 'win32' ? 'npm.cmd' : 'npm';
   const args = method.scope === 'global'
     ? ['install', '-g', `${NPM_PACKAGE}@${versionSpec}`]
     : ['install', `${NPM_PACKAGE}@${versionSpec}`];
-  deps.log(c.dim(`Running: ${npm} ${args.join(' ')}`));
-  const code = deps.run(npm, args, process.env);
+  deps.log(c.dim(`Running: npm ${args.join(' ')}`));
+  const inv = npmInvocation(deps.platform, args);
+  const code = deps.run(inv.cmd, inv.args, process.env);
   if (code !== 0) {
     deps.error(`npm exited with code ${code}.`);
     if (method.scope === 'global') {

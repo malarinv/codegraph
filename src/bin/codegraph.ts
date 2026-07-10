@@ -2291,10 +2291,12 @@ program
   .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "all". Default: all')
   .option('-l, --location <where>', 'Uninstall location: "global" or "local". Default: prompt')
   .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=all')
+  .option('--keep-cli', 'Remove agent configs only — leave the codegraph CLI installed')
   .action(async (opts: {
     target?: string;
     location?: string;
     yes?: boolean;
+    keepCli?: boolean;
   }) => {
     const { runUninstaller } = await import('../installer');
     if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
@@ -2306,6 +2308,8 @@ program
         target: opts.target,
         location: opts.location as 'global' | 'local' | undefined,
         yes: opts.yes,
+        keepCli: opts.keepCli,
+        cliFilename: __filename,
       });
     } catch (err) {
       error(err instanceof Error ? err.message : String(err));

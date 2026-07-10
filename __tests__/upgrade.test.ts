@@ -358,14 +358,16 @@ describe('runUpgrade', () => {
     expect(calls.runs[0].args).toEqual(['install', '-g', `${NPM_PACKAGE}@latest`]);
   });
 
-  it('npm on win32 uses npm.cmd', async () => {
+  it('npm on win32 routes through cmd.exe (a direct npm.cmd spawn EINVALs on modern Node)', async () => {
     const { deps, calls } = makeDeps({
       method: { kind: 'npm', scope: 'global' },
       currentVersion: '0.9.8',
       platform: 'win32',
     });
     await runUpgrade({}, deps);
-    expect(calls.runs[0].cmd).toBe('npm.cmd');
+    expect(calls.runs[0].cmd).toBe('cmd.exe');
+    expect(calls.runs[0].args.slice(0, 3)).toEqual(['/d', '/s', '/c']);
+    expect(calls.runs[0].args[3]).toBe(`npm install -g ${NPM_PACKAGE}@latest`);
   });
 
   it('npm: a pinned version is passed through as @<version>', async () => {
