@@ -9,6 +9,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- Indexing is dramatically faster on slow storage — mechanical HDDs, network folders, and virtualized disks. The database no longer folds its write journal back into the main file thousands of times during a bulk index (that folding was ~95% of all disk activity); it now streams writes sequentially and folds them back in a few large, coalesced passes that run off the main thread. In a disk-throttled benchmark matching the reported hardware, a mid-size Java project went from over 25 minutes to under a minute, and there is no change on fast disks. Opt out with `CODEGRAPH_NO_WAL_DEFER=1`; tune the fold-back threshold with `CODEGRAPH_WAL_VALVE_MB`. (#1231)
+- New `CODEGRAPH_PARSE_TIMEOUT_MS` environment variable to raise the per-file parse budget on unusually slow storage, the same way `CODEGRAPH_PARSE_WORKERS` already tunes the worker count. (#1231)
+
+### Fixes
+
+- Indexing on slow storage (mechanical HDDs, network folders) no longer collapses into false "parse timeout" failures. When disk writes stalled the coordinating thread, parses that had already finished — including empty files — were being misjudged as hung, their workers killed, and the files silently dropped from the index. A parse result is now judged by the worker's own clock, so a stalled coordinator accepts the finished result instead of killing the worker; only a genuinely hung parse is terminated (after a wider grace window). Files that do hit the timeout are retried at the end of indexing instead of being silently lost. Thanks @KnifeOfLife for the exceptional report. (#1231)
+- Parse workers now receive their grammar files from memory instead of each re-reading them from disk on spawn, eliminating a feedback loop on slow disks where every worker restart added more disk contention — and making worker restarts cheaper everywhere. (#1231)
 
 ## [1.3.1] - 2026-07-09
 
