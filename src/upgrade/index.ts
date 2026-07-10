@@ -389,8 +389,9 @@ export async function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps): Promi
   // an existing Claude config, and skipped entirely by the kill-switch. Never
   // fatal to the upgrade.
   if (code === 0) {
+    let probe: VersionProbe = 'inconclusive';
     try {
-      reportResolvedVersion(latest, deps);
+      probe = reportResolvedVersion(latest, deps);
     } catch {
       /* an inconclusive probe must not fail the upgrade */
     }
@@ -398,6 +399,19 @@ export async function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps): Promi
       await selfHealPromptHook(deps);
     } catch {
       /* a hook-wiring hiccup must not fail the upgrade */
+    }
+    // The refresh executes whatever `codegraph` PATH resolves. If the probe
+    // just proved that's a stale shadowed install, spawning it would rewrite
+    // the agent surfaces with the very templates the refresh exists to heal —
+    // skip, and point at the manual command for after the PATH is fixed.
+    if (probe !== 'mismatch') {
+      try {
+        selfHealInstalledSurfaces(deps);
+      } catch {
+        /* a refresh hiccup must not fail the upgrade */
+      }
+    } else {
+      deps.log(c.dim('Skipped refreshing agent instructions/config — run `codegraph install --refresh` once the PATH is fixed.'));
     }
   }
   return code;
@@ -435,13 +449,16 @@ export function verifyResolvedVersion(latest: string, deps: UpgradeDeps): Versio
  * instead of discovering it via a mysteriously unchanged `codegraph -v`.
  * Inconclusive probes fall back to the old soft hint — never a scare on
  * setups we can't inspect (no `codegraph` on PATH yet, exotic wrappers).
+ * Returns the probe result so the caller can gate the post-upgrade refresh
+ * (which spawns the PATH-resolved binary) on it.
  */
-function reportResolvedVersion(latest: string, deps: UpgradeDeps): void {
+function reportResolvedVersion(latest: string, deps: UpgradeDeps): VersionProbe {
   const { method } = deps;
   // A project-local npm install isn't served by PATH's `codegraph` (that
   // would be some other install) — a probe could only false-alarm.
-  if (method.kind === 'npm' && method.scope === 'local') return;
-  switch (verifyResolvedVersion(latest, deps)) {
+  if (method.kind === 'npm' && method.scope === 'local') return 'inconclusive';
+  const probe = verifyResolvedVersion(latest, deps);
+  switch (probe) {
     case 'match':
       deps.log(c.green(`✓ \`codegraph\` on your PATH now reports ${latest} — this terminal is already using it.`));
       break;
@@ -453,6 +470,35 @@ function reportResolvedVersion(latest: string, deps: UpgradeDeps): void {
     case 'inconclusive':
       deps.log(c.dim('Open a new terminal if `codegraph --version` looks unchanged (PATH cache).'));
       break;
+  }
+  return probe;
+}
+
+/**
+ * Refresh the agent surfaces previous installs wrote — the marker-fenced
+ * instructions sections (CLAUDE.md / AGENTS.md / GEMINI.md), MCP entries,
+ * legacy-hook cleanups — so they match the version that will serve them.
+ * Unlike the prompt hook above, this content is NOT version-agnostic: the
+ * templates are baked into the binary, so the still-running old process
+ * would only rewrite its own stale copy — the exact staleness this heals.
+ * We therefore spawn the freshly-installed binary (`codegraph install
+ * --refresh`), which is refresh-only: agents never configured stay
+ * untouched, and permission / prompt-hook choices are preserved. Gated on
+ * `codegraph` being resolvable on PATH (an npm-local install isn't) and on
+ * the kill-switch; never fatal to the upgrade.
+ */
+function selfHealInstalledSurfaces(deps: UpgradeDeps): void {
+  if (process.env.CODEGRAPH_NO_INSTALL_REFRESH === '1') return;
+  if (!deps.hasCommand('codegraph')) return;
+  deps.log(c.dim('Refreshing agent instruction sections and config written by previous versions…'));
+  // Windows installs expose codegraph through a .cmd launcher. Node cannot
+  // spawn .cmd files directly without a shell, so route the constant command
+  // through cmd.exe there (the same launcher a terminal would resolve).
+  const code = deps.platform === 'win32'
+    ? deps.run('cmd.exe', ['/d', '/s', '/c', 'codegraph install --refresh'])
+    : deps.run('codegraph', ['install', '--refresh']);
+  if (code !== 0) {
+    deps.warn('Could not refresh the installed agent surfaces — run `codegraph install --refresh` manually.');
   }
 }
 
