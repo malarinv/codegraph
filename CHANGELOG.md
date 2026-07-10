@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- The safety watchdog no longer kills a healthy index on severely degraded storage. It used to judge liveness purely by the event loop, so one long database write on a struggling disk looked identical to a hung process and could get a valid, in-progress index terminated. During `codegraph index`/`codegraph init` the watchdog now also checks whether the index files on disk are advancing before it acts: slow-but-progressing work is left alone (bounded by a hard cap), while a genuinely hung process is still killed exactly as fast as before. (#1231)
 
 ## [1.4.0] - 2026-07-10
 
