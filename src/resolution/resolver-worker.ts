@@ -43,19 +43,24 @@ port.on('message', (msg: InMessage) => {
   try {
     switch (msg.type) {
       case 'open': {
+        const tOpen = Date.now();
         const created = createDatabase(msg.dbPath, { readOnly: true });
         db = created.db;
         db.pragma('busy_timeout = 5000');
         db.pragma('cache_size = -32000');
+        const tDb = Date.now();
         const queries = new QueryBuilder(db);
         resolver = new ReferenceResolver(msg.projectRoot, queries);
         resolver.initialize();
+        if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker open: db=${tDb - tOpen}ms init=${Date.now() - tDb}ms`);
         port.postMessage({ type: 'ready' });
         break;
       }
       case 'resolve': {
         if (!resolver) throw new Error('resolver-worker: resolve before open');
+        const tRes = Date.now();
         const out = resolver.resolveListForAdmission(msg.refs);
+        if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker resolve: ${msg.refs.length} refs in ${Date.now() - tRes}ms`);
         port.postMessage({ type: 'result', id: msg.id, ...out });
         break;
       }

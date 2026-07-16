@@ -1520,7 +1520,9 @@ export class ExtractionOrchestrator {
     // in file order preserves the #1015 determinism exactly.
     storeWriterOpts?: { dbPath: string; fastInit: boolean } | null
   ): Promise<IndexResult> {
+    const tGrammar = Date.now();
     await initGrammars();
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] grammar-init: ${Date.now() - tGrammar}ms`);
     const startTime = Date.now();
     const errors: ExtractionError[] = [];
     let filesIndexed = 0;
@@ -1816,6 +1818,7 @@ export class ExtractionOrchestrator {
       }
     };
 
+    const tParseLoop = Date.now();
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) { aborted = true; break; }
 
@@ -1907,6 +1910,7 @@ export class ExtractionOrchestrator {
         }
       }
     }
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] parse-loop: ${Date.now() - tParseLoop}ms`);
 
     if (signal?.aborted || aborted) {
       if (storeWriter) await storeWriter.close();

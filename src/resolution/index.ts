@@ -1357,52 +1357,98 @@ export class ReferenceResolver {
     // costs zero wall-clock. Any failure downgrades to sequential permanently.
     let pool: ResolverPool | null = null;
     let poolReady = false;
+    const tPoolStart = Date.now();
     if (parallel && total >= minRefsForPool()) {
       pool = ResolverPool.tryCreate(parallel.dbPath, this.projectRoot);
       pool?.ready().then(
-        () => { poolReady = true; },
+        () => {
+          poolReady = true;
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] pool ready after ${Date.now() - tPoolStart}ms`);
+        },
         () => { void pool?.destroy().catch(() => undefined); pool = null; }
       );
     }
 
-    // Process in batches. We always read from offset 0 because every ref the
-    // batch processed leaves the pending set (resolved rows are deleted,
+    // Process in PIPELINED batches (double-buffer). The enumeration is the
+    // head of the pending set in rowid order; every ref a persisted batch
+    // processed leaves the pending set (resolved rows are deleted,
     // unresolvable ones flip to status='failed'), shifting the remaining
     // pending rows forward.
     let prevRemaining = Number.POSITIVE_INFINITY;
-    try {
-    while (true) {
-      const batch = this.queries.getUnresolvedReferencesBatch(0, batchSize);
-      if (batch.length === 0) break;
 
-      let result: ResolutionResult;
+    // Fan-out result of ResolverPool.resolveBatch, settled (never rejecting)
+    // so a fan-out begun before the previous batch's persist can't produce an
+    // unhandled rejection while it waits to be awaited.
+    type PoolSettled =
+      | { ok: true; out: Awaited<ReturnType<ResolverPool['resolveBatch']>> }
+      | { ok: false; err: unknown };
+    type InFlight = { mode: 'pool'; settled: Promise<PoolSettled> } | { mode: 'seq' };
+
+    // Begin one batch: fan out to the pool when it's ready and the batch is
+    // big enough — workers then resolve batch k+1 WHILE the main thread
+    // persists batch k (persist measured at ~58% of resolution wall on a
+    // 255k-ref repo, all of it previously spent with the pool idle).
+    // Sequential batches stay lazy: they run on the main thread at settle
+    // time, where an early start would only contend with the persist.
+    const beginBatch = (batch: UnresolvedReference[]): InFlight => {
       if (pool && poolReady && ResolverPool.worthParallel(batch.length)) {
-        try {
-          const out = await pool.resolveBatch(batch);
-          // Deferred post-pass refs ride back from the workers; re-queue them
-          // in admission order so the post-passes see the sequential order.
-          this.appendDeferredFromWorkers(out.deferredChain, out.deferredThisMember);
-          result = {
-            resolved: out.resolved,
-            unresolved: out.unresolved,
+        return {
+          mode: 'pool',
+          settled: pool.resolveBatch(batch).then(
+            (out) => ({ ok: true as const, out }),
+            (err: unknown) => ({ ok: false as const, err })
+          ),
+        };
+      }
+      return { mode: 'seq' };
+    };
+
+    // Settle an in-flight batch to a ResolutionResult. Deferred post-pass refs
+    // are appended HERE, in loop order — never inside the fan-out promise — so
+    // admission order stays exactly the sequential order even while a later
+    // batch resolves concurrently. A pool failure downgrades to sequential
+    // permanently and re-resolves this batch on the main thread.
+    const settleBatch = async (
+      inFlight: InFlight,
+      batch: UnresolvedReference[]
+    ): Promise<ResolutionResult> => {
+      if (inFlight.mode === 'pool') {
+        const settled = await inFlight.settled;
+        if (settled.ok) {
+          this.appendDeferredFromWorkers(settled.out.deferredChain, settled.out.deferredThisMember);
+          return {
+            resolved: settled.out.resolved,
+            unresolved: settled.out.unresolved,
             stats: {
               total: batch.length,
-              resolved: out.resolved.length,
-              unresolved: out.unresolved.length,
-              byMethod: out.byMethod,
+              resolved: settled.out.resolved.length,
+              unresolved: settled.out.unresolved.length,
+              byMethod: settled.out.byMethod,
             },
           };
-        } catch (err) {
-          logDebug('Parallel resolution failed; falling back to sequential', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-          await pool.destroy().catch(() => undefined);
-          pool = null;
-          result = await this.resolveBatchYielding(batch, maybeYield);
         }
-      } else {
-        result = await this.resolveBatchYielding(batch, maybeYield);
+        logDebug('Parallel resolution failed; falling back to sequential', {
+          error: settled.err instanceof Error ? settled.err.message : String(settled.err),
+        });
+        if (pool) await pool.destroy().catch(() => undefined);
+        pool = null;
       }
+      return this.resolveBatchYielding(batch, maybeYield);
+    };
+
+    try {
+    let batch = this.queries.getUnresolvedReferencesBatch(0, batchSize);
+    let inFlight: InFlight | null = batch.length > 0 ? beginBatch(batch) : null;
+    while (batch.length > 0 && inFlight) {
+      // Prefetch the NEXT batch before this one persists: this batch's rows
+      // are still pending (nothing has mutated the table since they were
+      // read), so skipping exactly batch.length rows in the same rowid
+      // enumeration yields the following batch.
+      const nextBatch = this.queries.getUnresolvedReferencesBatch(batch.length, batchSize);
+
+      const tBatch = Date.now();
+      const result = await settleBatch(inFlight, batch);
+      if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch ${inFlight.mode}: ${batch.length} refs in ${Date.now() - tBatch}ms`);
 
       // Persist in bounded sub-transactions with yields between: a whole
       // batch's edge insert / keyed deletes are otherwise one solid
@@ -1412,13 +1458,26 @@ export class ReferenceResolver {
       // land before their refs are deleted, so a kill mid-way re-resolves
       // the remainder idempotently on the next run/sweep (#1187).
       const PERSIST_CHUNK = 1000;
+      const tPersist = Date.now();
 
-      // Persist edges immediately
+      // Persist edges BEFORE fanning out the next batch: later batches read
+      // this batch's edges — resolveMethodOnType walks supertype chains over
+      // `extends`/`implements` edges that earlier batches resolved, so a
+      // receiver typed as a subclass only reaches a method declared on its
+      // base class if those edges are visible. (Validated on dubbo: fanning
+      // out first downgraded exactly those supertype-method resolutions from
+      // the 0.9 typed-receiver path to the 0.65 word-overlap fallback.)
       const edges = this.createEdges(result.resolved);
       for (let i = 0; i < edges.length; i += PERSIST_CHUNK) {
         this.queries.insertEdges(edges.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
+
+      // NOW fan the next batch out — workers see exactly the edge state the
+      // sequential baseline would (every batch ≤ this one committed), while
+      // the main thread spends the REST of the persist (ref deletes + failed
+      // parking below) overlapped with their resolution — the double-buffer.
+      const nextInFlight = nextBatch.length > 0 ? beginBatch(nextBatch) : null;
 
       // Clean up resolved refs so they don't appear in the next batch —
       // by row id, so a same-key sibling ref in a LATER batch (same caller
@@ -1448,6 +1507,8 @@ export class ReferenceResolver {
         await maybeYield();
       }
 
+      if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch persist: ${Date.now() - tPersist}ms`);
+
       // Aggregate stats
       aggregateStats.total += result.stats.total;
       aggregateStats.resolved += result.stats.resolved;
@@ -1470,18 +1531,25 @@ export class ReferenceResolver {
       // batch one and left the rest of the table as permanent orphans (#1187).
       // The count-based guard below catches the true no-progress case.
 
-      // Non-progress guard (defense-in-depth). Because we re-read from offset 0
-      // each pass, the PENDING population MUST shrink every iteration — resolved
-      // refs are deleted and unresolvable ones are marked failed above, and both
-      // leave the pending set the batch reader sees. If it didn't shrink, a
-      // resolver returned a match whose `original.referenceName` differs from the
-      // stored row, so the keyed delete/update no-ops, and we'd re-read +
-      // re-resolve + re-insert the same rows forever (the runaway that grew a
-      // 99-file repo to 5M edges / 1.4 GB before the Go-fallback fix). Stop
-      // rather than grow the graph without bound.
+      // Non-progress guard (defense-in-depth). Each iteration enumerates from
+      // the head of the pending set, so the PENDING population MUST shrink
+      // every iteration — resolved refs are deleted and unresolvable ones are
+      // marked failed above, and both leave the pending set the batch reader
+      // sees. If it didn't shrink, a resolver returned a match whose
+      // `original.referenceName` differs from the stored row, so the keyed
+      // delete/update no-ops, and we'd re-read + re-resolve + re-insert the
+      // same rows forever (the runaway that grew a 99-file repo to 5M edges /
+      // 1.4 GB before the Go-fallback fix). Stop rather than grow the graph
+      // without bound. (An in-flight prefetched batch is abandoned unsettled —
+      // fan-out has no side effects until settleBatch appends its results.)
       const remaining = this.queries.getUnresolvedReferencesCount();
       if (remaining >= prevRemaining) break;
       prevRemaining = remaining;
+
+      // Advance the pipeline: the prefetched batch (already fanned out when
+      // the pool is on) becomes the current one.
+      batch = nextBatch;
+      inFlight = nextInFlight;
     }
     } finally {
       if (pool) await pool.destroy().catch(() => undefined);
@@ -1491,6 +1559,7 @@ export class ReferenceResolver {
     // synthesize observer/callback dispatch edges (dispatcher → registered
     // callbacks) that static parsing leaves out. Best-effort — never fail the
     // index on it. See docs/design/callback-edge-synthesis.md.
+    const tSynth = Date.now();
     try {
       aggregateStats.byMethod['callback-synthesis'] = await synthesizeCallbackEdges(
         this.queries,
@@ -1500,6 +1569,7 @@ export class ReferenceResolver {
     } catch {
       // synthesis is additive and optional; ignore failures
     }
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] callback-synthesis: ${Date.now() - tSynth}ms`);
 
     return {
       resolved: [],

@@ -464,6 +464,9 @@ export class CodeGraph {
       const deferWal = !fastInit && process.env.CODEGRAPH_NO_WAL_DEFER !== '1' && this.db.getJournalMode() === 'wal';
       let walValve: WalCheckpointValve | null = null;
       let priorAutocheckpoint = 1000;
+      // Set when the fastInit+pool path below defers autocheckpointing, so the
+      // finally knows to restore the interval on that path too.
+      let restoreAutocheckpoint = false;
       if (deferWal) {
         priorAutocheckpoint = this.db.getWalAutocheckpoint();
         this.db.setWalAutocheckpoint(0);
@@ -503,7 +506,9 @@ export class CodeGraph {
             freshDb ? { dbPath: this.db.getPath(), fastInit } : null
           );
         } finally {
+          const tFts = Date.now();
           this.db.endBulkNodeLoad();
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] fts-rebuild: ${Date.now() - tFts}ms`);
         }
 
         // Fold the parse phase's WAL BEFORE the first post-parse reads
@@ -521,10 +526,12 @@ export class CodeGraph {
         // and silently drop themselves. Re-initializing here gives them a
         // chance to see the actual project before resolution runs.
         if (result.success && result.filesIndexed > 0) {
+          const tReinit = Date.now();
           this.resolver.initialize();
           // Cross-file finalization (e.g. NestJS RouterModule prefixes). Runs
           // before resolution so updated names show up in subsequent reads.
           this.resolver.runPostExtract();
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] resolver-reinit: ${Date.now() - tReinit}ms`);
         }
 
         // Resolve references to create call/import/extends edges
@@ -542,6 +549,24 @@ export class CodeGraph {
             try {
               this.db.getDb().pragma('synchronous = NORMAL');
               this.db.getDb().pragma('journal_mode = WAL');
+              // Defer auto-checkpointing for the resolution phase, same
+              // rationale as the deferWal path above: at the default 1000-page
+              // interval, the persist loop's edge inserts + ref deletes make
+              // SQLite re-write hot B-tree pages into the main DB file inline
+              // on the writer over and over (#1231's pathology — measured as
+              // ~58% of the resolution phase on a 255k-ref repo). The valve
+              // bounds WAL growth off-thread; runMaintenance does the final
+              // fold and the finally restores the interval.
+              priorAutocheckpoint = this.db.getWalAutocheckpoint();
+              this.db.setWalAutocheckpoint(0);
+              restoreAutocheckpoint = true;
+              walValve = new WalCheckpointValve(
+                this.db,
+                undefined,
+                undefined,
+                options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
+              );
+              walValve.start();
             } catch { /* keep current mode; resolution still works sequentially */ }
           }
 
@@ -551,6 +576,7 @@ export class CodeGraph {
             total: unresolvedCount,
           });
 
+          const tResolve = Date.now();
           await this.resolveReferencesBatched(
             (current, total) => {
               options.onProgress?.({
@@ -567,6 +593,7 @@ export class CodeGraph {
               });
             }
           );
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] resolution: ${Date.now() - tResolve}ms`);
 
           // Second pass: chained calls whose method lives on a supertype the
           // receiver conforms to (protocol-extension / inherited / default-
@@ -658,7 +685,7 @@ export class CodeGraph {
         // (SQLite replays the WAL on the next open) and the follow-up write
         // that folds it is the known cost of a failed run.
         if (walValve) { walValve.stop(); await walValve.drain(); }
-        if (deferWal) {
+        if (deferWal || restoreAutocheckpoint) {
           try { this.db.setWalAutocheckpoint(priorAutocheckpoint); } catch { /* connection may be closing */ }
         }
         if (fastInit) {
