@@ -1306,6 +1306,14 @@ export class ReferenceResolver {
   }
 
   /**
+   * The resolver's live ResolutionContext — resolver-pool workers use it to
+   * run synthesis passes against their own read-only connection.
+   */
+  getResolutionContext(): ResolutionContext {
+    return this.context;
+  }
+
+  /**
    * Re-queue deferred post-pass refs produced by resolver workers, preserving
    * their admission order so resolveChainedCallsViaConformance /
    * resolveDeferredThisMemberRefs process them exactly as the sequential path
@@ -1551,25 +1559,29 @@ export class ReferenceResolver {
       batch = nextBatch;
       inFlight = nextInFlight;
     }
-    } finally {
-      if (pool) await pool.destroy().catch(() => undefined);
-    }
 
     // Dynamic-edge synthesis: now that all base `calls` edges are persisted,
     // synthesize observer/callback dispatch edges (dispatcher → registered
     // callbacks) that static parsing leaves out. Best-effort — never fail the
-    // index on it. See docs/design/callback-edge-synthesis.md.
+    // index on it. The pool (when it survived resolution) is REUSED to fan the
+    // independent passes across its read-only workers — that's why its destroy
+    // lives in the finally below, after synthesis, not at the end of the batch
+    // loop. See docs/design/callback-edge-synthesis.md.
     const tSynth = Date.now();
     try {
       aggregateStats.byMethod['callback-synthesis'] = await synthesizeCallbackEdges(
         this.queries,
         this.context,
-        onSynthesisProgress
+        onSynthesisProgress,
+        pool
       );
     } catch {
       // synthesis is additive and optional; ignore failures
     }
     if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] callback-synthesis: ${Date.now() - tSynth}ms`);
+    } finally {
+      if (pool) await pool.destroy().catch(() => undefined);
+    }
 
     return {
       resolved: [],

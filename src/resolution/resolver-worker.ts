@@ -24,6 +24,8 @@ import { parentPort } from 'worker_threads';
 import { createDatabase, SqliteDatabase } from '../db/sqlite-adapter';
 import { QueryBuilder } from '../db/queries';
 import { ReferenceResolver } from './index';
+import { SYNTH_PASSES } from './callback-synthesizer';
+import { createYielder } from './cooperative-yield';
 import type { UnresolvedReference } from '../types';
 
 if (!parentPort) {
@@ -32,11 +34,13 @@ if (!parentPort) {
 const port = parentPort;
 
 let db: SqliteDatabase | null = null;
+let queries: QueryBuilder | null = null;
 let resolver: ReferenceResolver | null = null;
 
 type InMessage =
   | { type: 'open'; dbPath: string; projectRoot: string }
   | { type: 'resolve'; id: number; refs: UnresolvedReference[] }
+  | { type: 'synth'; id: number; pass: string }
   | { type: 'close' };
 
 port.on('message', (msg: InMessage) => {
@@ -49,7 +53,7 @@ port.on('message', (msg: InMessage) => {
         db.pragma('busy_timeout = 5000');
         db.pragma('cache_size = -32000');
         const tDb = Date.now();
-        const queries = new QueryBuilder(db);
+        queries = new QueryBuilder(db);
         resolver = new ReferenceResolver(msg.projectRoot, queries);
         resolver.initialize();
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker open: db=${tDb - tOpen}ms init=${Date.now() - tDb}ms`);
@@ -62,6 +66,32 @@ port.on('message', (msg: InMessage) => {
         const out = resolver.resolveListForAdmission(msg.refs);
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker resolve: ${msg.refs.length} refs in ${Date.now() - tRes}ms`);
         port.postMessage({ type: 'result', id: msg.id, ...out });
+        break;
+      }
+      case 'synth': {
+        // Run one synthesis pass against this worker's read-only connection.
+        // Passes only READ (graph + source via the resolver's context); their
+        // edges are returned for the main thread's ordered merge. Async, with
+        // its own error propagation — a throwing pass reports {type:'error'}
+        // and the main thread retries it sequentially.
+        if (!resolver || !queries) throw new Error('resolver-worker: synth before open');
+        const pass = SYNTH_PASSES.find((p) => p.name === msg.pass);
+        if (!pass) throw new Error(`resolver-worker: unknown synth pass '${msg.pass}'`);
+        const q = queries;
+        const r = resolver;
+        void (async () => {
+          const t0 = Date.now();
+          try {
+            const edges = await pass.run(q, r.getResolutionContext(), createYielder());
+            port.postMessage({ type: 'synth-result', id: msg.id, edges, ms: Date.now() - t0 });
+          } catch (err) {
+            port.postMessage({
+              type: 'error',
+              id: msg.id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        })();
         break;
       }
       case 'close': {

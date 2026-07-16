@@ -14,19 +14,22 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph, IndexProgress } from '../src/index';
-import { SYNTH_PROGRESS_STEPS } from '../src/resolution/callback-synthesizer';
+import { SYNTH_PASSES, SYNTH_PROGRESS_STEPS } from '../src/resolution/callback-synthesizer';
 
 describe('synthesis progress ("Linking dynamic dispatch" phase)', () => {
-  it('SYNTH_PROGRESS_STEPS matches the synthesizer’s actual __mark() step count', () => {
+  it('SYNTH_PROGRESS_STEPS matches the synthesizer’s actual step count', () => {
     // The constant is cosmetic (progress denominator), but drift makes the bar
-    // end early or jump to 100% — adding a pass must bump it. Every step site
-    // calls __mark('<label>') with a string literal, so count those.
+    // end early or jump to 100%. Steps = one per SYNTH_PASSES registry entry
+    // (each marks exactly once, run or gated-out, sequential or pooled) plus
+    // the fixed literal __mark('<label>') sites (the ordered Go pre-passes and
+    // the merge/insert tail). Adding a pass = adding a registry entry, so the
+    // constant tracks automatically; this pins the fixed-site count.
     const src = fs.readFileSync(
       path.join(__dirname, '../src/resolution/callback-synthesizer.ts'),
       'utf8'
     );
-    const stepSites = (src.match(/__mark\('/g) ?? []).length;
-    expect(SYNTH_PROGRESS_STEPS).toBe(stepSites);
+    const fixedSites = (src.match(/__mark\('/g) ?? []).length;
+    expect(SYNTH_PROGRESS_STEPS).toBe(SYNTH_PASSES.length + fixedSites);
   });
 
   it('indexing emits a monotonic linking phase ending at the full step count', async () => {

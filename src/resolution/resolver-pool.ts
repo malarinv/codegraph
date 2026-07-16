@@ -13,8 +13,14 @@ import { Worker } from 'worker_threads';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { UnresolvedReference } from '../types';
+import type { Edge, UnresolvedReference } from '../types';
 import type { ResolvedRef, UnresolvedRef } from './types';
+
+/** One synthesis pass's output: its edge list + worker-measured wall clock. */
+export interface SynthPassResult {
+  edges: Edge[];
+  ms: number;
+}
 
 export interface ChunkResult {
   resolved: ResolvedRef[];
@@ -55,6 +61,7 @@ export class ResolverPool {
   private workers: PoolWorker[] = [];
   private nextId = 0;
   private waiters = new Map<number, { resolve: (r: ChunkResult) => void; reject: (e: Error) => void }>();
+  private synthWaiters = new Map<number, { resolve: (r: SynthPassResult) => void; reject: (e: Error) => void }>();
   private failed: Error | null = null;
 
   /**
@@ -85,7 +92,7 @@ export class ResolverPool {
         readyReject = reject;
       });
       const pw: PoolWorker = { worker, ready, busy: 0 };
-      worker.on('message', (msg: { type: string; id?: number; message?: string } & Partial<ChunkResult>) => {
+      worker.on('message', (msg: { type: string; id?: number; message?: string; edges?: Edge[]; ms?: number } & Partial<ChunkResult>) => {
         if (msg.type === 'ready') {
           readyResolve();
         } else if (msg.type === 'result' && msg.id !== undefined) {
@@ -99,12 +106,21 @@ export class ResolverPool {
             deferredThisMember: msg.deferredThisMember!,
             byMethod: msg.byMethod!,
           });
+        } else if (msg.type === 'synth-result' && msg.id !== undefined) {
+          pw.busy--;
+          const waiter = this.synthWaiters.get(msg.id);
+          this.synthWaiters.delete(msg.id);
+          waiter?.resolve({ edges: msg.edges ?? [], ms: msg.ms ?? 0 });
         } else if (msg.type === 'error') {
           pw.busy--;
           const err = new Error(`resolver worker: ${msg.message}`);
           if (msg.id !== undefined && this.waiters.has(msg.id)) {
             const waiter = this.waiters.get(msg.id)!;
             this.waiters.delete(msg.id);
+            waiter.reject(err);
+          } else if (msg.id !== undefined && this.synthWaiters.has(msg.id)) {
+            const waiter = this.synthWaiters.get(msg.id)!;
+            this.synthWaiters.delete(msg.id);
             waiter.reject(err);
           } else {
             this.fail(err);
@@ -130,6 +146,8 @@ export class ResolverPool {
     if (!this.failed) this.failed = err;
     for (const [, waiter] of this.waiters) waiter.reject(this.failed);
     this.waiters.clear();
+    for (const [, waiter] of this.synthWaiters) waiter.reject(this.failed);
+    this.synthWaiters.clear();
   }
 
   /** Whether this batch is worth fanning out. */
@@ -173,6 +191,23 @@ export class ResolverPool {
       for (const [k, v] of Object.entries(c.byMethod)) out.byMethod[k] = (out.byMethod[k] || 0) + v;
     }
     return out;
+  }
+
+  /**
+   * Run one synthesis pass (by SYNTH_PASSES name) on the least-busy worker.
+   * The worker reads the committed graph on its own connection and returns
+   * the pass's edge list; the caller merges in canonical order. Rejects on
+   * worker failure — the caller retries the pass on the main thread.
+   */
+  async runSynthPass(passName: string): Promise<SynthPassResult> {
+    if (this.failed) throw this.failed;
+    const id = this.nextId++;
+    const pw = this.workers.reduce((a, b) => (b.busy < a.busy ? b : a));
+    pw.busy++;
+    return new Promise<SynthPassResult>((resolve, reject) => {
+      this.synthWaiters.set(id, { resolve, reject });
+      pw.worker.postMessage({ type: 'synth', id, pass: passName });
+    });
   }
 
   async destroy(): Promise<void> {

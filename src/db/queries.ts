@@ -230,6 +230,7 @@ export class QueryBuilder {
     getNodesByLowerName?: SqliteStatement;
     getUnresolvedCount?: SqliteStatement;
     getUnresolvedBatch?: SqliteStatement;
+    deleteRefsByRowIdsFull?: SqliteStatement;
     getAllFilePaths?: SqliteStatement;
     getAllNodeNames?: SqliteStatement;
     getDominantFile?: SqliteStatement;
@@ -2204,11 +2205,28 @@ export class QueryBuilder {
    */
   deleteReferencesByRowIds(rowIds: number[]): void {
     if (rowIds.length === 0) return;
-    for (let i = 0; i < rowIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
-      const chunk = rowIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
-      const placeholders = chunk.map(() => '?').join(',');
-      this.db.prepare(`DELETE FROM unresolved_refs WHERE id IN (${placeholders})`).run(...chunk);
-    }
+    // One transaction for all chunks (each chunk was previously its own
+    // implicit transaction = its own WAL commit — measurable on 100k+-ref
+    // resolution persists), and the full-size chunk statement is cached so
+    // repeat calls skip the re-prepare; only the final partial chunk (if any)
+    // prepares ad hoc.
+    this.db.transaction(() => {
+      for (let i = 0; i < rowIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+        const chunk = rowIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+        if (chunk.length === SQLITE_PARAM_CHUNK_SIZE) {
+          if (!this.stmts.deleteRefsByRowIdsFull) {
+            const placeholders = new Array(SQLITE_PARAM_CHUNK_SIZE).fill('?').join(',');
+            this.stmts.deleteRefsByRowIdsFull = this.db.prepare(
+              `DELETE FROM unresolved_refs WHERE id IN (${placeholders})`
+            );
+          }
+          this.stmts.deleteRefsByRowIdsFull.run(...chunk);
+        } else {
+          const placeholders = chunk.map(() => '?').join(',');
+          this.db.prepare(`DELETE FROM unresolved_refs WHERE id IN (${placeholders})`).run(...chunk);
+        }
+      }
+    })();
   }
 
   /**
