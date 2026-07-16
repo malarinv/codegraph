@@ -1336,8 +1336,10 @@ export class ReferenceResolver {
     // When provided, big batches fan out across a read-only resolver-worker
     // pool with results admitted in canonical order (see resolver-pool.ts).
     // Sequential fallback on any pool failure. CODEGRAPH_NO_PARALLEL_RESOLVE=1
-    // disables entirely.
-    parallel?: { dbPath: string }
+    // disables entirely. bulkEdgeLoad hooks (when provided) bracket the batch
+    // loop with drop/recreate of the non-unique edge indexes on big runs —
+    // see DatabaseConnection.beginBulkEdgeLoad.
+    parallel?: { dbPath: string; bulkEdgeLoad?: { begin: () => void; end: () => void } }
   ): Promise<ResolutionResult> {
     // Resolution runs on the indexer's MAIN thread, and the #850 liveness
     // watchdog SIGKILLs a process whose event loop stalls past its window (60s
@@ -1444,6 +1446,22 @@ export class ReferenceResolver {
       return this.resolveBatchYielding(batch, maybeYield);
     };
 
+    // Bulk edge load: on big runs, drop the non-unique edge indexes for the
+    // duration of the batch loop (the identity index stays — OR IGNORE dedup
+    // and the source-keyed supertype-walk reads both live on it). Recreated in
+    // the inner finally BEFORE synthesis, whose passes read kind-keyed.
+    // Measured on a 224k-edge resolution set: insert 2.8s → 1.1s + 0.3s
+    // recreate. Same ref-count gate as the pool so small syncs never pay the
+    // recreate cost.
+    let bulkEdgesActive = false;
+    if (parallel?.bulkEdgeLoad && total >= minRefsForPool()) {
+      try {
+        parallel.bulkEdgeLoad.begin();
+        bulkEdgesActive = true;
+      } catch { /* keep the indexes; inserts just pay the per-row maintenance */ }
+    }
+
+    try {
     try {
     let batch = this.queries.getUnresolvedReferencesBatch(0, batchSize);
     let inFlight: InFlight | null = batch.length > 0 ? beginBatch(batch) : null;
@@ -1558,6 +1576,16 @@ export class ReferenceResolver {
       // the pool is on) becomes the current one.
       batch = nextBatch;
       inFlight = nextInFlight;
+    }
+    } finally {
+      // Recreate the edge indexes BEFORE synthesis (kind-keyed reads) and on
+      // any error path. A crash before this line is healed by the next
+      // DatabaseConnection open (schema.sql re-applies IF NOT EXISTS).
+      if (bulkEdgesActive) {
+        const tIdx = Date.now();
+        parallel!.bulkEdgeLoad!.end();
+        if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] edge-index-recreate: ${Date.now() - tIdx}ms`);
+      }
     }
 
     // Dynamic-edge synthesis: now that all base `calls` edges are persisted,

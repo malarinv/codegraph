@@ -1149,6 +1149,15 @@ export class CodeGraph {
   ): Promise<ResolutionResult> {
     return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress, {
       dbPath: this.db.getPath(),
+      // Bulk-edge-load hooks: on big runs the resolver drops the non-unique
+      // edge indexes for the batch loop and recreates them before synthesis
+      // (which reads kind-keyed). Concurrent readers (a daemon serving this
+      // project mid-index) stay CORRECT during the window — target/kind reads
+      // just degrade to scans until the recreate.
+      bulkEdgeLoad: {
+        begin: () => this.db.beginBulkEdgeLoad(),
+        end: () => this.db.endBulkEdgeLoad(),
+      },
     });
   }
 

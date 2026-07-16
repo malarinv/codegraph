@@ -151,6 +151,51 @@ export class DatabaseConnection {
     this.recreateFtsTriggers();
   }
 
+  /**
+   * Names of the NON-UNIQUE edge indexes dropped for a bulk edge load.
+   * idx_edges_identity deliberately stays: INSERT OR IGNORE's dedup conflicts
+   * on it (#1034), and its leftmost column is `source`, so the source-keyed
+   * reads resolution makes mid-window (supertype walks over
+   * `implements`/`extends`) keep an index via its prefix — verified with
+   * EXPLAIN QUERY PLAN. Target-keyed and kind-keyed reads (traversal,
+   * synthesis) happen only after endBulkEdgeLoad().
+   */
+  private static readonly BULK_EDGE_INDEX_NAMES = [
+    'idx_edges_kind',
+    'idx_edges_source_kind',
+    'idx_edges_target_kind',
+    'idx_edges_provenance',
+  ] as const;
+
+  /**
+   * Enter bulk-edge-load mode: drop the non-unique edge indexes so the mass
+   * INSERT OR IGNORE stream pays one B-tree (the identity index) instead of
+   * five — measured 2.8s → 1.1s inserting a 224k-edge resolution set, with
+   * recreation costing ~0.3s. MUST be paired with endBulkEdgeLoad(); a crash
+   * inside the window is healed on the next DatabaseConnection open (schema.sql
+   * re-applies CREATE INDEX IF NOT EXISTS).
+   */
+  beginBulkEdgeLoad(): void {
+    for (const idx of DatabaseConnection.BULK_EDGE_INDEX_NAMES) {
+      this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
+    }
+  }
+
+  /**
+   * Leave bulk-edge-load mode: recreate the dropped indexes in one pass each
+   * over the (now fully loaded) edges table — far cheaper than maintaining
+   * them per-insert. DDL is extracted from schema.sql so it cannot drift.
+   */
+  endBulkEdgeLoad(): void {
+    const schemaPath = path.join(__dirname, 'schema.sql');
+    const schema = fs.readFileSync(schemaPath, 'utf-8');
+    for (const idx of DatabaseConnection.BULK_EDGE_INDEX_NAMES) {
+      const m = schema.match(new RegExp(`CREATE INDEX IF NOT EXISTS ${idx}\\b[^;]*;`));
+      if (!m) throw new Error(`schema.sql: edge index ${idx} not found for bulk-load recreation`);
+      this.db.exec(m[0]);
+    }
+  }
+
   /** Recreate the FTS triggers + rebuild if a bulk-load window never closed. */
   private healBulkNodeLoad(): void {
     const row = this.db
