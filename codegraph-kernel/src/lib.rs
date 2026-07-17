@@ -19,9 +19,11 @@
 mod buffers;
 mod docstring;
 mod ids;
+mod go;
 mod java;
 mod langs;
 mod textutil;
+mod python;
 mod tsjs;
 
 use napi::bindgen_prelude::*;
@@ -99,6 +101,8 @@ pub fn grammar_info(language: String) -> Option<GrammarInfo> {
 pub fn extract_file(file_path: String, content: String, language: String) -> Result<ExtractBuffers> {
     let out = match language.as_str() {
         "java" => java::extract(&file_path, &content).map_err(Error::from_reason)?,
+        "python" => python::extract(&file_path, &content).map_err(Error::from_reason)?,
+        "go" => go::extract(&file_path, &content).map_err(Error::from_reason)?,
         _ => tsjs::extract(&file_path, &content, &language).map_err(Error::from_reason)?,
     };
     Ok(ExtractBuffers {

@@ -72,12 +72,12 @@ describe.skipIf(!kernelBuilt)('kernel scaffold', () => {
     expect(info.languages).toContain('javascript');
   });
 
-  it('TS/JS family + Java route to the kernel by default; others stay wasm', () => {
-    for (const lang of ['typescript', 'tsx', 'javascript', 'jsx', 'java'] as const) {
+  it('TS/JS family + Java + Python + Go route to the kernel by default; others stay wasm', () => {
+    for (const lang of ['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go'] as const) {
       expect(kernelRoutes(lang), lang).toBe(true);
     }
-    expect(kernelRoutes('python')).toBe(false);
-    expect(tryKernelExtract('src/a.py', 'def f():\n  pass\n', 'python')).toBeNull();
+    expect(kernelRoutes('ruby')).toBe(false);
+    expect(tryKernelExtract('src/a.rb', 'def f\nend\n', 'ruby')).toBeNull();
     // CODEGRAPH_KERNEL_LANGS REPLACES the default set when present.
     process.env.CODEGRAPH_KERNEL_LANGS = 'tsx';
     expect(kernelRoutes('typescript')).toBe(false);

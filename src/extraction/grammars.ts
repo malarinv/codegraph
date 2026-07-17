@@ -280,6 +280,8 @@ export async function initGrammars(): Promise<void> {
  *   - tree-sitter/tree-sitter-typescript v0.23.2 (f975a62) → typescript + tsx
  *   - tree-sitter/tree-sitter-javascript v0.25.0 (44c892e) → javascript + jsx
  *   - tree-sitter/tree-sitter-java v0.23.5 (94703d5) → java
+ *   - tree-sitter/tree-sitter-python v0.23.6 (bffb65a) → python
+ *   - tree-sitter/tree-sitter-go v0.23.4 (3c3775f) → go
  * Built from each repo's CHECKED-IN parser.c (no `generate`) with
  * tree-sitter-cli 0.25.10 `build --wasm` — the same tables crates.io compiles
  * (parser.c sha-matched against the crates.io tarball).
@@ -289,7 +291,7 @@ export async function initGrammars(): Promise<void> {
 const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   'pascal', 'scala', 'lua', 'luau', 'csharp', 'r', 'cfml', 'cfscript', 'cfquery',
   'cobol', 'vbnet', 'erlang', 'terraform', 'arkts', 'nix',
-  'typescript', 'tsx', 'javascript', 'jsx', 'java',
+  'typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

@@ -39,11 +39,11 @@ if (paths.length === 0) {
   process.exit(2);
 }
 
-const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java']);
+const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go']);
 const EXTS = new Map([
   ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'],
   ['.tsx', 'tsx'], ['.js', 'javascript'], ['.mjs', 'javascript'],
-  ['.cjs', 'javascript'], ['.jsx', 'jsx'], ['.java', 'java'],
+  ['.cjs', 'javascript'], ['.jsx', 'jsx'], ['.java', 'java'], ['.py', 'python'], ['.pyw', 'python'], ['.go', 'go'],
 ]);
 
 /** Collect candidate files. */

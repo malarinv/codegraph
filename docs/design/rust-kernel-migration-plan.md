@@ -30,7 +30,7 @@ Work top to bottom; each step has a section below with the detail.
       dispatch), so the Mac headline barely moves (~11.3→11.1s; parse-loop 5.0→4.4s);
       the win shows where worker CPU binds (dubbo on 2-CPU: 28→22.5s, ~1.25×). The
       identified follow-up lever for the Mac number is decode-direct-to-store (§4c).
-- [ ] **R5. Port Python, Go.** (§4)
+- [x] **R5. Port Python, Go.** (§4) — **ported + gates passed + DEFAULT-ON 2026-07-16, §4e.**
 - [ ] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
 - [ ] **R7. Long-tail languages opportunistically** per the tracker; T3 may stay TS forever. (§4)
 - [ ] **P1. Kernel-scale resolution speed** — the 19.5-min sequential wall at 2M nodes. (§7a)
@@ -264,6 +264,29 @@ Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
   Windows VM still deferred (same fallback rationale as §4b).
 - Default routing now includes `java`.
 
+### 4e. R5 — Python + Go PORTED + gates PASSED + DEFAULT-ON (2026-07-16)
+
+- **Walkers:** `codegraph-kernel/src/python.rs` + `src/go.rs` (the java.rs pattern).
+  Python: decorated_definition docstring/decorator handling (decorates only for
+  bare-identifier decorators — the `call`-kind quirk mirrored), fn-in-class → method,
+  module assignments always `variable` (no isConst hook), from-import binding refs,
+  `self.x` fn-ref candidates as BARE names, attribute callees via the namedChild(1)
+  fallback. Go: receiver methods with `Recv::name` QNs + first-earlier-struct
+  contains edges, type_spec → struct/interface classification (embedding → extends;
+  interface method_elems → method nodes), composite-literal instantiates keeping the
+  package qualifier, top-level var/const initializer walks attributed to the symbol
+  (#693), 2-hop field chains (#1276), `New().Method()` re-encode (#645/#608),
+  GO_SPEC fn-ref layers (literal_element/expression_list fan-out).
+- **Grammars:** crates tree-sitter-python 0.23.6 (bffb65a) + tree-sitter-go 0.23.4
+  (3c3775f); wasm vendored from the same tags, parser.c sha-matched (both were
+  2023-era in tree-sitter-wasms).
+- **Parity:** extraction sweeps 100% — flask 83/83, django 3,035/3,038 (+3 error-file
+  deferrals), gin 99/99, prometheus 978/979 (+1). Full-init dumps byte-identical:
+  flask (10,833 rows), gin (17,540), **django (360,794)**, **prometheus (213,758)**.
+  Torture fixtures in `npm test`. Even Mac-side init already moves where extraction
+  matters: prometheus 5.7→4.5s, django 9.0→8.7s.
+- Default routing now: typescript, tsx, javascript, jsx, java, python, go.
+
 ### 4d. Direct-to-store decode (2026-07-16) — and where the wall ACTUALLY is
 
 Kernel-routed files now ship their flat buffers from the parse worker all the way
@@ -308,8 +331,8 @@ parity before porting the language.
 |---|---|---|---|---|---|
 | typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. **PORTED + GATE PASSED + DEFAULT-ON (§4a/§4b); erroring files defer to wasm per-file.** | ✅ |
 | java | `languages/java.ts` | T1 | crates.io | Second target; unlocks the dubbo-parity claim. Lombok member synthesis (#912) is a NODE synthesizer hook in extraction (`synthesizeMembers`) — port or keep as TS post-pass. **PORTED incl. Lombok + gate passed + DEFAULT-ON (§4c).** | ✅ |
-| python | `languages/python.ts` | T1 | crates.io | Third. Decorator extraction feeds framework route detection — parity required. | ☐ |
-| go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). | ☐ |
+| python | `languages/python.ts` | T1 | crates.io | Third. Decorator extraction feeds framework route detection — parity required. **PORTED + DEFAULT-ON (§4e).** | ✅ |
+| go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). **PORTED + DEFAULT-ON (§4e).** | ✅ |
 | ruby, php | dedicated files | T1 | crates.io | Straightforward; PHP property-receiver shapes (#1220/#1251) are RESOLUTION-side, unaffected. | ☐ |
 | csharp | `languages/csharp.ts` | T1 | crates.io | Plain. | ☐ |
 | rust, dart, scala, lua, luau, r | dedicated files | T1 | crates.io (luau/r/scala: verify crate freshness vs our wasm) | Long-tail T1; port opportunistically after the big five. | ☐ |

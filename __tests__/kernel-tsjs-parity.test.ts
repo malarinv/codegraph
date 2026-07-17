@@ -60,7 +60,7 @@ let savedEnv: Record<string, string | undefined>;
 describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
   beforeAll(async () => {
     await initGrammars();
-    await loadGrammarsForLanguages(['typescript', 'tsx', 'javascript', 'jsx', 'java']);
+    await loadGrammarsForLanguages(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go']);
   });
 
   beforeEach(() => {
@@ -108,6 +108,16 @@ describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
   it('torture fixture (java): Lombok, anonymous classes, method refs, chains', () => {
     const file = path.join(FIXTURE_DIR, 'Torture.java');
     assertParity('fixtures/Torture.java', fs.readFileSync(file, 'utf8'), 'java');
+  });
+
+  it('torture fixture (python): decorators, self fn-refs, imports, shadowing', () => {
+    const file = path.join(FIXTURE_DIR, 'torture.py');
+    assertParity('fixtures/torture.py', fs.readFileSync(file, 'utf8'), 'python');
+  });
+
+  it('torture fixture (go): receivers, embedding, interfaces, composite literals', () => {
+    const file = path.join(FIXTURE_DIR, 'torture.go');
+    assertParity('fixtures/torture.go', fs.readFileSync(file, 'utf8'), 'go');
   });
 
   it.each(REAL_SOURCES)('real source parity: %s', (rel) => {

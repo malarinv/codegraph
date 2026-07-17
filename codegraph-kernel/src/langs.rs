@@ -15,7 +15,8 @@ use tree_sitter::Language;
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 5] = ["typescript", "tsx", "javascript", "jsx", "java"];
+pub const LANGUAGES: [&str; 7] =
+    ["typescript", "tsx", "javascript", "jsx", "java", "python", "go"];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
     match language {
@@ -23,6 +24,8 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         "javascript" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
         _ => None,
     }
 }

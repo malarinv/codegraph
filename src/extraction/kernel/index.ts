@@ -39,6 +39,8 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   'javascript',
   'jsx',
   'java',
+  'python',
+  'go',
 ]);
 
 /**
