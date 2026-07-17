@@ -59,11 +59,14 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       kernel-scale runs each corrected the design (WAL file ≠ WAL backlog;
       cgroup cache credit; pool net-negative at 2 cores; parse floor). The
       2c/6GB envelope already improved 26.4 → 21.6min with counts byte-exact.
-      Record runs DONE (§7a.2): 2c/6GB **20.4min (R6 −23%), WAL 1.57GB (−14×)**;
-      8c/7GB **18.3min, NO OOM, WAL 1.09GB** — all byte-exact. The <10min
-      target is NOT met and the gap is named: resolution is CORE-INVARIANT
-      (835.9s on 8 cores ≈ 812.5s sequential on 2) — the next arc profiles the
-      per-ref main-thread path, then cFnPtrEdges (86% of synthesis), then R7a.
+      Record runs DONE (§7a.2): 2c/6GB 20.4min, 8c/7GB 18.3min NO-OOM — byte-exact.
+      Batch-loop profile round DONE (§7a.3, #1339): countGuard quadratic killed,
+      19.3min. cFnPtr round DONE (§7a.4, #1341): 2.07× standalone, edge set
+      hash-identical, envelope **17.6min (R6 −33%)**. The <10min-on-8c target
+      remains open; levers left, ranked: **R7a C/C++ port (parse 338s — the
+      last big rock)** > backpressure ~120s (checkpoint I/O floor) > E-scan/
+      settle/read-mapping (~70–90s each, approaching honest work) > the 8c
+      re-run formality (est. ~15.5min).
 - [ ] **R7a. C/C++ port** — biggest single-language effort; unlocks cg1212's parse
       expectation (6.2m → ~1.5–2m, 23% of that wall) + CARLA/UE/llvm-class repos;
       Metal + CUDA ride along (their blanking pre-passes stay TS-side — `preParse`
