@@ -1615,8 +1615,12 @@ export class ExtractionOrchestrator {
     let pool: ParseWorkerPool | null = null;
     if (useWorker) {
       // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
-      // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
-      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
+      // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8),
+      // with cores from availableParallelism — cpuset/affinity-honest, where
+      // os.cpus() enumerates the host's CPUs and spawned 8 wasm workers (and
+      // their grammar heaps) inside a 2-CPU container for zero extra
+      // throughput (§7a.1).
+      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.availableParallelism());
       // Read each needed grammar's WASM ONCE here and hand the bytes to every
       // worker, so spawns/respawns load grammars from memory instead of
       // re-reading them from disk (#1231: on an HDD, respawn re-reads amplify
