@@ -24,9 +24,26 @@ function readCgroupBytes(path: string): number | null {
   }
 }
 
+/** `inactive_file` from a cgroup memory.stat file — reclaimable page cache. */
+function readInactiveFile(statPath: string): number {
+  try {
+    const m = /^inactive_file (\d+)$/m.exec(fs.readFileSync(statPath, 'utf8'));
+    return m ? Number.parseInt(m[1]!, 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Available headroom under the cgroup memory limit (v2 then v1), or null
  * when uncontained (no limit, non-Linux, or unreadable). Never throws.
+ *
+ * Reclaimable page cache (`inactive_file`) is credited back: `memory.current`
+ * counts it as usage, but the kernel reclaims it on demand — after a bulk
+ * parse the cache is stuffed with the DB's own pages, and the naive
+ * `max − current` read 57MB of headroom on a 6GB container and silently
+ * disabled the resolver pool (§7a.1 diagnostic run). This is the same
+ * working-set convention `docker stats` uses.
  */
 export function cgroupMemoryAvailable(): number | null {
   if (process.platform !== 'linux') return null;
@@ -34,7 +51,8 @@ export function cgroupMemoryAvailable(): number | null {
   const v2Max = readCgroupBytes('/sys/fs/cgroup/memory.max');
   if (v2Max !== null) {
     const current = readCgroupBytes('/sys/fs/cgroup/memory.current') ?? 0;
-    return Math.max(0, v2Max - current);
+    const reclaimable = readInactiveFile('/sys/fs/cgroup/memory.stat');
+    return Math.max(0, v2Max - Math.max(0, current - reclaimable));
   }
   // v1
   const v1Limit = readCgroupBytes('/sys/fs/cgroup/memory/memory.limit_in_bytes');
@@ -42,7 +60,8 @@ export function cgroupMemoryAvailable(): number | null {
   // anything at or beyond half the address-space-ish range as uncontained.
   if (v1Limit !== null && v1Limit < 2 ** 60) {
     const usage = readCgroupBytes('/sys/fs/cgroup/memory/memory.usage_in_bytes') ?? 0;
-    return Math.max(0, v1Limit - usage);
+    const reclaimable = readInactiveFile('/sys/fs/cgroup/memory/memory.stat');
+    return Math.max(0, v1Limit - Math.max(0, usage - reclaimable));
   }
   return null;
 }

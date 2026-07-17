@@ -1358,6 +1358,10 @@ export class ReferenceResolver {
     // window to fire; see ./cooperative-yield.
     const maybeYield = createYielder();
 
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS) {
+      console.error(`[pool-timing] backpressure hook: ${parallel?.backpressure ? 'present' : 'absent'}`);
+    }
+
     await this.warmCachesYielding(maybeYield);
 
     const total = this.queries.getUnresolvedReferencesCount();

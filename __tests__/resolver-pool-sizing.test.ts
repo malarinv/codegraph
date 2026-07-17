@@ -28,8 +28,9 @@ describe('ResolverPool.resolvePoolSize', () => {
     expect(size({ availableParallelism: 11 })).toBe(6);
   });
 
-  it('true 2-core box keeps a 2-worker pool (the pooled-synthesis 2×)', () => {
-    expect(size({ availableParallelism: 2, memoryBudget: 6 * GB })).toBe(2);
+  it('true 2-core box gets NO pool — sequential measured faster there (§7a.1: 853s vs 1150s)', () => {
+    expect(size({ availableParallelism: 2, memoryBudget: 6 * GB })).toBeNull();
+    expect(size({ availableParallelism: 3, memoryBudget: 6 * GB })).toBe(2);
   });
 
   it('kernel-scale DB in a 7GB container: memory term shrinks the pool below the OOM line', () => {

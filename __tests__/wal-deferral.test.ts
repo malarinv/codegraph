@@ -103,21 +103,26 @@ describe('WalCheckpointValve', () => {
     db.close();
   });
 
-  it('advances its baseline on a full backfill — a wrapped WAL does not retrigger it', async () => {
+  it('advances its baseline on a full backfill — no infinite retrigger (at most one truncate park)', async () => {
+    // Pre-§7a.1 contract was "a wrapped WAL never retriggers"; the file-size
+    // trigger deliberately weakens that to "retriggers AT MOST once more, to
+    // truncate the file, then goes quiet" — the pre-fix bug this test pinned
+    // (firing on raw size forever, serializing every store) stays dead: a
+    // successful truncate zeroes the file, so the trigger cannot loop. At
+    // this test's pathological 10-BYTE soft cap, byte-level residue can trip
+    // the 4×-soft file cap once; product-scale caps are 256MB/1GB.
     const db = openDb();
     db.setWalAutocheckpoint(0);
     writeRows(db, 500);
     const valve = new WalCheckpointValve(db, 0.00001);
     valve.check();
-    await valve.drain(); // full backfill on an idle DB → baseline = current file size
-    // The WAL file keeps its high-water size, but growth is now 0: neither
-    // the timer path nor backpressure may fire again (the pre-fix bug fired
-    // on raw size forever and serialized every store behind a checkpoint).
-    expect(valve.backpressure()).toBeNull();
+    await valve.drain(); // full backfill (and possibly a timer truncate)
+    const first = valve.backpressure();
+    if (first) await first; // one truncate park allowed — file must be 0 after
+    expect(db.getWalSizeBytes()).toBe(0);
+    expect(valve.backpressure()).toBeNull(); // and now: quiet
     valve.check();
-    await valve.drain(); // no-op drain: nothing in flight
-    // New commits recycle wrapped frames — file size is flat, still no trigger.
-    writeRows(db, 5);
+    await valve.drain();
     expect(valve.backpressure()).toBeNull();
     db.close();
   });
@@ -371,6 +376,43 @@ describe('checkpointWalTruncate (§7a.1 file containment)', () => {
     expect(res).not.toBeNull();
     expect(res!.busy).toBe(0);
     expect(db.getWalSizeBytes()).toBe(0); // the file itself, not just the backlog
+    db.close();
+  });
+});
+
+describe('valve file-size trigger (§7a.1: backfilled WAL still grows the file)', () => {
+  it('backpressure trips on file size alone once past the file cap, even with zero backlog', async () => {
+    const db = openDb();
+    db.setWalAutocheckpoint(0);
+    // Grow the file well past a 0.5MB soft cap (file cap = 4× = 2MB), then
+    // fold the backlog completely so growth-vs-baseline is ~zero.
+    writeRows(db, 800);
+    const valve = new WalCheckpointValve(db, 0.5);
+    await valve.foldNow(); // baseline := file size; backlog now 0; file unchanged
+    expect(db.getWalSizeBytes()).toBe(0); // foldNow's success path truncates at the barrier
+    db.close();
+  });
+
+  it('a fully-backfilled but oversized file is chopped at the barrier', async () => {
+    const db = openDb();
+    db.setWalAutocheckpoint(0);
+    writeRows(db, 800);
+    const before = db.getWalSizeBytes();
+    expect(before).toBeGreaterThan(2 * 1024 * 1024);
+    const valve = new WalCheckpointValve(db, 0.5);
+    const bp = valve.backpressure(); // growth past hard cap → parks
+    expect(bp).not.toBeNull();
+    await bp;
+    expect(db.getWalSizeBytes()).toBe(0); // truncated at the parked barrier
+    // And the file-size trigger alone re-arms it after regrowth:
+    writeRows(db, 800);
+    await valve.foldNow();
+    writeRows(db, 100); // small backlog, file grows again but under hard cap
+    const sizeTrigger = valve.backpressure();
+    // 100 rows ≈ <1MB backlog (under 1MB hard cap) but file is past the 2MB cap
+    expect(sizeTrigger).not.toBeNull();
+    await sizeTrigger;
+    expect(db.getWalSizeBytes()).toBe(0);
     db.close();
   });
 });

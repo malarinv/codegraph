@@ -1619,8 +1619,11 @@ export class ExtractionOrchestrator {
       // with cores from availableParallelism — cpuset/affinity-honest, where
       // os.cpus() enumerates the host's CPUs and spawned 8 wasm workers (and
       // their grammar heaps) inside a 2-CPU container for zero extra
-      // throughput (§7a.1).
-      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.availableParallelism());
+      // throughput (§7a.1). Floored so a 2-core box still gets 2 workers:
+      // parse is worker-side CPU, and 1 worker measured 34% slower than the
+      // old oversubscribed pool on the kernel-scale 2-cpuset envelope
+      // (493s vs 369s) — main + store-worker don't fill the second core.
+      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, Math.max(3, os.availableParallelism()));
       // Read each needed grammar's WASM ONCE here and hand the bytes to every
       // worker, so spawns/respawns load grammars from memory instead of
       // re-reading them from disk (#1231: on an HDD, respawn re-reads amplify

@@ -95,7 +95,12 @@ export class ResolverPool {
         return Math.min(n, 16);
       }
     }
-    const cpuCap = Math.max(2, Math.min(opts.availableParallelism - 1, 6));
+    // No floor: at ap=2 the pool LOSES to sequential outright — measured on
+    // the kernel-scale 2-cpuset envelope: resolution 853s sequential vs
+    // 1,150s pooled-6-on-2 (§7a.1), and synthesis is Amdahl-bound by its
+    // dominant pass (cFnPtrEdges 306s of 358s) so pooling it bought nothing.
+    // ap−1 < 2 ⇒ sequential is the fast path, not a fallback.
+    const cpuCap = Math.min(opts.availableParallelism - 1, 6);
     const perWorker = Math.min(Math.max(opts.dbSizeBytes * 0.2, 256 * 1024 * 1024), 1.5 * 1024 * 1024 * 1024);
     const memCap = Math.floor((opts.memoryBudget * 0.7) / perWorker);
     const size = Math.min(cpuCap, memCap);
@@ -117,18 +122,22 @@ export class ResolverPool {
     try {
       dbSizeBytes = fs.statSync(dbPath).size;
     } catch { /* fresh/missing file — the 256MB per-worker floor applies */ }
+    const ap = os.availableParallelism();
+    const budget = memoryBudgetBytes();
     const size = ResolverPool.resolvePoolSize({
       explicit: process.env.CODEGRAPH_RESOLVE_WORKERS,
-      availableParallelism: os.availableParallelism(),
-      memoryBudget: memoryBudgetBytes(),
+      availableParallelism: ap,
+      memoryBudget: budget,
       dbSizeBytes,
     });
-    if (size === null) return null;
+    // Both outcomes log under SYNTH_TIMINGS — a silent null is how §7a.1's
+    // diagnostic run hid the memory-term misfire for a whole 25-minute cycle.
     if (process.env.CODEGRAPH_SYNTH_TIMINGS) {
       console.error(
-        `[pool-timing] pool size=${size} (ap=${os.availableParallelism()} budget=${Math.round(memoryBudgetBytes() / 1024 / 1024)}MB db=${Math.round(dbSizeBytes / 1024 / 1024)}MB)`
+        `[pool-timing] pool ${size === null ? 'disabled' : `size=${size}`} (ap=${ap} budget=${Math.round(budget / 1024 / 1024)}MB db=${Math.round(dbSizeBytes / 1024 / 1024)}MB)`
       );
     }
+    if (size === null) return null;
     try {
       return new ResolverPool(workerScript, dbPath, projectRoot, size);
     } catch {

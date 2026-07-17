@@ -395,6 +395,7 @@ export class DatabaseConnection {
       const workerSource = `
         const { workerData, parentPort } = require('node:worker_threads');
         let row = null;
+        let err = null;
         try {
           const { DatabaseSync } = require('node:sqlite');
           const db = new DatabaseSync(workerData.dbPath);
@@ -402,10 +403,10 @@ export class DatabaseConnection {
           try {
             if (mode === 'TRUNCATE') db.exec('PRAGMA busy_timeout = 2000');
             row = db.prepare('PRAGMA wal_checkpoint(' + mode + ')').get();
-          } catch {}
+          } catch (e) { err = String(e && e.message || e); }
           try { db.close(); } catch {}
-        } catch {}
-        parentPort.postMessage({ row });
+        } catch (e) { err = err || String(e && e.message || e); }
+        parentPort.postMessage({ row, err });
       `;
       return await new Promise((resolve) => {
         let settled = false;
@@ -416,7 +417,13 @@ export class DatabaseConnection {
         };
         try {
           const worker = new Worker(workerSource, { eval: true, workerData: { dbPath: this.dbPath, mode } });
-          worker.once('message', (m: { row?: Record<string, number> | null }) => { void worker.terminate(); finish(m?.row ?? null); });
+          worker.once('message', (m: { row?: Record<string, number> | null; err?: string | null }) => {
+            if (m?.err && process.env.CODEGRAPH_WAL_VALVE_DEBUG) {
+              console.error(`[wal-valve] checkpoint worker (${mode}): ${m.err}`);
+            }
+            void worker.terminate();
+            finish(m?.row ?? null);
+          });
           worker.once('error', () => { void worker.terminate(); finish(null); });
           worker.once('exit', () => finish(null));
         } catch {
