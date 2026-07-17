@@ -48,7 +48,12 @@ const EXTS = new Map([
 
 /** Collect candidate files. */
 function collect(p, out) {
-  const st = fs.statSync(p);
+  let st;
+  try {
+    st = fs.statSync(p); // dangling symlinks (Linux-tree dtc fixtures) throw
+  } catch {
+    return;
+  }
   if (st.isDirectory()) {
     const base = path.basename(p);
     if (base === 'node_modules' || base === '.git' || base === 'dist' || base === '.codegraph') return;

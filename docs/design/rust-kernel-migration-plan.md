@@ -31,7 +31,11 @@ Work top to bottom; each step has a section below with the detail.
       the win shows where worker CPU binds (dubbo on 2-CPU: 28→22.5s, ~1.25×). The
       identified follow-up lever for the Mac number is decode-direct-to-store (§4c).
 - [x] **R5. Port Python, Go.** (§4) — **ported + gates passed + DEFAULT-ON 2026-07-16, §4e.**
-- [ ] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
+- [x] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
+      — **run 2026-07-17, see §4f.** No regression (26.4min total vs ~27min baseline,
+      identical graph scale, exit 0, all new machinery active) — but the parse
+      expectation was mis-premised: the Linux kernel is ~99% C, an UNPORTED T2
+      language, so "6m → ~2m" transfers to the C/C++ port (R7).
 - [ ] **R7. Long-tail languages opportunistically** per the tracker; T3 may stay TS forever. (§4)
 - [ ] **P1. Kernel-scale resolution speed** — the 19.5-min sequential wall at 2M nodes. (§7a)
 - [ ] **P2. Arc 3, graph richness** — in priority order: test edges → code metrics →
@@ -287,6 +291,26 @@ Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
   matters: prometheus 5.7→4.5s, django 9.0→8.7s. On the 2-CPU/6GB envelope (the
   CI-runner class): **django 22.0→16.7s (1.32×), prometheus 15.0→10.3s (1.46×)**.
 - Default routing now: typescript, tsx, javascript, jsx, java, python, go.
+
+### 4f. R6 — kernel-scale re-validation (2026-07-17)
+
+Fresh init of the Linux kernel in the cg1212 container (2 CPUs / 6GB), current build
+(R5 kernel + direct-to-store active), CODEGRAPH_SYNTH_TIMINGS:
+
+- **Completes, exit 0: 1,586s (26.4min) vs the ~27min #1212/#1323 baseline — no
+  regression** with per-file routing checks, error-file deferral, and the d2s store
+  path live. Graph scale identical: 2,048,664 nodes / 6,405,964 edges (baseline
+  2.05M/6.4M).
+- Phase walls: scan 1.3s (70,239 files), **parse-loop 371.9s (6.2m — unchanged)**,
+  fts-rebuild 6.4s, edge-index-recreate 78.9s, callback-synthesis 350.3s,
+  **resolution 1,149.7s (19.2m — the wall, P1's territory)**, maintenance 47.2s.
+- **The §6 parse expectation (6m → ~2m) was mis-premised:** the Linux tree is
+  63,810 C/H files vs 422 Python — ~99% C, an UNPORTED T2 language, so the kernel
+  can't touch its parse time. The expectation transfers to the C/C++ port (R7,
+  with the blanking pre-passes staying TS-side per §4). The tree's own Python
+  tooling: 99/99 files byte-parity.
+- Kernel-scale priority order after this run: **P1 resolution (73% of the wall)** >
+  C/C++ port (23%) > everything else.
 
 ### 4d. Direct-to-store decode (2026-07-16) — and where the wall ACTUALLY is
 
