@@ -124,8 +124,11 @@ describe.skipIf(!kernelBuilt)('kernel scaffold', () => {
         [file.id, 'helper'],
       ]);
       for (const r of calls) {
-        expect(r.filePath).toBe('src/utils.ts');
-        expect(r.language).toBe('typescript');
+        // No denormalized filePath/language at the extraction seam — the wasm
+        // extractors leave them unset (the store fills them, `?? filePath`),
+        // and the kernel matches that exactly (see decode.ts).
+        expect(r.filePath).toBeUndefined();
+        expect(r.language).toBeUndefined();
         expect(r.line).toBeGreaterThan(0);
       }
     });

@@ -14,7 +14,11 @@ Work top to bottom; each step has a section below with the detail.
 - [x] **R1. Scaffold the napi-rs crate** (`codegraph-kernel`): buffer contract, generic
       `.scm` emitter, build-pipeline integration, `CODEGRAPH_KERNEL=0` kill switch,
       wasm fallback, grammar-source-parity CI. (§3) — **done 2026-07-16, see §3a.**
-- [ ] **R2. Port TypeScript/JavaScript extraction** (tsx/jsx included) as language one. (§4)
+- [x] **R2. Port TypeScript/JavaScript extraction** (tsx/jsx included) as language one. (§4)
+      — **ported 2026-07-16, see §4a**: full-fidelity Rust walker, byte-parity on this repo
+      (353 files) + excalidraw (643 files) + torture fixtures; extraction 2.6× single-thread.
+      R3's gate (large repo, retrieval invariants, agent A/B, Linux/Windows) still gates
+      default-on.
 - [ ] **R3. Run TS/JS through the equivalence gate** — graph parity, retrieval
       invariants, agent A/B, perf + control repo. Ship behind the env flag, then default-on. (§5)
 - [ ] **R4. Port Java** → re-run the dubbo benchmark → the cbm-parity headline. (§4, §6)
@@ -132,6 +136,42 @@ to wasm is the universal fallback. Zero-native-build-on-install stays true.
 - **Known R2 gate item:** native columns are UTF-8 byte offsets; web-tree-sitter's are
   UTF-16-derived — column NUMBERS on non-ASCII lines will differ in parity dumps
   (text, lines, IDs unaffected). Classify or normalize when it shows up.
+  **RESOLVED in R2:** the walker emits UTF-16 columns natively (util::col16), and JS
+  string-slicing semantics (signature truncation at 100/80/120 units) are reproduced in
+  UTF-16 units too — no column/slice diff class exists.
+
+### 4a. R2 — TS/JS port SHIPPED 2026-07-16 (and a §3 design revision)
+
+- **The generic `.scm` emitter is superseded.** Real TS/JS parity needs logic queries
+  can't express (extractCall's receiver-qualified callees, store/RTK/component
+  recognition, fn-ref capture+gating, value-ref shadow pruning, docstring wrapper
+  climbs) — so R2 replaced the R1 query emitter with a **bespoke per-language walker**
+  (`codegraph-kernel/src/tsjs/`, ~1,900 lines) that mirrors `TreeSitterExtractor`'s
+  TS/JS paths function-for-function, bug-for-bug. emitter.rs + queries/ are deleted
+  (git has them); expect T1 languages (java/python/go) to be walkers too. The
+  `post(result, source)` TS escape hatch remains available but TS/JS needed none.
+- **Parity evidence (macOS):** `scripts/kernel-parity.mjs` (multiset diff of
+  canonicalized nodes/edges/refs per file, FULL objects) — this repo 353/353 files,
+  excalidraw 643/643 files (10,650 nodes / 10,726 edges / 68,307 refs), plus
+  checked-in torture fixtures (`__tests__/fixtures/kernel-parity/`) covering
+  components/HOCs/styled, zustand-through-middleware, RTK endpoints+hooks, vuex/pinia,
+  fn-refs (incl `this.x` + shadowing gates), value-refs (incl the shadow prune),
+  decorators, enums, type-alias members + tuple contracts, re-exports, JSX. Kept alive
+  in `npm test` by `__tests__/kernel-tsjs-parity.test.ts` (strict full-object compare).
+- **One decoder bug found by the strict compare:** decode.ts pre-filled
+  `filePath`/`language` on refs; wasm extractors leave them unset (the store
+  denormalizes via `?? filePath`). Fixed — the seam contract is "exactly what
+  extractFromSource returns", not "what the store makes of it".
+- **Perf (M3 Pro, excalidraw 643 files / 7MB):** extraction single-thread 487ms kernel
+  vs 1,255ms wasm (**2.6×**, identical outputs). End-to-end `init` on an 11-core host
+  moves only ~3.4s → ~3.2s — parse is a small, already-pool-parallelized slice there;
+  the win concentrates on constrained hardware (2-core CI class) and kernel-scale
+  parse (R6). Headroom if R4's dubbo target needs it: arena interning, memoized
+  UTF-16 line prefixes, and skipping wasm-grammar loads in workers for kernel-routed
+  languages (worker cold-start).
+- **Not yet done (R3 gate):** large-repo parity (vscode-class), full-repo dump-diff
+  through the DB, retrieval invariants, agent A/B, Linux docker + Windows VM parity
+  runs, control-repo perf. Routing stays opt-in (`CODEGRAPH_KERNEL_LANGS`) until then.
 
 ## 4. Per-language tracker
 
@@ -150,7 +190,7 @@ parity before porting the language.
 
 | Language(s) | Today | Tier | Grammar source | Migration notes / known traps | Status |
 |---|---|---|---|---|---|
-| typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. | ☐ |
+| typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. **PORTED (§4a) — value-refs, component recognition, fn-refs, stores all byte-parity; awaiting the R3 gate before default-on.** | ◐ |
 | java | `languages/java.ts` | T1 | crates.io | Second target; unlocks the dubbo-parity claim. Lombok member synthesis (#912) is a NODE synthesizer hook in extraction (`synthesizeMembers`) — port or keep as TS post-pass. | ☐ |
 | python | `languages/python.ts` | T1 | crates.io | Third. Decorator extraction feeds framework route detection — parity required. | ☐ |
 | go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). | ☐ |

@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 tree-sitter = "0.25"
-streaming-iterator = "0.1"
 sha2 = "0.10"
+regex = "1"
 
 # Grammars — MUST stay revision-matched with the wasm grammars the fallback
 # path loads (tree-sitter-wasms npm package / src/extraction/wasm/). The

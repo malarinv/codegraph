@@ -9,13 +9,17 @@
 //! Calls are synchronous by design: the existing `ParseWorkerPool` workers
 //! already parallelize per-file, so each worker thread drives its own kernel
 //! call (do NOT rebuild the pool on the Rust side — see the migration plan §3).
+//!
+//! Per-language extraction lives in a dedicated walker module (tsjs/ for
+//! typescript/tsx/javascript/jsx) that mirrors the TS extractor for behavioral
+//! parity — verified by scripts/kernel-parity.mjs and the §5 gate.
 
 #![deny(clippy::all)]
 
 mod buffers;
-mod emitter;
 mod ids;
 mod langs;
+mod tsjs;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -63,14 +67,13 @@ pub fn contract_info() -> ContractInfo {
         kernel_version: env!("CARGO_PKG_VERSION").to_string(),
         node_kinds: buffers::NODE_KINDS.iter().map(|s| s.to_string()).collect(),
         edge_kinds: buffers::EDGE_KINDS.iter().map(|s| s.to_string()).collect(),
-        languages: langs::ALL.iter().map(|s| s.name.to_string()).collect(),
+        languages: langs::LANGUAGES.iter().map(|s| s.to_string()).collect(),
     }
 }
 
 #[napi]
 pub fn grammar_info(language: String) -> Option<GrammarInfo> {
-    let spec = langs::spec_for(&language)?;
-    let lang = spec.language();
+    let lang = langs::grammar_for(&language)?;
     let node_kind_count = lang.node_kind_count();
     let field_count = lang.field_count();
     let node_kinds = (0..node_kind_count)
@@ -91,9 +94,7 @@ pub fn grammar_info(language: String) -> Option<GrammarInfo> {
 
 #[napi]
 pub fn extract_file(file_path: String, content: String, language: String) -> Result<ExtractBuffers> {
-    let spec = langs::spec_for(&language)
-        .ok_or_else(|| Error::from_reason(format!("kernel does not support language: {language}")))?;
-    let out = emitter::extract(&file_path, &content, spec).map_err(Error::from_reason)?;
+    let out = tsjs::extract(&file_path, &content, &language).map_err(Error::from_reason)?;
     Ok(ExtractBuffers {
         meta: out.meta.into(),
         nodes: out.nodes.into(),

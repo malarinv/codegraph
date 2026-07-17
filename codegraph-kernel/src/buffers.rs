@@ -316,6 +316,15 @@ impl Tables {
     }
 }
 
+/// One file's encoded tables, ready to hand across the JS boundary.
+pub struct EmitOut {
+    pub meta: Vec<u8>,
+    pub nodes: Vec<u8>,
+    pub edges: Vec<u8>,
+    pub refs: Vec<u8>,
+    pub arena: Vec<u8>,
+}
+
 pub fn build_meta(t: &Tables, arena_len: u32, errors_json: StrRef, duration_ms: f64) -> Vec<u8> {
     let mut m = Vec::with_capacity(META_SIZE);
     m.push(KERNEL_ABI_VERSION);

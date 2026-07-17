@@ -148,6 +148,9 @@ export function decodeExtractBuffers(
     const row = buffers.refs.subarray(i * REF_ROW_SIZE, (i + 1) * REF_ROW_SIZE);
     const fromIdx = row.readUInt32LE(REF.fromIdx);
     const kindByte = row.readUInt8(REF.kind);
+    // No filePath/language here: the wasm extractors emit refs WITHOUT the
+    // denormalized fields (the store fills them via `ref.filePath ?? filePath`),
+    // and the kernel must match the extractFromSource seam exactly.
     const ref: UnresolvedReference = {
       fromNodeId: fromIdx === NONE ? str(arena, row, REF.fromIdStr)! : idByRow[fromIdx]!,
       referenceName: str(arena, row, REF.referenceName)!,
@@ -157,8 +160,6 @@ export function decodeExtractBuffers(
           : (EDGE_KINDS[kindByte] as ReferenceKind),
       line: row.readUInt32LE(REF.line),
       column: row.readUInt32LE(REF.column),
-      filePath,
-      language,
     };
     const candidates = strList(arena, row, REF.candidates);
     if (candidates !== undefined) ref.candidates = candidates;
