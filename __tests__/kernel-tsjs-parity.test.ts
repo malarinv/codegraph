@@ -125,6 +125,25 @@ describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
     assertParity(rel, fs.readFileSync(file, 'utf8'), 'typescript');
   });
 
+  // Every torture fixture again with CRLF line endings — the shape every
+  // Windows autocrlf checkout has. Derived in memory (not a checked-in CRLF
+  // file) so no platform or editor can silently normalize it away. Pins the
+  // JS-multiline-^ semantics in the kernel's docstring cleaning: JS `^`/m
+  // anchors after \r too, so the block-continuation `\s*` eats the `\n` and
+  // the cleaned docstring keeps a bare `\r` (caught on the Windows VM leg of
+  // the O2 gate; diverged in the kernel until docstring.rs mirrored it).
+  it.each([
+    ['torture.tsx', 'tsx'],
+    ['torture.js', 'javascript'],
+    ['Torture.java', 'java'],
+    ['torture.py', 'python'],
+    ['torture.go', 'go'],
+  ] as const)('torture fixture CRLF parity: %s', (name, lang) => {
+    const file = path.join(FIXTURE_DIR, name);
+    const crlf = fs.readFileSync(file, 'utf8').replace(/(?<!\r)\n/g, '\r\n');
+    assertParity(`fixtures/${name} (crlf)`, crlf, lang);
+  });
+
   it('files with parse errors defer to the wasm extractor (recovery is encoding-dependent)', () => {
     // tree-sitter error RECOVERY differs between UTF-8 (native) and UTF-16
     // (web-tree-sitter) parsing — same grammar, same core version — so the

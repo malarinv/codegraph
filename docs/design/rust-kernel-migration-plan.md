@@ -134,6 +134,13 @@ init twice (kernel arm vs `CODEGRAPH_KERNEL=0`), `dump-graph.mjs` each, `cmp`.
   refs carry NO denormalized filePath/language (the store fills them). The strict
   full-object parity compare exists because a loose one masked precisely this.
 - Grammar bumps: crate + vendored wasm move TOGETHER or kernel-grammar-parity fails.
+- **JS multiline `^` anchors after `\r` (and U+2028/U+2029); the regex crate's
+  `(?m)^` is `\n`-only** — on CRLF checkouts (Windows autocrlf) the JS reference's
+  greedy `\s*` eats the `\n` of a CRLF pair and the cleaned docstring keeps a bare
+  `\r`. Caught by the O2 Windows leg (6 parity failures), fixed via
+  `js_multiline_strip` in `docstring.rs`; CRLF variants of every torture fixture
+  are pinned in `kernel-tsjs-parity` (derived in-memory — normalization-proof).
+  Any future walker regex with `(?m)` needs the same scrutiny.
 - Perf claims: measure before believing — the plan's own §1/§6 expectations were
   corrected twice (many-core parse-loop wall = store-writer, §4d; cg1212 parse =
   C-bound, §4f).
