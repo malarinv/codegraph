@@ -1339,7 +1339,7 @@ export class ReferenceResolver {
     // disables entirely. bulkEdgeLoad hooks (when provided) bracket the batch
     // loop with drop/recreate of the non-unique edge indexes on big runs —
     // see DatabaseConnection.beginBulkEdgeLoad.
-    parallel?: { dbPath: string; bulkEdgeLoad?: { begin: () => void; end: () => void } }
+    parallel?: { dbPath: string; bulkEdgeLoad?: { begin: () => void; end: () => void | Promise<void> } }
   ): Promise<ResolutionResult> {
     // Resolution runs on the indexer's MAIN thread, and the #850 liveness
     // watchdog SIGKILLs a process whose event loop stalls past its window (60s
@@ -1583,7 +1583,7 @@ export class ReferenceResolver {
       // DatabaseConnection open (schema.sql re-applies IF NOT EXISTS).
       if (bulkEdgesActive) {
         const tIdx = Date.now();
-        parallel!.bulkEdgeLoad!.end();
+        await parallel!.bulkEdgeLoad!.end();
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] edge-index-recreate: ${Date.now() - tIdx}ms`);
       }
     }

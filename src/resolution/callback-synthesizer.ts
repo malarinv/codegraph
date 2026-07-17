@@ -3666,6 +3666,15 @@ export async function synthesizeCallbackEdges(
     else markPass(SYNTH_PASSES[i]!.name, 0);
   }
 
+  // Above this node count, a pass that OOM-killed its worker must NOT be
+  // retried on the main thread — the retry would OOM the whole process and
+  // take the index with it (the #1212 failure class). Below it, a worker
+  // failure is more likely a transient crash than a memory ceiling, and the
+  // main-thread retry keeps coverage. Skipping loses only that pass's
+  // synthesized edges; the index still completes.
+  const MAIN_RETRY_MAX_NODES = 1_500_000;
+  const graphNodes = queries.getNodeAndEdgeCount().nodes;
+
   if (pool && gatedIn.length > 1) {
     await Promise.all(
       gatedIn.map(async (i) => {
@@ -3674,7 +3683,16 @@ export async function synthesizeCallbackEdges(
           const out = await pool.runSynthPass(pass.name);
           passEdges[i] = out.edges;
           markPass(pass.name, out.ms);
-        } catch {
+        } catch (err) {
+          if (graphNodes > MAIN_RETRY_MAX_NODES) {
+            // Worker died at a scale where the main-thread retry is a process
+            // OOM risk: skip the pass, keep the index alive, and say so.
+            console.error(
+              `[synthesis] pass '${pass.name}' failed on a worker at ${graphNodes} nodes — skipped (edges from this pass are absent): ${err instanceof Error ? err.message : String(err)}`
+            );
+            markPass(`${pass.name} (skipped at scale)`, 0);
+            return;
+          }
           // Worker-side failure (crash, OOM, unknown pass after a version
           // mismatch): retry this one pass on the main thread.
           await runPassOnMain(i);

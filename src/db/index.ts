@@ -185,14 +185,23 @@ export class DatabaseConnection {
    * Leave bulk-edge-load mode: recreate the dropped indexes in one pass each
    * over the (now fully loaded) edges table — far cheaper than maintaining
    * them per-insert. DDL is extracted from schema.sql so it cannot drift.
+   *
+   * Async with a yield BETWEEN the four CREATE INDEX statements: each build is
+   * a synchronous scan of the whole edges table (~20s apiece at Linux-kernel
+   * scale, 79s total measured), and running them back-to-back is a single
+   * event-loop stall longer than the #850 liveness watchdog's 60s window — a
+   * daemon-triggered re-index would be SIGKILLed right after doing the work.
+   * One yield per statement keeps every stall to a single index build, which
+   * stays inside the window.
    */
-  endBulkEdgeLoad(): void {
+  async endBulkEdgeLoad(): Promise<void> {
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     for (const idx of DatabaseConnection.BULK_EDGE_INDEX_NAMES) {
       const m = schema.match(new RegExp(`CREATE INDEX IF NOT EXISTS ${idx}\\b[^;]*;`));
       if (!m) throw new Error(`schema.sql: edge index ${idx} not found for bulk-load recreation`);
       this.db.exec(m[0]);
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 
