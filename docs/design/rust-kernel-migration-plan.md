@@ -53,13 +53,17 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       multiline `^` anchors after `\r` — §0a traps) — fixed + CRLF fixtures pinned
       cross-platform in #1329. Every prebuild target platform is now validated.
 - [ ] **P1. Kernel-scale resolution speed** (§7a) — measurement round RUN 2026-07-17
-      and it RESHAPED the arc (full record §7a.1): the "sequential at 2 CPUs"
-      premise was FALSE (pool sizing is cpuset-blind; R6 already ran 6 workers),
-      and both 8-core re-runs failed STRUCTURALLY before yielding a clean number —
-      container OOM at 7GB (memory-blind pool sizing), WAL blowup to 22GB on a
-      4.6GB DB (pool reader snapshots starve checkpoint truncation at kernel
-      scale). Revised order: (1) WAL containment, (2) memory-aware pool sizing,
-      (3) then the speed re-measure. Target unchanged: <10min on 8 cores.
+      and it RESHAPED the arc (full record §7a.1); items (1) WAL containment and
+      (2) memory-aware/cgroup-honest sizing **SHIPPED same day (#1332–#1335,
+      §7a.2)** after an implementation arc whose three failed/diagnostic
+      kernel-scale runs each corrected the design (WAL file ≠ WAL backlog;
+      cgroup cache credit; pool net-negative at 2 cores; parse floor). The
+      2c/6GB envelope already improved 26.4 → 21.6min with counts byte-exact.
+      Record runs DONE (§7a.2): 2c/6GB **20.4min (R6 −23%), WAL 1.57GB (−14×)**;
+      8c/7GB **18.3min, NO OOM, WAL 1.09GB** — all byte-exact. The <10min
+      target is NOT met and the gap is named: resolution is CORE-INVARIANT
+      (835.9s on 8 cores ≈ 812.5s sequential on 2) — the next arc profiles the
+      per-ref main-thread path, then cFnPtrEdges (86% of synthesis), then R7a.
 - [ ] **R7a. C/C++ port** — biggest single-language effort; unlocks cg1212's parse
       expectation (6.2m → ~1.5–2m, 23% of that wall) + CARLA/UE/llvm-class repos;
       Metal + CUDA ride along (their blanking pre-passes stay TS-side — `preParse`
@@ -596,6 +600,62 @@ the premise and surfaced two structural defects that now gate any speed work.
 **Revised P1 order: (1) WAL containment → (2) memory-aware, cgroup-honest pool
 sizing → (3) re-run the 8-core measurement (container at ≥12GB or the Mac with
 disk headroom) → then profile what remains.** The <10min-on-8-cores target stands.
+
+#### 7a.2 P1 items (1)+(2) SHIPPED 2026-07-17 — the implementation arc (#1332–#1335)
+
+Four PRs, each carrying its measurement; the arc took three failed/diagnostic
+kernel-scale runs to get right, and every failure taught a design fact:
+
+| Run (2c/6GB unless noted) | Build | Outcome |
+|---|---|---|
+| R6 baseline | pre-P1 | 26.4min, EXIT 0; WAL unbounded (mid-run peak unmeasured); pooled 6-on-2 (cpuset-blind) |
+| run 1 | #1332 hook | **EXIT 137 (OOM)** — WAL 22.2GB, 0 of 5.4M frames ever backfilled; futile 20-pass parks amplified memory churn |
+| diagnostic | +latch/debug | EXIT 0, ~24min; pool KILLED by mis-measured 57MB cgroup budget → exposed **sequential resolution 853s vs 1,150s pooled** and cFnPtrEdges = 306s of synthesis's 358s |
+| instrumented | +sizing fixes | EXIT 0, **21.6min (R6 −18%)**; parse floor restores 373.5s; passives complete but the FILE marched 361→721MB → named the wrap-never-happens gap; peak 17.2GB |
+| record (first attempt) | #1335 | **EXIT 1: "database is locked"** — the timer-path truncate won the lock race after the recreate's multi-GB burst and stalled the writer past its 5s busy_timeout → truncate is barrier-only now (#1336). Bonus data: recreate 7.9s (vs 68–95s) once the WAL stays folded |
+| **record** | **#1336** | **EXIT 0, 20.4min (R6 −23%); WAL peak 1.57GB (−14×); counts byte-exact 2,048,664/6,405,964.** parse 354.9s · resolution 812.5s · synthesis 329.0s · recreate 57.5s · maintenance 43.5s |
+| **8-core retry (8c/7GB)** | **#1336** | **EXIT 0, NO OOM — 18.3min; WAL peak 1.09GB; pool sized 4 by the memory term (ap=8, budget 5.1GB, db 4.1GB); counts byte-exact.** parse 208.7s · resolution 835.9s · synthesis 338.7s |
+
+**The 8-core verdict (the question P1 set out to ask): 18.3min vs the <10min
+target — infrastructure fixed, speed target NOT met, and the gap is now
+precisely characterized. Resolution is CORE-INVARIANT at kernel scale: 835.9s
+pooled-4-on-8 ≈ 812.5s sequential-on-2 — worker parallelism buys nothing, so
+the bottleneck is the per-ref main-thread path (admission + persist + per-ref
+resolver work), not topology. Of the 18.3min, ~14min is core-invariant
+resolution+synthesis. Next levers, in order: (a) profile the per-ref path
+inside resolution (the 812–836s floor), (b) `cFnPtrEdges` (306s, 86% of
+synthesis — parallelize/window WITHIN the pass), (c) the R7a C/C++ port
+(parse 209s → kernel-native). 4× cores currently buys only 2min end-to-end
+(20.4 → 18.3) because parse is the only core-scaling phase left.**
+
+**Design facts these runs established (each now enforced in code + tests):**
+
+1. **WAL backlog and WAL file are different resources.** Passive backfills bound
+   the backlog; the FILE only stops growing when a commit finds zero reader
+   marks — observed never in practice. Containment = backfill + **TRUNCATE at a
+   parked barrier** (the one guaranteed no-reader window) + a raw file-size
+   trigger at 4× the soft cap (#1334/#1335). Dubbo: 251MB → 69MB peak, dumps
+   byte-identical under aggressive fold cycling.
+2. **cgroup v2 `memory.current` counts reclaimable page cache** — post-parse it
+   read 57MB free on a 6GB box and silently disabled the pool. `inactive_file`
+   is credited back (#1335); the same box reads 4.4GB.
+3. **The pool loses to sequential at 2 real cores** (853s vs 1,150s resolution;
+   cold worker caches + serialization + time-slicing exceed the parallelism),
+   and pooled synthesis is Amdahl-bound by `cFnPtrEdges` (306s of 358s) at
+   kernel scale. Sizing: `min(availableParallelism − 1, 6)` + memory term +
+   `CODEGRAPH_RESOLVE_WORKERS` knob (#1333/#1335); ap=2 → sequential by choice.
+4. **Parse needs ≥2 workers even on 2 cores** (1 worker = +34%; main + store
+   worker don't fill the second core). Floored (#1335): 373.5s ≈ the 369s
+   oversubscribed baseline, at a fraction of the memory.
+5. **Silent failure modes burned three 25-minute cycles**: give-ups were
+   verbose-gated, sizing's null path logged nothing, the timer path logged
+   nothing. All valve/sizing decisions now print under `CODEGRAPH_SYNTH_TIMINGS`
+   / `CODEGRAPH_WAL_VALVE_DEBUG` — the armed line answers "is it even alive"
+   in one glance.
+
+**New synthesis lever surfaced:** `cFnPtrEdges` is 86% of kernel-scale synthesis
+wall — parallelizing WITHIN that one pass (or windowing its scan) is worth more
+than pooling all 36 passes. Filed under the next P1 profiling round.
 
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
