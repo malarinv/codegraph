@@ -14,6 +14,10 @@
  * Defined as a runtime-iterable `as const` array so the same source
  * of truth backs both the TS type and any runtime validation
  * (e.g. the search query parser).
+ *
+ * The ARRAY ORDER is part of the native kernel's wire contract (kinds cross
+ * the boundary as indexes — see src/extraction/kernel/layout.ts); append new
+ * kinds, never reorder.
  */
 export const NODE_KINDS = [
   'file',
@@ -43,21 +47,28 @@ export const NODE_KINDS = [
 export type NodeKind = (typeof NODE_KINDS)[number];
 
 /**
- * Types of edges (relationships) between nodes
+ * Types of edges (relationships) between nodes.
+ *
+ * Runtime-iterable like NODE_KINDS. The ARRAY ORDER is part of the native
+ * kernel's wire contract (kinds cross the boundary as indexes — see
+ * src/extraction/kernel/layout.ts); append new kinds, never reorder.
  */
-export type EdgeKind =
-  | 'contains'        // Parent contains child (file→class, class→method)
-  | 'calls'           // Function/method calls another
-  | 'imports'         // File imports from another
-  | 'exports'         // File exports a symbol
-  | 'extends'         // Class/interface extends another
-  | 'implements'      // Class implements interface
-  | 'references'      // Generic reference to another symbol
-  | 'type_of'         // Variable/parameter has type
-  | 'returns'         // Function returns type
-  | 'instantiates'    // Creates instance of class
-  | 'overrides'       // Method overrides parent method
-  | 'decorates';      // Decorator applied to symbol
+export const EDGE_KINDS = [
+  'contains',        // Parent contains child (file→class, class→method)
+  'calls',           // Function/method calls another
+  'imports',         // File imports from another
+  'exports',         // File exports a symbol
+  'extends',         // Class/interface extends another
+  'implements',      // Class implements interface
+  'references',      // Generic reference to another symbol
+  'type_of',         // Variable/parameter has type
+  'returns',         // Function returns type
+  'instantiates',    // Creates instance of class
+  'overrides',       // Method overrides parent method
+  'decorates',       // Decorator applied to symbol
+] as const;
+
+export type EdgeKind = (typeof EDGE_KINDS)[number];
 
 /**
  * Supported programming languages. See NODE_KINDS for why this is a

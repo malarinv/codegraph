@@ -30,6 +30,7 @@ import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
+import { tryKernelExtract } from './kernel';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -6700,8 +6701,16 @@ export function extractFromSource(
     const extractor = new DfmExtractor(filePath, source);
     result = extractor.extract();
   } else {
-    const extractor = new TreeSitterExtractor(filePath, source, detectedLanguage);
-    result = extractor.extract();
+    // Native-kernel route (docs/design/rust-kernel-migration-plan.md): gated
+    // per language, null when not routed/available or on a kernel error —
+    // the wasm TreeSitterExtractor below stays the fallback either way.
+    const kernelResult = tryKernelExtract(filePath, source, detectedLanguage);
+    if (kernelResult) {
+      result = kernelResult;
+    } else {
+      const extractor = new TreeSitterExtractor(filePath, source, detectedLanguage);
+      result = extractor.extract();
+    }
   }
 
   // Framework-specific extraction (routes, middleware, etc.)
