@@ -284,7 +284,8 @@ Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
   deferrals), gin 99/99, prometheus 978/979 (+1). Full-init dumps byte-identical:
   flask (10,833 rows), gin (17,540), **django (360,794)**, **prometheus (213,758)**.
   Torture fixtures in `npm test`. Even Mac-side init already moves where extraction
-  matters: prometheus 5.7→4.5s, django 9.0→8.7s.
+  matters: prometheus 5.7→4.5s, django 9.0→8.7s. On the 2-CPU/6GB envelope (the
+  CI-runner class): **django 22.0→16.7s (1.32×), prometheus 15.0→10.3s (1.46×)**.
 - Default routing now: typescript, tsx, javascript, jsx, java, python, go.
 
 ### 4d. Direct-to-store decode (2026-07-16) — and where the wall ACTUALLY is
