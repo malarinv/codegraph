@@ -657,6 +657,27 @@ synthesis — parallelize/window WITHIN the pass), (c) the R7a C/C++ port
 wall — parallelizing WITHIN that one pass (or windowing its scan) is worth more
 than pooling all 36 passes. Filed under the next P1 profiling round.
 
+#### 7a.3 Batch-loop profile + de-quadratic round (2026-07-17, #1339)
+
+`CODEGRAPH_RESOLVE_PROFILE` (shipped in #1339: per-outcome resolveOne histogram
++ loop-stage attribution) overturned the arc's founding assumption — resolveOne
+owns only **~93s** of the ~433s kernel-scale batch loop. Stage attribution and
+what happened to each:
+
+| Stage | Before | After #1339 | Note |
+|---|---|---|---|
+| countGuard | 93.9s | **0.0s** | per-batch COUNT(*) was O(remaining) — replaced by summed SQLite `changes` (zero-removals IS the runaway signal; real COUNT only arbitrates the suspicious path) |
+| read | 54.6s | 57.2s | keyset replaced OFFSET, but the cost is row MAPPING (5000-row materialization + candidates JSON), not prefix-walking — theory falsified, keyset kept as hygiene; lever = leaner row mapping |
+| backpressure | 111.2s | 121.2s | DB-scaled caps didn't help: the fold tax is TOTAL checkpoint I/O (write set is cold pages, not re-dirtied hot ones) — a disk-I/O floor ≈ WAL bytes written |
+| settle (resolveOne) | 85.7s | 88.0s | the real work; exact-match 3.17M×13µs=41s is the biggest legit class |
+| inserts/deletes/marks | ~84s | ~84s | B-tree floor (#1320 post-mortem) |
+
+**2c/6GB envelope: 26.4min (R6) → 20.4 (#1336) → 19.3min (#1339), counts
+byte-exact every run; dubbo dump byte-identical.** The 8-core re-run post-#1339
+is pending (est. ~17.5min from the stage arithmetic). Remaining levers by size:
+parse 351s→R7a C/C++ port; cFnPtrEdges 306s; backpressure 121s (I/O floor —
+shrinks only by writing fewer bytes); settle 88s; read-mapping 57s.
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
