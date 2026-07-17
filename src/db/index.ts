@@ -325,6 +325,17 @@ export class DatabaseConnection {
     }
   }
 
+  /** Size of the main DB file in bytes (0 for in-memory/unknown) — the WAL
+   * valve scales its fold caps with it (resolveWalValveMb). */
+  getDbFileSizeBytes(): number {
+    if (!this.dbPath || this.dbPath === ':memory:') return 0;
+    try {
+      return fs.statSync(this.dbPath).size;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Current `wal_autocheckpoint` interval in pages (0 = disabled). */
   getWalAutocheckpoint(): number {
     const v = this.db.pragma('wal_autocheckpoint', { simple: true });

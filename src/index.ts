@@ -25,7 +25,7 @@ import {
   FindRelevantContextOptions,
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
-import { WalCheckpointValve } from './db/wal-valve';
+import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
 import { QueryBuilder } from './db/queries';
 import {
   isInitialized,
@@ -472,7 +472,7 @@ export class CodeGraph {
         this.db.setWalAutocheckpoint(0);
         walValve = new WalCheckpointValve(
           this.db,
-          undefined,
+          resolveWalValveMb(process.env.CODEGRAPH_WAL_VALVE_MB, this.db.getDbFileSizeBytes()),
           undefined,
           options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
         );
@@ -753,7 +753,7 @@ export class CodeGraph {
         this.db.setWalAutocheckpoint(0);
         walValve = new WalCheckpointValve(
           this.db,
-          undefined,
+          resolveWalValveMb(process.env.CODEGRAPH_WAL_VALVE_MB, this.db.getDbFileSizeBytes()),
           undefined,
           options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
         );

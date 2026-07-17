@@ -416,3 +416,14 @@ describe('valve file-size trigger (§7a.1: backfilled WAL still grows the file)'
     db.close();
   });
 });
+
+describe('resolveWalValveMb DB-size scaling (§7a.2 fold-tax reduction)', () => {
+  it('scales soft cap ~dbSize/4 within [256, 2048]MB; env always wins', () => {
+    const GB = 1024 * 1024 * 1024;
+    expect(resolveWalValveMb(undefined, 100 * 1024 * 1024)).toBe(256); // floor
+    expect(resolveWalValveMb(undefined, 4.6 * GB)).toBe(1177); // ~dbSize/4
+    expect(resolveWalValveMb(undefined, 40 * GB)).toBe(2048); // ceiling
+    expect(resolveWalValveMb('64', 40 * GB)).toBe(64); // env override wins
+    expect(resolveWalValveMb(undefined, 0)).toBe(256); // unknown size → default
+  });
+});

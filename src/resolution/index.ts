@@ -637,7 +637,7 @@ export class ReferenceResolver {
 
     for (let i = 0; i < refs.length; i++) {
       const ref = refs[i]!; // Array index is guaranteed to be in bounds
-      const result = this.resolveOne(ref);
+      const result = this.resolveOneTimed(ref);
 
       if (result) {
         resolved.push(result);
@@ -1233,7 +1233,7 @@ export class ReferenceResolver {
         language: raw.language || this.getLanguageFromNodeId(raw.fromNodeId),
         rowId: raw.rowId,
       };
-      const result = this.resolveOne(ref);
+      const result = this.resolveOneTimed(ref);
       if (result) {
         resolved.push(result);
         byMethod[result.resolvedBy] = (byMethod[result.resolvedBy] || 0) + 1;
@@ -1266,6 +1266,47 @@ export class ReferenceResolver {
    * of resolveBatchYielding, minus the main-thread yields (worker threads have
    * no watchdog heartbeat to starve). Results are in input order.
    */
+  /**
+   * CODEGRAPH_RESOLVE_PROFILE=1: per-outcome wall-clock histogram of
+   * resolveOne, keyed by the winning strategy (`resolvedBy`) or
+   * `fail:<referenceKind>` — the §7a.2 "profile the per-ref path" probe. The
+   * kernel-scale batch loop is ~430s and CORE-INVARIANT (835.9s pooled-4-on-8
+   * ≈ 812.5s sequential-on-2 for the whole superphase), so the next lever is
+   * which CLASS of ref the time belongs to, not more parallelism. Off by
+   * default: the hrtime pair costs ~100ns/ref only when the env is set.
+   */
+  private resolveProfile: Map<string, { n: number; ns: bigint }> | null =
+    process.env.CODEGRAPH_RESOLVE_PROFILE ? new Map() : null;
+
+  private resolveOneTimed(ref: UnresolvedRef): ResolvedRef | null {
+    if (!this.resolveProfile) return this.resolveOne(ref);
+    const t0 = process.hrtime.bigint();
+    const result = this.resolveOne(ref);
+    const dt = process.hrtime.bigint() - t0;
+    const key = result ? result.resolvedBy : `fail:${ref.referenceKind}`;
+    const slot = this.resolveProfile.get(key);
+    if (slot) {
+      slot.n++;
+      slot.ns += dt;
+    } else {
+      this.resolveProfile.set(key, { n: 1, ns: dt });
+    }
+    return result;
+  }
+
+  /** Dump the CODEGRAPH_RESOLVE_PROFILE histogram to stderr (no-op when off). */
+  dumpResolveProfile(label: string): void {
+    if (!this.resolveProfile || this.resolveProfile.size === 0) return;
+    const rows = [...this.resolveProfile.entries()]
+      .map(([k, v]) => ({ k, n: v.n, ms: Number(v.ns / 1_000_000n) }))
+      .sort((a, b) => b.ms - a.ms);
+    for (const r of rows) {
+      console.error(
+        `[resolve-profile] ${label} ${r.k}: n=${r.n} total=${(r.ms / 1000).toFixed(1)}s avg=${((r.ms * 1000) / Math.max(1, r.n)).toFixed(0)}µs`
+      );
+    }
+  }
+
   resolveListForAdmission(refs: UnresolvedReference[]): {
     resolved: ResolvedRef[];
     unresolved: UnresolvedRef[];
@@ -1288,7 +1329,7 @@ export class ReferenceResolver {
         language: raw.language || this.getLanguageFromNodeId(raw.fromNodeId),
         rowId: raw.rowId,
       };
-      const result = this.resolveOne(ref);
+      const result = this.resolveOneTimed(ref);
       if (result) {
         resolved.push(result);
         byMethod[result.resolvedBy] = (byMethod[result.resolvedBy] || 0) + 1;
@@ -1361,6 +1402,16 @@ export class ReferenceResolver {
     if (process.env.CODEGRAPH_SYNTH_TIMINGS) {
       console.error(`[pool-timing] backpressure hook: ${parallel?.backpressure ? 'present' : 'absent'}`);
     }
+
+    // CODEGRAPH_RESOLVE_PROFILE loop-stage attribution: the §7a.2 kernel-scale
+    // histogram showed resolveOne owns only ~93s of the ~436s batch loop —
+    // these counters name where the other ~340s goes (reads, edge build+insert,
+    // deletes/marks, the per-batch count guard).
+    const loopProf: Record<string, number> | null = process.env.CODEGRAPH_RESOLVE_PROFILE
+      ? { read: 0, settle: 0, backpressure: 0, createEdges: 0, insertEdges: 0, deletes: 0, marks: 0, countGuard: 0 }
+      : null;
+    const lp = (k: string, t0: number): void => { if (loopProf) loopProf[k] = (loopProf[k] ?? 0) + (Date.now() - t0); };
+    let tLp = 0;
 
     await this.warmCachesYielding(maybeYield);
 
@@ -1476,18 +1527,24 @@ export class ReferenceResolver {
 
     try {
     try {
-    let batch = this.queries.getUnresolvedReferencesBatch(0, batchSize);
+    tLp = Date.now();
+    let batch = this.queries.getUnresolvedReferencesBatchAfter(0, batchSize);
+    lp('read', tLp);
     let inFlight: InFlight | null = batch.length > 0 ? beginBatch(batch) : null;
     while (batch.length > 0 && inFlight) {
       // Prefetch the NEXT batch before this one persists: this batch's rows
       // are still pending (nothing has mutated the table since they were
-      // read), so skipping exactly batch.length rows in the same rowid
-      // enumeration yields the following batch.
-      const nextBatch = this.queries.getUnresolvedReferencesBatch(batch.length, batchSize);
+      // read), so seeking past this batch's last row id in the same rowid
+      // enumeration yields the following batch (keyset — OFFSET re-walked the
+      // accumulated failed prefix every read, 54.6s at kernel scale, §7a.2).
+      tLp = Date.now();
+      const nextBatch = this.queries.getUnresolvedReferencesBatchAfter(batch[batch.length - 1]!.rowId!, batchSize);
+      lp('read', tLp);
 
       const tBatch = Date.now();
       const result = await settleBatch(inFlight, batch);
       if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch ${inFlight.mode}: ${batch.length} refs in ${Date.now() - tBatch}ms`);
+      lp('settle', tBatch);
 
       // WAL-valve backstop at the ONE pool-idle boundary of the double-buffer
       // (this batch settled, the next not yet fanned out): past the hard cap
@@ -1495,8 +1552,10 @@ export class ReferenceResolver {
       // are all between statements — so the backfill completes, readers
       // re-enter at SQLite's backfilled mark, and the next persist commit
       // WRAPS the WAL instead of growing it. No-op (one fstat) under the cap.
+      tLp = Date.now();
       const bp = parallel?.backpressure?.();
       if (bp) await bp;
+      lp('backpressure', tLp);
 
       // Persist in bounded sub-transactions with yields between: a whole
       // batch's edge insert / keyed deletes are otherwise one solid
@@ -1515,11 +1574,15 @@ export class ReferenceResolver {
       // base class if those edges are visible. (Validated on dubbo: fanning
       // out first downgraded exactly those supertype-method resolutions from
       // the 0.9 typed-receiver path to the 0.65 word-overlap fallback.)
+      tLp = Date.now();
       const edges = this.createEdges(result.resolved);
+      lp('createEdges', tLp);
+      tLp = Date.now();
       for (let i = 0; i < edges.length; i += PERSIST_CHUNK) {
         this.queries.insertEdges(edges.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
+      lp('insertEdges', tLp);
 
       // NOW fan the next batch out — workers see exactly the edge state the
       // sequential baseline would (every batch ≤ this one committed), while
@@ -1531,29 +1594,34 @@ export class ReferenceResolver {
       // by row id, so a same-key sibling ref in a LATER batch (same caller
       // calling the same callee at another line) is left pending for its own
       // attempt instead of being swept out with this batch's rows (#1269).
+      tLp = Date.now();
+      let removedThisBatch = 0;
       const resolvedCleanup = ReferenceResolver.partitionResolvedCleanup(result.resolved);
       for (let i = 0; i < resolvedCleanup.rowIds.length; i += PERSIST_CHUNK) {
-        this.queries.deleteReferencesByRowIds(resolvedCleanup.rowIds.slice(i, i + PERSIST_CHUNK));
+        removedThisBatch += this.queries.deleteReferencesByRowIds(resolvedCleanup.rowIds.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
       for (let i = 0; i < resolvedCleanup.legacyKeys.length; i += PERSIST_CHUNK) {
-        this.queries.deleteSpecificResolvedReferences(resolvedCleanup.legacyKeys.slice(i, i + PERSIST_CHUNK));
+        removedThisBatch += this.queries.deleteSpecificResolvedReferences(resolvedCleanup.legacyKeys.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
+      lp('deletes', tLp);
 
       // Park unresolvable refs from this batch as status='failed' so they
       // leave the pending set (the batch reader and non-progress guard below
       // only see pending rows) but stay retryable when a later sync adds a
       // symbol that could satisfy them (#1240).
+      tLp = Date.now();
       const failedCleanup = ReferenceResolver.partitionFailedCleanup(result.unresolved);
       for (let i = 0; i < failedCleanup.byRowId.length; i += PERSIST_CHUNK) {
-        this.queries.markReferencesFailedByRowIds(failedCleanup.byRowId.slice(i, i + PERSIST_CHUNK));
+        removedThisBatch += this.queries.markReferencesFailedByRowIds(failedCleanup.byRowId.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
       for (let i = 0; i < failedCleanup.legacyKeys.length; i += PERSIST_CHUNK) {
-        this.queries.markReferencesFailed(failedCleanup.legacyKeys.slice(i, i + PERSIST_CHUNK));
+        removedThisBatch += this.queries.markReferencesFailed(failedCleanup.legacyKeys.slice(i, i + PERSIST_CHUNK));
         await maybeYield();
       }
+      lp('marks', tLp);
 
       if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch persist: ${Date.now() - tPersist}ms`);
 
@@ -1590,9 +1658,22 @@ export class ReferenceResolver {
       // 1.4 GB before the Go-fallback fix). Stop rather than grow the graph
       // without bound. (An in-flight prefetched batch is abandoned unsettled —
       // fan-out has no side effects until settleBatch appends its results.)
-      const remaining = this.queries.getUnresolvedReferencesCount();
-      if (remaining >= prevRemaining) break;
-      prevRemaining = remaining;
+      // Non-progress signal, now O(1): `changes` summed across this batch's
+      // deletes + failed-parks is the DIRECT evidence the guard's old count
+      // diff inferred — a resolver returning a mismatched name makes the keyed
+      // cleanup no-op, which shows up here as zero removals. The per-batch
+      // COUNT(*) it replaces walked every remaining pending row — O(N²/batch)
+      // over a run, 93.9s of the kernel-scale batch loop (§7a.2). A REAL count
+      // runs only on the suspicious path (claimed-work batch removed nothing —
+      // e.g. every row was a sibling a legacy-key sweep already consumed),
+      // where it arbitrates stop-vs-continue exactly as before.
+      if (removedThisBatch <= 0 && batch.length > 0) {
+        tLp = Date.now();
+        const remaining = this.queries.getUnresolvedReferencesCount();
+        lp('countGuard', tLp);
+        if (remaining >= prevRemaining) break;
+        prevRemaining = remaining;
+      }
 
       // Advance the pipeline: the prefetched batch (already fanned out when
       // the pool is on) becomes the current one.
@@ -1638,6 +1719,12 @@ export class ReferenceResolver {
     } finally {
       if (pool) await pool.destroy().catch(() => undefined);
     }
+
+    if (loopProf) {
+      const parts = Object.entries(loopProf).map(([k, v]) => `${k}=${(v / 1000).toFixed(1)}s`).join(' ');
+      console.error(`[resolve-profile] loop-stages ${parts}`);
+    }
+    this.dumpResolveProfile('main');
 
     return {
       resolved: [],

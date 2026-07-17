@@ -61,10 +61,18 @@ const CHECK_INTERVAL_MS = 2000;
  * Resolve the valve's soft threshold from the `CODEGRAPH_WAL_VALVE_MB`
  * override; non-numeric / non-positive values fall back to the default.
  */
-export function resolveWalValveMb(envVal: string | undefined): number {
+export function resolveWalValveMb(envVal: string | undefined, dbSizeBytes?: number): number {
   if (envVal !== undefined && envVal !== '') {
     const n = Number(envVal);
     if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  // Scale with the project when the caller knows the DB size: every fold
+  // re-writes hot B-tree pages into the main file (the #1231 pathology in
+  // bounded form — 111s of a kernel-scale batch loop at the flat 256MB cap,
+  // §7a.2), so a big project affords a proportionally bigger transient WAL
+  // (~dbSize/4 soft ⇒ file cap ≈ dbSize) in exchange for ~4× fewer folds.
+  if (dbSizeBytes !== undefined && dbSizeBytes > 0) {
+    return Math.min(2048, Math.max(DEFAULT_WAL_VALVE_MB, Math.floor(dbSizeBytes / 4 / (1024 * 1024))));
   }
   return DEFAULT_WAL_VALVE_MB;
 }

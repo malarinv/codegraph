@@ -230,6 +230,7 @@ export class QueryBuilder {
     getNodesByLowerName?: SqliteStatement;
     getUnresolvedCount?: SqliteStatement;
     getUnresolvedBatch?: SqliteStatement;
+    getUnresolvedBatchAfter?: SqliteStatement;
     deleteRefsByRowIdsFull?: SqliteStatement;
     getAllFilePaths?: SqliteStatement;
     getAllNodeNames?: SqliteStatement;
@@ -2086,6 +2087,34 @@ export class QueryBuilder {
   }
 
   /**
+   * Keyset variant of {@link getUnresolvedReferencesBatch} for the batched
+   * resolution loop: seek past the last-seen row id instead of OFFSET-walking.
+   * OFFSET reads re-scan the accumulated failed-row prefix on every batch —
+   * O(failed rows) per read, measured at 54.6s of the kernel-scale batch loop
+   * (§7a.2) — while the seek is O(batch) forever. `id` is the rowid alias, so
+   * the enumeration order is identical to the OFFSET reader's.
+   */
+  getUnresolvedReferencesBatchAfter(afterRowId: number, limit: number): UnresolvedReference[] {
+    if (!this.stmts.getUnresolvedBatchAfter) {
+      this.stmts.getUnresolvedBatchAfter = this.db.prepare(
+        "SELECT * FROM unresolved_refs WHERE status = 'pending' AND id > ? ORDER BY id LIMIT ?"
+      );
+    }
+    const rows = this.stmts.getUnresolvedBatchAfter.all(afterRowId, limit) as UnresolvedRefRow[];
+    return rows.map((row) => ({
+      fromNodeId: row.from_node_id,
+      referenceName: row.reference_name,
+      referenceKind: row.reference_kind as EdgeKind,
+      line: row.line,
+      column: row.col,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      filePath: row.file_path,
+      language: row.language as Language,
+      rowId: row.id,
+    }));
+  }
+
+  /**
    * Get all tracked file paths (lightweight — no full FileRecord objects)
    */
   getAllFilePaths(): string[] {
@@ -2182,17 +2211,22 @@ export class QueryBuilder {
    * Delete specific resolved references by (fromNodeId, referenceName, referenceKind) tuples.
    * More precise than deleteResolvedReferences — only removes refs that were actually resolved.
    */
-  deleteSpecificResolvedReferences(refs: Array<{ fromNodeId: string; referenceName: string; referenceKind: string }>): void {
-    if (refs.length === 0) return;
+  deleteSpecificResolvedReferences(refs: Array<{ fromNodeId: string; referenceName: string; referenceKind: string }>): number {
+    if (refs.length === 0) return 0;
     const stmt = this.db.prepare(
       'DELETE FROM unresolved_refs WHERE from_node_id = ? AND reference_name = ? AND reference_kind = ?'
     );
+    // Returns rows actually removed (SQLite `changes`, summed): the batched
+    // resolution loop's non-progress guard keys on this — zero removals from
+    // a batch that claimed work is the direct runaway signal (§7a.2).
+    let changed = 0;
     const deleteMany = this.db.transaction((items: typeof refs) => {
       for (const ref of items) {
-        stmt.run(ref.fromNodeId, ref.referenceName, ref.referenceKind);
+        changed += stmt.run(ref.fromNodeId, ref.referenceName, ref.referenceKind).changes;
       }
     });
     deleteMany(refs);
+    return changed;
   }
 
   /**
@@ -2203,13 +2237,15 @@ export class QueryBuilder {
    * caller's same-named call sites, the later sites' edges were silently never
    * created (#1269).
    */
-  deleteReferencesByRowIds(rowIds: number[]): void {
-    if (rowIds.length === 0) return;
+  deleteReferencesByRowIds(rowIds: number[]): number {
+    if (rowIds.length === 0) return 0;
     // One transaction for all chunks (each chunk was previously its own
     // implicit transaction = its own WAL commit — measurable on 100k+-ref
     // resolution persists), and the full-size chunk statement is cached so
     // repeat calls skip the re-prepare; only the final partial chunk (if any)
-    // prepares ad hoc.
+    // prepares ad hoc. Returns rows actually removed (summed `changes`) for
+    // the batched loop's non-progress guard (§7a.2).
+    let changed = 0;
     this.db.transaction(() => {
       for (let i = 0; i < rowIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
         const chunk = rowIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
@@ -2220,13 +2256,14 @@ export class QueryBuilder {
               `DELETE FROM unresolved_refs WHERE id IN (${placeholders})`
             );
           }
-          this.stmts.deleteRefsByRowIdsFull.run(...chunk);
+          changed += this.stmts.deleteRefsByRowIdsFull.run(...chunk).changes;
         } else {
           const placeholders = chunk.map(() => '?').join(',');
-          this.db.prepare(`DELETE FROM unresolved_refs WHERE id IN (${placeholders})`).run(...chunk);
+          changed += this.db.prepare(`DELETE FROM unresolved_refs WHERE id IN (${placeholders})`).run(...chunk).changes;
         }
       }
     })();
+    return changed;
   }
 
   /**
@@ -2238,17 +2275,19 @@ export class QueryBuilder {
    * is (re)written here so rows inserted before the v8 migration get their
    * tail the first time they're attempted.
    */
-  markReferencesFailed(refs: Array<{ fromNodeId: string; referenceName: string; referenceKind: string }>): void {
-    if (refs.length === 0) return;
+  markReferencesFailed(refs: Array<{ fromNodeId: string; referenceName: string; referenceKind: string }>): number {
+    if (refs.length === 0) return 0;
     const stmt = this.db.prepare(
       "UPDATE unresolved_refs SET status = 'failed', name_tail = ? WHERE from_node_id = ? AND reference_name = ? AND reference_kind = ?"
     );
+    let changed = 0;
     const markMany = this.db.transaction((items: typeof refs) => {
       for (const ref of items) {
-        stmt.run(referenceNameTail(ref.referenceName), ref.fromNodeId, ref.referenceName, ref.referenceKind);
+        changed += stmt.run(referenceNameTail(ref.referenceName), ref.fromNodeId, ref.referenceName, ref.referenceKind).changes;
       }
     });
     markMany(refs);
+    return changed;
   }
 
   /**
@@ -2259,17 +2298,19 @@ export class QueryBuilder {
    * can differ per call site (receiver-type inference reads the ref's line),
    * so a sibling must not inherit this row's failure.
    */
-  markReferencesFailedByRowIds(refs: Array<{ rowId: number; referenceName: string }>): void {
-    if (refs.length === 0) return;
+  markReferencesFailedByRowIds(refs: Array<{ rowId: number; referenceName: string }>): number {
+    if (refs.length === 0) return 0;
     const stmt = this.db.prepare(
       "UPDATE unresolved_refs SET status = 'failed', name_tail = ? WHERE id = ?"
     );
+    let changed = 0;
     const markMany = this.db.transaction((items: typeof refs) => {
       for (const ref of items) {
-        stmt.run(referenceNameTail(ref.referenceName), ref.rowId);
+        changed += stmt.run(referenceNameTail(ref.referenceName), ref.rowId).changes;
       }
     });
     markMany(refs);
+    return changed;
   }
 
   /**
