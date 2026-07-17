@@ -110,6 +110,21 @@ describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
     assertParity(rel, fs.readFileSync(file, 'utf8'), 'typescript');
   });
 
+  it('files with parse errors defer to the wasm extractor (recovery is encoding-dependent)', () => {
+    // tree-sitter error RECOVERY differs between UTF-8 (native) and UTF-16
+    // (web-tree-sitter) parsing — same grammar, same core version — so the
+    // kernel defers any erroring file to keep routing graph-neutral.
+    const broken = 'export function f( {\n  return }} 12 (\n';
+    process.env.CODEGRAPH_KERNEL_LANGS = 'all';
+    delete process.env.CODEGRAPH_KERNEL;
+    expect(tryKernelExtract('src/broken.ts', broken, 'typescript')).toBeNull();
+    // The seam still serves the file — through the wasm path.
+    process.env.CODEGRAPH_KERNEL = '0';
+    const viaWasm = extractFromSource('src/broken.ts', broken, 'typescript');
+    delete process.env.CODEGRAPH_KERNEL;
+    expect(viaWasm.nodes.some((n) => n.kind === 'file')).toBe(true);
+  });
+
   it('typescript fixture parsed as plain typescript variant', () => {
     // Same content through the non-tsx grammar exercises the typescript
     // (vs tsx) LangSpec pairing.

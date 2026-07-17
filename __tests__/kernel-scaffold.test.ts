@@ -72,9 +72,16 @@ describe.skipIf(!kernelBuilt)('kernel scaffold', () => {
     expect(info.languages).toContain('javascript');
   });
 
-  it('no language routes to the kernel by default (R1: wasm path unchanged)', () => {
+  it('TS/JS family routes to the kernel by default (R3 default-on); others stay wasm', () => {
+    for (const lang of ['typescript', 'tsx', 'javascript', 'jsx'] as const) {
+      expect(kernelRoutes(lang), lang).toBe(true);
+    }
+    expect(kernelRoutes('python')).toBe(false);
+    expect(tryKernelExtract('src/a.py', 'def f():\n  pass\n', 'python')).toBeNull();
+    // CODEGRAPH_KERNEL_LANGS REPLACES the default set when present.
+    process.env.CODEGRAPH_KERNEL_LANGS = 'tsx';
     expect(kernelRoutes('typescript')).toBe(false);
-    expect(tryKernelExtract('src/a.ts', 'function f() {}', 'typescript')).toBeNull();
+    expect(kernelRoutes('tsx')).toBe(true);
   });
 
   describe('with typescript routed (CODEGRAPH_KERNEL_LANGS)', () => {
@@ -170,12 +177,14 @@ describe.skipIf(!kernelBuilt)('kernel scaffold', () => {
       await loadGrammarsForLanguages(['typescript']);
     });
 
-    it('unrouted language flows through the wasm extractor unchanged', () => {
-      // `const f = () => 1` yields a function node on the wasm path; the seed
-      // kernel query deliberately doesn't extract it — so its presence proves
-      // which path ran.
+    it('kill switch routes through the wasm extractor unchanged', () => {
+      process.env.CODEGRAPH_KERNEL = '0';
       const result = extractFromSource('src/a.ts', 'export const f = () => 1;\n', 'typescript');
       expect(result.nodes.some((n) => n.kind === 'function' && n.name === 'f')).toBe(true);
+      delete process.env.CODEGRAPH_KERNEL;
+      // Default-routed path produces the same node (R2 parity).
+      const viaKernel = extractFromSource('src/a.ts', 'export const f = () => 1;\n', 'typescript');
+      expect(viaKernel.nodes.some((n) => n.kind === 'function' && n.name === 'f')).toBe(true);
     });
 
     it('routed language takes the kernel and falls back per file on kernel absence', () => {

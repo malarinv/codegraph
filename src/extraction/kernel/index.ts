@@ -7,9 +7,11 @@
  * everything else stays on the wasm path forever if need be. Rollback per
  * language = removing it from DEFAULT_ROUTED (or CODEGRAPH_KERNEL=0 for all).
  *
- * R1 status: NO language is default-routed yet. Development/testing opt-in:
- *   CODEGRAPH_KERNEL_LANGS=typescript,tsx   (or "all" for every kernel-capable
- *   language). R3 flips TS/JS into DEFAULT_ROUTED once the gate passes.
+ * Routing status: TypeScript/TSX/JavaScript/JSX are default-routed (R3 gate
+ * passed 2026-07-16 — full-index dumps byte-identical on express/excalidraw/
+ * vscode, control repo unchanged; see the migration plan §4a). Override with
+ *   CODEGRAPH_KERNEL_LANGS=<langs|all>  (replaces the default set), or
+ *   CODEGRAPH_KERNEL=0                  (kill switch, everything → wasm).
  */
 
 import type { ExtractionResult, Language } from '../../types';
@@ -22,8 +24,16 @@ export { decodeExtractBuffers } from './decode';
 /**
  * Languages routed to the kernel by default (gate-passed only — see the
  * per-language tracker in docs/design/rust-kernel-migration-plan.md §4).
+ * Per-file safety valve regardless of routing: a file whose parse tree
+ * contains ERRORS defers to the wasm extractor (error recovery differs
+ * between UTF-8 and UTF-16 parsing — wasm's recovery is canonical).
  */
-const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([]);
+const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
+  'typescript',
+  'tsx',
+  'javascript',
+  'jsx',
+]);
 
 /**
  * Per-language TS post-pass over the decoded result — the escape hatch for
@@ -82,12 +92,15 @@ export function tryKernelExtract(
     result.durationMs = Date.now() - t0;
     return result;
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // `defer:` is the kernel's expected-routing signal (files with parse
+    // errors take the wasm path — its error RECOVERY is the canonical one;
+    // recovery differs between UTF-8 and UTF-16 parsing). Silent by design.
+    if (message.includes('defer:')) return null;
     if (!warned.has(language)) {
       warned.add(language);
       process.stderr.write(
-        `[codegraph-kernel] ${language} extraction failed (${
-          err instanceof Error ? err.message : String(err)
-        }) — falling back to the wasm path\n`
+        `[codegraph-kernel] ${language} extraction failed (${message}) — falling back to the wasm path\n`
       );
     }
     return null;

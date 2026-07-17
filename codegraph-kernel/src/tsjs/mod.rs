@@ -177,6 +177,19 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         .parse(source, None)
         .ok_or_else(|| "parser returned null tree".to_string())?;
 
+    // Files with parse ERRORS defer to the wasm extractor (the `defer:` prefix
+    // tells the TS side this is expected routing, not a malfunction). Reason:
+    // tree-sitter's error RECOVERY — same grammar, same core version — resolves
+    // differently under UTF-8 (native) vs UTF-16 (web-tree-sitter) parsing, so
+    // an erroring file's tree can differ between the paths (proven on vscode:
+    // `readonly import('x').T[]` recovered with the ERROR inside vs outside the
+    // type annotation). Erroring files are rare (0-0.42% across express/
+    // excalidraw/vscode) and per-file wasm fallback keeps routing graph-neutral
+    // by construction; clean files — 99.6%+ — stay on the fast path.
+    if tree.root_node().has_error() {
+        return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+    }
+
     let mut w = Walker {
         src: source,
         file_path,

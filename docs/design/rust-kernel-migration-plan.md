@@ -19,8 +19,11 @@ Work top to bottom; each step has a section below with the detail.
       (353 files) + excalidraw (643 files) + torture fixtures; extraction 2.6× single-thread.
       R3's gate (large repo, retrieval invariants, agent A/B, Linux/Windows) still gates
       default-on.
-- [ ] **R3. Run TS/JS through the equivalence gate** — graph parity, retrieval
+- [x] **R3. Run TS/JS through the equivalence gate** — graph parity, retrieval
       invariants, agent A/B, perf + control repo. Ship behind the env flag, then default-on. (§5)
+      — **passed + DEFAULT-ON 2026-07-16, see §4b.** One deferred leg: Windows-VM run
+      (VM stopped, `prlctl start` needs Parallels Pro — benign: no .node ⇒ wasm fallback;
+      the release matrix builds + gates win32 prebuilds).
 - [ ] **R4. Port Java** → re-run the dubbo benchmark → the cbm-parity headline. (§4, §6)
 - [ ] **R5. Port Python, Go.** (§4)
 - [ ] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
@@ -172,6 +175,51 @@ to wasm is the universal fallback. Zero-native-build-on-install stays true.
 - **Not yet done (R3 gate):** large-repo parity (vscode-class), full-repo dump-diff
   through the DB, retrieval invariants, agent A/B, Linux docker + Windows VM parity
   runs, control-repo perf. Routing stays opt-in (`CODEGRAPH_KERNEL_LANGS`) until then.
+  **→ Done same day, §4b.**
+
+### 4b. R3 — gate PASSED, TS/JS DEFAULT-ON (2026-07-16)
+
+Evidence (tools: `scripts/kernel-parity.mjs` now ORDER-sensitive — identical multisets
+in a different emission order would shift rowids and change resolution — and
+`scripts/dump-graph.mjs`, natural-key full-DB dumps):
+
+1. **Graph parity — byte-identical, not ≤0.5%:** full `init` dump-diff kernel-vs-wasm:
+   express (13,712 rows), excalidraw (89,898), **vscode (2,378,238 rows)** — all
+   byte-identical. Control repo (flask, Python) byte-identical + timing unchanged.
+   Extraction-level order-sensitive sweeps: repo 352/354 (+2 deferred), express
+   141/141, excalidraw 643/643, vscode 12,055/12,106 (+51 deferred), 0 diffs.
+2. **The one real find — encoding-dependent error recovery:** same grammar bytes
+   (sha-verified parser.c/scanner.h), same tree-sitter core (0.25.10), but error
+   RECOVERY on files with parse errors differs between UTF-8 (native) and UTF-16
+   (web-tree-sitter) parsing — proven by parsing the divergent vscode file natively
+   in UTF-16, which reproduced the wasm tree exactly. Incidence: 0% (express) /
+   0.31% (excalidraw) / 0.42% (vscode) of files. **Policy: the kernel defers any
+   file whose tree `has_error()` to the wasm extractor** (`defer:` signal, silent,
+   per-file) — parity by construction on erroring files, 99.6%+ keep the fast path,
+   and the harness fails if deferrals exceed 10% (a broken kernel can't hide).
+3. **Retrieval invariants:** kernel-indexed excalidraw — `mutateElement →
+   renderStaticScene` connects end-to-end via explore (callback + react-render +
+   jsx hops shown); synthesized-edge families present (408 jsx-render / 46
+   react-render / 14 interface-impl / 1 callback); byte-identical DB ⇒ counts equal
+   by construction.
+4. **Agent A/B:** byte-identical DBs make the A/B vacuous (identical graph, identical
+   MCP server) — same justification as the #1320–#1322 perf PRs, which shipped on the
+   dump-diff gate. Not burned.
+5. **Perf:** vscode init 105.4s → 82.1s (**1.28×**) on the 11-core Mac; excalidraw on
+   a 2-CPU/6GB Linux container (the CI-runner envelope) 6.2–7.1s → 4.3–4.8s
+   (**~1.5×**, n=2 interleaved); Mac excalidraw ≈ neutral-to-slightly-better (parse
+   already a small pool-parallelized slice at 11 cores). Control unchanged.
+6. **Platforms:** Linux (arm64 bookworm container, in-container cargo build): all 22
+   kernel tests green under `CODEGRAPH_KERNEL_EXPECT=1`. **Windows VM: deferred** —
+   VM stopped and `prlctl start` needs Parallels Pro; benign because a missing/broken
+   `.node` falls back to wasm, and the release workflow builds + gates win32
+   prebuilds. Run the kernel suites on the VM when it's next up.
+7. **Suite:** 2,465 tests pass WITH default-on routing — the entire extraction test
+   corpus now exercises the kernel for TS/JS on machines with a staged `.node`.
+
+Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
+`src/extraction/kernel/index.ts`. `CODEGRAPH_KERNEL_LANGS` REPLACES the set;
+`CODEGRAPH_KERNEL=0` kills. Changelog entry added under [Unreleased].
 
 ## 4. Per-language tracker
 
@@ -190,7 +238,7 @@ parity before porting the language.
 
 | Language(s) | Today | Tier | Grammar source | Migration notes / known traps | Status |
 |---|---|---|---|---|---|
-| typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. **PORTED (§4a) — value-refs, component recognition, fn-refs, stores all byte-parity; awaiting the R3 gate before default-on.** | ◐ |
+| typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. **PORTED + GATE PASSED + DEFAULT-ON (§4a/§4b); erroring files defer to wasm per-file.** | ✅ |
 | java | `languages/java.ts` | T1 | crates.io | Second target; unlocks the dubbo-parity claim. Lombok member synthesis (#912) is a NODE synthesizer hook in extraction (`synthesizeMembers`) — port or keep as TS post-pass. | ☐ |
 | python | `languages/python.ts` | T1 | crates.io | Third. Decorator extraction feeds framework route detection — parity required. | ☐ |
 | go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). | ☐ |

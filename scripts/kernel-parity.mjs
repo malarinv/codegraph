@@ -150,7 +150,7 @@ function report(category, sample) {
 
 let filesWithDiffs = 0;
 let filesOk = 0;
-let kernelFailed = 0;
+let deferred = 0;
 let totals = { nodes: 0, edges: 0, refs: 0 };
 
 process.env.CODEGRAPH_KERNEL_LANGS = 'all';
@@ -162,8 +162,11 @@ for (const { file, lang } of files) {
   delete process.env.CODEGRAPH_KERNEL; // kernel path on
   const kres = kernel.tryKernelExtract(rel, source, lang);
   if (!kres) {
-    kernelFailed++;
-    report('kernel-extract-failed', rel);
+    // Expected: files with parse errors defer to wasm (parity by
+    // construction — both arms run the same extractor). Counted, and
+    // guarded below so a broken kernel can't silently defer everything.
+    deferred++;
+    report('kernel-deferred', rel);
     continue;
   }
   process.env.CODEGRAPH_KERNEL = '0'; // wasm path
@@ -192,6 +195,19 @@ for (const { file, lang } of files) {
       const o = JSON.parse(x);
       report(`${table}:extra-in-kernel:${o.kind ?? ''}`, `${rel}: ${x}`);
     }
+    // ORDER matters too: identical multisets in a different emission order
+    // change DB rowids, and resolution iterates refs in rowid order — the
+    // full-index dump-diff would surface it as a downstream mystery. Catch it
+    // here instead.
+    if (onlyA.length === 0 && onlyB.length === 0) {
+      for (let i = 0; i < wasm.length; i++) {
+        if (wasm[i] !== kern[i]) {
+          fileHasDiff = true;
+          report(`${table}:order-mismatch`, `${rel}: index ${i}: wasm=${wasm[i]} kernel=${kern[i]}`);
+          break;
+        }
+      }
+    }
   }
   if (fileHasDiff) {
     filesWithDiffs++;
@@ -202,7 +218,7 @@ for (const { file, lang } of files) {
 }
 
 console.log(`\n=== kernel parity: ${filesOk}/${files.length} files byte-parity` +
-  ` (${filesWithDiffs} with diffs, ${kernelFailed} kernel-failed)` +
+  ` (${filesWithDiffs} with diffs, ${deferred} deferred-to-wasm)` +
   ` | wasm totals: ${totals.nodes} nodes / ${totals.edges} edges / ${totals.refs} refs ===\n`);
 
 const sorted = [...buckets.entries()].sort((a, b) => b[1].count - a[1].count);
@@ -211,4 +227,11 @@ for (const [cat, { count, samples }] of sorted) {
   for (const s of samples) console.log(`    ${s.length > 400 ? s.slice(0, 400) + '…' : s}`);
 }
 
-process.exit(filesWithDiffs > 0 || kernelFailed > 0 ? 1 : 0);
+// Deferrals are per-file parse-error routing (expected, rare). A high rate
+// means the kernel is broken and hiding behind the fallback — fail loudly.
+const deferralRate = deferred / files.length;
+if (deferralRate > 0.1) {
+  console.error(`deferral rate ${(deferralRate * 100).toFixed(1)}% exceeds 10% — kernel likely broken`);
+  process.exit(1);
+}
+process.exit(filesWithDiffs > 0 ? 1 : 0);
