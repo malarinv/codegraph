@@ -1338,8 +1338,17 @@ export class ReferenceResolver {
     // Sequential fallback on any pool failure. CODEGRAPH_NO_PARALLEL_RESOLVE=1
     // disables entirely. bulkEdgeLoad hooks (when provided) bracket the batch
     // loop with drop/recreate of the non-unique edge indexes on big runs —
-    // see DatabaseConnection.beginBulkEdgeLoad.
-    parallel?: { dbPath: string; bulkEdgeLoad?: { begin: () => void; end: () => void | Promise<void> } }
+    // see DatabaseConnection.beginBulkEdgeLoad. backpressure (when provided)
+    // is the WAL valve's writer-side backstop (WalCheckpointValve.backpressure):
+    // called at pool-idle boundaries so a full backfill can actually complete —
+    // the valve's timer-driven passive passes stay perpetually partial against
+    // the pool's continuous reads, which is how a kernel-scale resolution grew
+    // a 22GB WAL on a 4.6GB DB (migration plan §7a.1).
+    parallel?: {
+      dbPath: string;
+      bulkEdgeLoad?: { begin: () => void; end: () => void | Promise<void> };
+      backpressure?: () => Promise<void> | null;
+    }
   ): Promise<ResolutionResult> {
     // Resolution runs on the indexer's MAIN thread, and the #850 liveness
     // watchdog SIGKILLs a process whose event loop stalls past its window (60s
@@ -1476,6 +1485,15 @@ export class ReferenceResolver {
       const result = await settleBatch(inFlight, batch);
       if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch ${inFlight.mode}: ${batch.length} refs in ${Date.now() - tBatch}ms`);
 
+      // WAL-valve backstop at the ONE pool-idle boundary of the double-buffer
+      // (this batch settled, the next not yet fanned out): past the hard cap
+      // the writer parks for a full backfill here, where the pool's readers
+      // are all between statements — so the backfill completes, readers
+      // re-enter at SQLite's backfilled mark, and the next persist commit
+      // WRAPS the WAL instead of growing it. No-op (one fstat) under the cap.
+      const bp = parallel?.backpressure?.();
+      if (bp) await bp;
+
       // Persist in bounded sub-transactions with yields between: a whole
       // batch's edge insert / keyed deletes are otherwise one solid
       // synchronous span each on a multi-GB index, sitting BETWEEN the
@@ -1585,6 +1603,11 @@ export class ReferenceResolver {
         const tIdx = Date.now();
         await parallel!.bulkEdgeLoad!.end();
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] edge-index-recreate: ${Date.now() - tIdx}ms`);
+        // The recreate just wrote every non-unique edge index into the WAL
+        // (multi-GB at kernel scale) with the pool idle — fold before the
+        // synthesis passes pin readers against it for minutes.
+        const bp = parallel?.backpressure?.();
+        if (bp) await bp;
       }
     }
 
@@ -1601,7 +1624,8 @@ export class ReferenceResolver {
         this.queries,
         this.context,
         onSynthesisProgress,
-        pool
+        pool,
+        parallel?.backpressure
       );
     } catch {
       // synthesis is additive and optional; ignore failures

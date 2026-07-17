@@ -3553,7 +3553,11 @@ export async function synthesizeCallbackEdges(
   // A live resolver pool to fan the independent passes across (structural type
   // so this file never imports the pool — resolver-worker imports THIS file).
   // Null/omitted → the sequential path, byte-identical to the pool path.
-  pool?: { runSynthPass(name: string): Promise<{ edges: Edge[]; ms: number }> } | null
+  pool?: { runSynthPass(name: string): Promise<{ edges: Edge[]; ms: number }> } | null,
+  // WAL-valve writer backstop (WalCheckpointValve.backpressure), called at
+  // pool-idle points in the edge-insert loops below — the passes themselves
+  // only read; every write in this function happens with the pool idle.
+  backpressure?: () => Promise<void> | null
 ): Promise<number> {
   // Each sub-pass below is a whole-graph scan, and there are ~30 of them, all
   // running synchronously on the indexer's main thread. Their AGGREGATE can run
@@ -3618,10 +3622,18 @@ export async function synthesizeCallbackEdges(
   // otherwise orphaned from the struct, and goImplementsEdges (next) derives a
   // struct's method set from its `contains` edges — so without this it would
   // under-count the interfaces a cross-file struct satisfies. (#583)
+  // Writer-side WAL backstop for the insert loops here (see the param doc):
+  // one fstat when under the valve's hard cap, a parked full backfill past it.
+  const foldIfOver = async (): Promise<void> => {
+    const bp = backpressure?.();
+    if (bp) await bp;
+  };
+
   const goMethodContains = has('go') ? await goCrossFileMethodContainsEdges(queries, yieldToLoop) : NONE;
   for (let i = 0; i < goMethodContains.length; i += 2000) {
     queries.insertEdges(goMethodContains.slice(i, i + 2000));
     await yieldToLoop();
+    await foldIfOver();
   }
   await yieldToLoop(); __mark('goMethodContains');
 
@@ -3633,6 +3645,7 @@ export async function synthesizeCallbackEdges(
   for (let i = 0; i < goImpl.length; i += 2000) {
     queries.insertEdges(goImpl.slice(i, i + 2000));
     await yieldToLoop();
+    await foldIfOver();
   }
   await yieldToLoop(); __mark('goImplements');
 
@@ -3720,6 +3733,7 @@ export async function synthesizeCallbackEdges(
   for (let i = 0; i < merged.length; i += 2000) {
     queries.insertEdges(merged.slice(i, i + 2000));
     await yieldToLoop();
+    await foldIfOver();
   }
   __mark('insertMergedEdges');
   return merged.length + goImpl.length + goMethodContains.length;

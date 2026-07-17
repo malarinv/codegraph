@@ -294,3 +294,69 @@ describe('sync WAL deferral end-to-end (#1248)', () => {
     }
   });
 });
+
+describe('resolution-phase WAL backpressure plumbing (§7a.1)', () => {
+  // The valve's timer-driven passive checkpoints stay perpetually partial
+  // against the resolver pool's continuous reads, so during resolution the
+  // writer-side backpressure() hook is the ONLY mechanism that can complete
+  // a backfill and let the WAL wrap — a kernel-scale run without it grew a
+  // 22GB WAL on a 4.6GB DB. These pin that the batch loop (a) calls the hook
+  // at the pool-idle boundary and (b) actually parks on a returned promise.
+
+  async function seedPendingRefs(cg: CodeGraph): Promise<void> {
+    const raw = (cg as unknown as { db: DatabaseConnection }).db.getDb();
+    const node = raw.prepare("SELECT id, file_path FROM nodes WHERE kind = 'function' LIMIT 1").get() as
+      | { id: string; file_path: string }
+      | undefined;
+    expect(node).toBeDefined();
+    const ins = raw.prepare(
+      "INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language, status) VALUES (?, ?, 'calls', 1, 0, ?, 'typescript', 'pending')"
+    );
+    ins.run(node!.id, 'helper0', node!.file_path);
+    ins.run(node!.id, 'helper1', node!.file_path);
+  }
+
+  it('calls the backpressure hook once per settled batch', async () => {
+    writeFixtureProject();
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+    await seedPendingRefs(cg);
+
+    let calls = 0;
+    const result = await cg.resolveReferencesBatched(undefined, undefined, () => {
+      calls++;
+      return null; // under the hard cap — loop must proceed without waiting
+    });
+    expect(result.stats.total).toBeGreaterThan(0);
+    expect(calls).toBeGreaterThanOrEqual(1);
+    await cg.close();
+  });
+
+  it('parks the batch loop on a backpressure promise until it resolves', async () => {
+    writeFixtureProject();
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+    await seedPendingRefs(cg);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let hookHit = false;
+    const done = cg
+      .resolveReferencesBatched(undefined, undefined, () => {
+        if (hookHit) return null; // park only on the first boundary
+        hookHit = true;
+        return gate;
+      })
+      .then(() => true);
+
+    // Give the loop ample turns: it must reach the hook and then be parked.
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    expect(hookHit).toBe(true);
+    const settledEarly = await Promise.race([done, Promise.resolve(false)]);
+    expect(settledEarly).toBe(false); // still parked on the gate
+
+    release();
+    expect(await done).toBe(true);
+    await cg.close();
+  });
+});
