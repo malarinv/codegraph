@@ -362,9 +362,29 @@ export class DatabaseConnection {
    * never run inline on the main thread).
    */
   async checkpointWalPassive(): Promise<{ busy: number; log: number; checkpointed: number } | null> {
+    return this.checkpointWal('PASSIVE');
+  }
+
+  /**
+   * `PRAGMA wal_checkpoint(TRUNCATE)` — same off-thread pattern as PASSIVE,
+   * but on success the WAL FILE is chopped to zero. A completed passive
+   * backfill bounds the un-checkpointed backlog, yet the FILE only stops
+   * growing when a commit finds ZERO readers holding WAL marks — rare while
+   * pool workers cycle, so at kernel scale a fully-backfilled WAL still
+   * accreted the phase's whole write volume on disk (§7a.1: 22GB). The valve
+   * calls this exactly at a parked barrier (writer parked, pool drained,
+   * backfill complete) where the no-reader condition is guaranteed rather
+   * than lucky. The worker sets a short busy_timeout so a racing reader
+   * degrades this to a no-op (busy=1) instead of a stall.
+   */
+  async checkpointWalTruncate(): Promise<{ busy: number; log: number; checkpointed: number } | null> {
+    return this.checkpointWal('TRUNCATE');
+  }
+
+  private async checkpointWal(mode: 'PASSIVE' | 'TRUNCATE'): Promise<{ busy: number; log: number; checkpointed: number } | null> {
     if (!this.dbPath || this.dbPath === ':memory:') {
       try {
-        const row = this.db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get() as Record<string, number> | undefined;
+        const row = this.db.prepare(`PRAGMA wal_checkpoint(${mode})`).get() as Record<string, number> | undefined;
         return row ? { busy: Number(row.busy), log: Number(row.log), checkpointed: Number(row.checkpointed) } : null;
       } catch {
         return null;
@@ -378,7 +398,11 @@ export class DatabaseConnection {
         try {
           const { DatabaseSync } = require('node:sqlite');
           const db = new DatabaseSync(workerData.dbPath);
-          try { row = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get(); } catch {}
+          const mode = workerData.mode === 'TRUNCATE' ? 'TRUNCATE' : 'PASSIVE';
+          try {
+            if (mode === 'TRUNCATE') db.exec('PRAGMA busy_timeout = 2000');
+            row = db.prepare('PRAGMA wal_checkpoint(' + mode + ')').get();
+          } catch {}
           try { db.close(); } catch {}
         } catch {}
         parentPort.postMessage({ row });
@@ -391,7 +415,7 @@ export class DatabaseConnection {
           resolve(row ? { busy: Number(row.busy), log: Number(row.log), checkpointed: Number(row.checkpointed) } : null);
         };
         try {
-          const worker = new Worker(workerSource, { eval: true, workerData: { dbPath: this.dbPath } });
+          const worker = new Worker(workerSource, { eval: true, workerData: { dbPath: this.dbPath, mode } });
           worker.once('message', (m: { row?: Record<string, number> | null }) => { void worker.terminate(); finish(m?.row ?? null); });
           worker.once('error', () => { void worker.terminate(); finish(null); });
           worker.once('exit', () => finish(null));

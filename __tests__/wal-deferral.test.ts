@@ -360,3 +360,17 @@ describe('resolution-phase WAL backpressure plumbing (§7a.1)', () => {
     await cg.close();
   });
 });
+
+describe('checkpointWalTruncate (§7a.1 file containment)', () => {
+  it('chops a fully-backfilled WAL file to zero', async () => {
+    const db = openDb();
+    db.setWalAutocheckpoint(0);
+    writeRows(db, 400);
+    expect(db.getWalSizeBytes()).toBeGreaterThan(1024 * 1024);
+    const res = await db.checkpointWalTruncate();
+    expect(res).not.toBeNull();
+    expect(res!.busy).toBe(0);
+    expect(db.getWalSizeBytes()).toBe(0); // the file itself, not just the backlog
+    db.close();
+  });
+});

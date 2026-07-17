@@ -81,15 +81,36 @@ export class WalCheckpointValve {
   private readonly softBytes: number;
   private readonly hardBytes: number;
 
+  /**
+   * Futility latch: consecutive backfill give-ups (a reader pinning the WAL)
+   * disable further writer pauses for a cooldown, so a pinned phase degrades
+   * to the pre-valve behavior (unbounded WAL, folded when the pinner exits)
+   * instead of burning a 20-pass checkpoint attempt — each pass a worker
+   * thread + fresh connection — at EVERY over-cap boundary. That churn is
+   * what turned a pinned kernel-scale resolution from slow into OOM-killed
+   * (§7a.1 run 1: 22GB WAL, exit 137 at an envelope the pre-fix build
+   * survived).
+   */
+  private consecutiveGiveUps = 0;
+  private futileUntil = 0;
+
   constructor(
     private readonly db: DatabaseConnection,
     softMb: number = resolveWalValveMb(process.env.CODEGRAPH_WAL_VALVE_MB),
     private readonly intervalMs: number = CHECK_INTERVAL_MS,
-    private readonly log: (msg: string) => void = () => {}
+    log: (msg: string) => void = () => {}
   ) {
     this.softBytes = softMb * 1024 * 1024;
     this.hardBytes = this.softBytes * HARD_CAP_MULTIPLIER;
+    // CODEGRAPH_WAL_VALVE_DEBUG=1 surfaces valve decisions to stderr without
+    // needing the caller's verbose plumbing — the observability gap that let
+    // §7a.1 run 1 fail silently (give-ups were verbose-gated and invisible).
+    this.log = process.env.CODEGRAPH_WAL_VALVE_DEBUG
+      ? (m) => console.error(`[wal-valve] ${m}`)
+      : log;
   }
+
+  private readonly log: (msg: string) => void;
 
   private mb(n: number): string {
     return `${Math.round(n / 1024 / 1024)}MB`;
@@ -128,6 +149,7 @@ export class WalCheckpointValve {
    */
   backpressure(): Promise<void> | null {
     if (this.pause) return this.pause;
+    if (Date.now() < this.futileUntil) return null; // pinned reader — parking is churn, not progress
     if (this.growthBytes() <= this.hardBytes) return null;
     this.log(`backpressure: wal=${this.mb(this.db.getWalSizeBytes())} baseline=${this.mb(this.sizeAtLastFullBackfill)} — pausing writer for full backfill`);
     const t0 = Date.now();
@@ -176,11 +198,31 @@ export class WalCheckpointValve {
       if (!res) return; // checkpoint machinery unavailable — don't spin
       this.log(`backfill pass ${i + 1}: busy=${res.busy} log=${res.log} checkpointed=${res.checkpointed} wal=${this.mb(this.db.getWalSizeBytes())}`);
       if (res.busy === 0 && res.log === res.checkpointed) {
+        // Backfill complete AND we are at a parked barrier (backfillFully only
+        // runs under a writer pause): the no-reader window is guaranteed, so
+        // chop the FILE too — a fully-backfilled WAL otherwise keeps growing
+        // whenever commits land while pool readers hold marks (§7a.1: 22GB
+        // on-disk at kernel scale despite backfills). A racing reader turns
+        // this into a no-op (busy=1); the passive result above still stands.
+        const trunc = await this.db.checkpointWalTruncate();
+        if (trunc) this.log(`truncate: busy=${trunc.busy} wal=${this.mb(this.db.getWalSizeBytes())}`);
         this.sizeAtLastFullBackfill = this.db.getWalSizeBytes();
+        this.consecutiveGiveUps = 0;
+        this.futileUntil = 0;
         return;
       }
     }
-    this.log(`backfill gave up after ${MAX_PAUSED_BACKFILL_PASSES} passes — WAL stays unbounded this cycle`);
+    this.consecutiveGiveUps++;
+    if (this.consecutiveGiveUps >= 2) {
+      this.futileUntil = Date.now() + 60_000;
+    }
+    const msg = `backfill gave up after ${MAX_PAUSED_BACKFILL_PASSES} passes (streak ${this.consecutiveGiveUps}${this.futileUntil ? ', parking disabled 60s' : ''}) — a reader is pinning the WAL`;
+    this.log(msg);
+    // Give-ups are rare and load-bearing for §7a.1-class diagnosis — surface
+    // them on any timing-instrumented run, not just valve-debug ones.
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS && !process.env.CODEGRAPH_WAL_VALVE_DEBUG) {
+      console.error(`[wal-valve] ${msg}`);
+    }
   }
 
   private fire(): void {
