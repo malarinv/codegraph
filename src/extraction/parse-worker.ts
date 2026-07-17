@@ -16,6 +16,8 @@ try {
 import { parentPort } from 'worker_threads';
 import { extractFromSource } from './tree-sitter';
 import { detectLanguage, loadGrammarsForLanguages, resetParser } from './grammars';
+import { tryKernelExtractRaw } from './kernel';
+import { getAllFrameworkResolvers, getApplicableFrameworks } from '../resolution/frameworks';
 import type { Language, ExtractionResult } from '../types';
 
 // Emscripten prints `Aborted()` (and a follow-up RuntimeError diag
@@ -80,7 +82,36 @@ parentPort!.on('message', async (msg: { type: string; id?: number; filePath?: st
       // codegraph.json extension overrides) and sends it; fall back to detection
       // for older callers / safety.
       const language = msg.language ?? detectLanguage(filePath!, content);
-      const result: ExtractionResult = extractFromSource(filePath!, content!, language, frameworkNames);
+
+      // Kernel deferred-decode fast path: ship the file's tables as flat
+      // buffers and decode at the STORE boundary, so the main thread never
+      // materializes per-node objects (nor pays their structured-clone cost —
+      // buffer clone is a flat memcpy). Only when no applicable framework has
+      // an extract() hook: those merge extra nodes/refs into the DECODED
+      // result inside extractFromSource, so such files keep the decoded path.
+      let result: ExtractionResult | undefined;
+      const frameworksNeedDecode =
+        frameworkNames && frameworkNames.length > 0
+          ? getApplicableFrameworks(
+              getAllFrameworkResolvers().filter((r) => frameworkNames.includes(r.name)),
+              language
+            ).some((fw) => !!fw.extract)
+          : false;
+      if (!frameworksNeedDecode) {
+        const raw = tryKernelExtractRaw(filePath!, content!, language);
+        if (raw) {
+          result = {
+            nodes: [],
+            edges: [],
+            unresolvedReferences: [],
+            errors: raw.errors,
+            durationMs: 0,
+            kernelBuffers: raw.buffers,
+            kernelCounts: raw.counts,
+          };
+        }
+      }
+      result ??= extractFromSource(filePath!, content!, language, frameworkNames);
 
       // Periodic parser reset to reclaim WASM heap memory
       const count = (parseCounts.get(language) ?? 0) + 1;
