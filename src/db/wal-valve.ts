@@ -263,16 +263,14 @@ export class WalCheckpointValve {
         // SQLite reports log = checkpointed = -1, which is harmless here.
         if (res && res.busy === 0 && res.log === res.checkpointed) {
           this.sizeAtLastFullBackfill = this.db.getWalSizeBytes();
-          // Opportunistic file chop while everything is folded: best-effort —
-          // an active writer/reader turns it into a busy no-op, and the
-          // barrier-path truncate (backpressure file cap) remains the
-          // deterministic bound.
-          if (this.db.getWalSizeBytes() > this.softBytes * 2) {
-            return this.db.checkpointWalTruncate().then((t) => {
-              if (t) this.log(`timer truncate: busy=${t.busy} wal=${this.mb(this.db.getWalSizeBytes())}`);
-              this.sizeAtLastFullBackfill = this.db.getWalSizeBytes();
-            });
-          }
+          // NO truncate here. A truncate checkpoint that starts against an
+          // ACTIVE writer wins the lock race and then blocks that writer for
+          // its entire backfill — after a multi-GB single-transaction burst
+          // (edge-index recreate) that exceeds the writer's 5s busy_timeout
+          // and fails the index with "database is locked" (§7a.2 record run).
+          // The file chop happens exclusively at parked barriers
+          // (backpressure/foldNow), where the writer is awaiting us by
+          // construction and cannot collide.
         }
       })
       .catch(() => { /* best-effort */ })
