@@ -67,7 +67,14 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       last big rock)** > backpressure ~120s (checkpoint I/O floor) > E-scan/
       settle/read-mapping (~70–90s each, approaching honest work) > the 8c
       re-run formality (est. ~15.5min).
-- [ ] **R7a. C/C++ port** — biggest single-language effort; unlocks cg1212's parse
+- [ ] **R7a. C/C++ port** — STARTED 2026-07-17: the §0a-recipe step-1 survey is
+      COMPLETE — every TS branch, quirk, and helper is enumerated with line
+      anchors in **`docs/design/ccpp-kernel-port-checklist.md`** (read it FIRST;
+      it also fixes the architecture: preParse hoisted to the route point so no
+      blanking ports to Rust, Metal/CUDA stay wasm this round, one dual-lang
+      walker module). Next: grammars (upgrade+vendor from matched tags, suite
+      green BEFORE the walker), then the walker, then the §5 gate ladder.
+      Original scope note: biggest single-language effort; unlocks cg1212's parse
       expectation (6.2m → ~1.5–2m, 23% of that wall) + CARLA/UE/llvm-class repos;
       Metal + CUDA ride along (their blanking pre-passes stay TS-side — `preParse`
       is offset-preserving and the route point can apply it before the kernel call;
