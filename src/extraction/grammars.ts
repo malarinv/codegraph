@@ -292,6 +292,11 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   'pascal', 'scala', 'lua', 'luau', 'csharp', 'r', 'cfml', 'cfscript', 'cfquery',
   'cobol', 'vbnet', 'erlang', 'terraform', 'arkts', 'nix',
   'typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go',
+  // R7a (C/C++ kernel port prep): tree-sitter-c v0.24.2 (b780e47) +
+  // tree-sitter-cpp v0.23.4 (f41e1a0), parser.c/scanner.c sha-matched against
+  // the crates.io tarballs. `.metal`/`.cu` map to language 'cpp', so the
+  // dialects ride the same (single, coherent) upgraded grammar.
+  'c', 'cpp',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

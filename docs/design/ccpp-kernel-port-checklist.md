@@ -1,6 +1,12 @@
 # C/C++ kernel port (R7a) — the bug-for-bug checklist
 
-**Status:** survey COMPLETE (2026-07-17); grammars + walker + gates not started.
+**Status:** survey COMPLETE; grammars VENDORED + suite-green (2026-07-17):
+tree-sitter-c v0.24.2 (`b780e47`, parser.c `f2883ff9…`) + tree-sitter-cpp
+v0.23.4 (`f41e1a0`, parser.c `2a35a43b…`, scanner.c `cf60387d…`), built with
+ts-cli 0.25.10 from checked-in parser.c, in `src/extraction/wasm/` +
+VENDORED_WASM_LANGS. The walker PR adds the SAME-version crates + kernel
+grammar registry (kernel-grammar-parity then pins the alignment). Walker +
+gates not started.
 This is §0a-recipe step 1's output for c/cpp: every TS-side branch the walker
 must mirror, with file:line anchors into the reference implementation. Read it
 WITH `docs/design/rust-kernel-migration-plan.md` (§0a recipe, §5 gates).
@@ -17,11 +23,12 @@ dialect module), `java.rs`, `go.rs` (receiver QNs), `python.rs`.
    blanked bytes — all seven blanking passes (`preParseCppSource` /
    `preParseCSource`, `languages/c-cpp.ts:698/750`) then need NO Rust port,
    and every offset survives (they're all equal-length-space replacements).
-2. **Metal + CUDA are NOT routed this round.** They are separate `Language`
-   values riding the cpp grammar; leaving them off `DEFAULT_ROUTED` keeps them
-   on wasm — zero risk, tiny file counts. (CUDA blanking still applies to
-   c/cpp-detected files via the content gate inside preParse — that rides the
-   hoist for free.)
+2. **Metal + CUDA ride the cpp route** (corrected from the first draft):
+   `.metal`/`.cu` map to language `'cpp'` at detectLanguage (grammars.ts:135),
+   so there is no separate routing decision — when cpp routes to the kernel,
+   those files come along as blanked cpp. The preParse hoist MUST pass
+   `filePath` (the extension gates Metal-attribute blanking) and the CUDA
+   content gate rides for free. Their suite tests are the parity insurance.
 3. **One walker module, dual language** (`codegraph-kernel/src/ccpp/`), flagged
    c vs cpp like `tsjs/` flags its four dialects. Grammars: tree-sitter-c +
    tree-sitter-cpp crates, wasm vendored from the SAME tags (sha-matched
