@@ -78,5 +78,10 @@ esac
 
 DEST="$CRATE/prebuilds/$PLATFORM"
 mkdir -p "$DEST"
+# rm first so the copy lands on a FRESH inode: overwriting a signed dylib in
+# place leaves macOS's per-inode signature cache stale, and every process
+# that then dlopens the staged .node is SIGKILLed at load (the on-disk
+# signature still verifies, which makes it maddening to diagnose).
+rm -f "$DEST/codegraph-kernel.node"
 cp "$LIB" "$DEST/codegraph-kernel.node"
 echo "[kernel] staged $DEST/codegraph-kernel.node ($(du -h "$DEST/codegraph-kernel.node" | cut -f1))"

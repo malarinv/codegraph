@@ -15,8 +15,8 @@ use tree_sitter::Language;
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 7] =
-    ["typescript", "tsx", "javascript", "jsx", "java", "python", "go"];
+pub const LANGUAGES: [&str; 9] =
+    ["typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp"];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
     match language {
@@ -26,6 +26,11 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        // `.metal`/`.cu`/`.cuh` map to language 'cpp' at detectLanguage, so the
+        // dialects ride this grammar too (their blanking pre-passes stay
+        // TS-side — the route point applies preParse before the kernel call).
+        "c" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
         _ => None,
     }
 }

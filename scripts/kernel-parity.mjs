@@ -10,7 +10,14 @@
  *
  * Usage:
  *   node scripts/kernel-parity.mjs <file-or-dir>... [--lang typescript,tsx]
- *        [--max-samples N] [--list-files]
+ *        [--max-samples N] [--list-files] [--max-deferral 0.1]
+ *
+ * --max-deferral: the broken-kernel backstop (default 0.1). For C/C++ pass
+ * 0.5: macro-heavy C/C++ trees genuinely parse with errors at 10–40% file
+ * rates even after the preParse blanking family (git 19%, protobuf 26%, fmt
+ * 42% — measured 2026-07-17), and every erroring file defers BY POLICY, so
+ * the 10% bar calibrated on the 0–0.4% incidence of ts/java/py/go would fail
+ * healthy sweeps. A broken walker still trips 0.5 (it defers ~everything).
  *
  * Requires: npm run build (dist/) and a staged kernel (npm run build:kernel).
  * Exit code: 0 = parity, 1 = diffs found, 2 = setup error.
@@ -28,10 +35,12 @@ const paths = [];
 let langFilter = null;
 let maxSamples = 5;
 let listFiles = false;
+let maxDeferral = 0.1;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--lang') langFilter = new Set(args[++i].split(','));
   else if (args[i] === '--max-samples') maxSamples = Number(args[++i]);
   else if (args[i] === '--list-files') listFiles = true;
+  else if (args[i] === '--max-deferral') maxDeferral = Number(args[++i]);
   else paths.push(args[i]);
 }
 if (paths.length === 0) {
@@ -39,11 +48,16 @@ if (paths.length === 0) {
   process.exit(2);
 }
 
-const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go']);
+const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp']);
 const EXTS = new Map([
   ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'],
   ['.tsx', 'tsx'], ['.js', 'javascript'], ['.mjs', 'javascript'],
   ['.cjs', 'javascript'], ['.jsx', 'jsx'], ['.java', 'java'], ['.py', 'python'], ['.pyw', 'python'], ['.go', 'go'],
+  // C/C++ (R7a). `.h` needs CONTENT sniffing (C vs C++) — resolved per file
+  // in the run loop via detectLanguage, matching the real indexer's routing.
+  ['.c', 'c'], ['.h', 'detect'],
+  ['.cpp', 'cpp'], ['.cc', 'cpp'], ['.cxx', 'cpp'], ['.hpp', 'cpp'], ['.hxx', 'cpp'],
+  ['.metal', 'cpp'], ['.cu', 'cpp'], ['.cuh', 'cpp'],
 ]);
 
 /** Collect candidate files. */
@@ -60,7 +74,12 @@ function collect(p, out) {
     for (const e of fs.readdirSync(p)) collect(path.join(p, e), out);
   } else if (EXTS.has(path.extname(p))) {
     const lang = EXTS.get(path.extname(p));
-    if (!langFilter || langFilter.has(lang)) out.push({ file: p, lang });
+    // 'detect' (.h) resolves per file in the run loop; under --lang it rides
+    // along whenever either C-family language is requested.
+    const passes =
+      !langFilter ||
+      (lang === 'detect' ? langFilter.has('c') || langFilter.has('cpp') : langFilter.has(lang));
+    if (passes) out.push({ file: p, lang });
   }
 }
 
@@ -73,7 +92,7 @@ if (files.length === 0) {
 
 // --- load the built engine ---------------------------------------------------
 const { extractFromSource } = await import(dist('extraction/tree-sitter.js'));
-const { initGrammars, loadGrammarsForLanguages } = await import(dist('extraction/grammars.js'));
+const { initGrammars, loadGrammarsForLanguages, detectLanguage } = await import(dist('extraction/grammars.js'));
 const kernel = await import(dist('extraction/kernel/index.js'));
 
 await initGrammars();
@@ -156,13 +175,19 @@ function report(category, sample) {
 let filesWithDiffs = 0;
 let filesOk = 0;
 let deferred = 0;
+let processed = 0; // collected files minus content-detect skips
 let totals = { nodes: 0, edges: 0, refs: 0 };
 
 process.env.CODEGRAPH_KERNEL_LANGS = 'all';
 
-for (const { file, lang } of files) {
+for (const { file, lang: extLang } of files) {
   const source = fs.readFileSync(file, 'utf8');
   const rel = path.relative(ROOT, file);
+  // `.h` resolves C vs C++ by content — the same call the indexer makes.
+  const lang = extLang === 'detect' ? detectLanguage(rel, source) : extLang;
+  if (!KERNEL_LANGS.has(lang)) continue;
+  if (langFilter && !langFilter.has(lang)) continue;
+  processed++;
 
   delete process.env.CODEGRAPH_KERNEL; // kernel path on
   const kres = kernel.tryKernelExtract(rel, source, lang);
@@ -222,7 +247,7 @@ for (const { file, lang } of files) {
   }
 }
 
-console.log(`\n=== kernel parity: ${filesOk}/${files.length} files byte-parity` +
+console.log(`\n=== kernel parity: ${filesOk}/${processed} files byte-parity` +
   ` (${filesWithDiffs} with diffs, ${deferred} deferred-to-wasm)` +
   ` | wasm totals: ${totals.nodes} nodes / ${totals.edges} edges / ${totals.refs} refs ===\n`);
 
@@ -232,11 +257,15 @@ for (const [cat, { count, samples }] of sorted) {
   for (const s of samples) console.log(`    ${s.length > 400 ? s.slice(0, 400) + '…' : s}`);
 }
 
-// Deferrals are per-file parse-error routing (expected, rare). A high rate
-// means the kernel is broken and hiding behind the fallback — fail loudly.
-const deferralRate = deferred / files.length;
-if (deferralRate > 0.1) {
-  console.error(`deferral rate ${(deferralRate * 100).toFixed(1)}% exceeds 10% — kernel likely broken`);
+// Deferrals are per-file parse-error routing (expected; rare for most
+// languages, routine for macro-heavy C/C++ — see --max-deferral above). A
+// rate past the threshold means the kernel is broken and hiding behind the
+// fallback — fail loudly.
+const deferralRate = deferred / Math.max(processed, 1);
+if (deferralRate > maxDeferral) {
+  console.error(
+    `deferral rate ${(deferralRate * 100).toFixed(1)}% exceeds ${(maxDeferral * 100).toFixed(0)}% — kernel likely broken`
+  );
   process.exit(1);
 }
 process.exit(filesWithDiffs > 0 ? 1 : 0);

@@ -15,6 +15,7 @@
  */
 
 import type { ExtractionResult, Language } from '../../types';
+import { EXTRACTORS } from '../languages';
 import { getKernel, kernelSupports } from './loader';
 import { decodeExtractBuffers } from './decode';
 import {
@@ -41,6 +42,12 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   'java',
   'python',
   'go',
+  // R7a (2026-07-17): parity swept 0-diff on redis/git/fmt/protobuf/ALS
+  // (2,389 files compared) + full-init dump-diffs byte-identical; erroring
+  // files defer per-file to wasm (routine for macro-heavy C/C++ — see
+  // scripts/kernel-parity.mjs --max-deferral).
+  'c',
+  'cpp',
 ]);
 
 /**
@@ -54,6 +61,22 @@ export type KernelPostPass = (result: ExtractionResult, source: string) => void;
 const POST_PASSES: Partial<Record<Language, KernelPostPass>> = {
   // (none yet — R2+)
 };
+
+/**
+ * The preParse hoist (checklist §arch-1): languages with an offset-preserving
+ * `preParse` hook (c/cpp macro blanking, csharp #237, metal #1121, cuda #1172)
+ * apply it HERE, before the kernel call, so both arms parse identical blanked
+ * bytes and none of the blanking logic needs a Rust port. The wasm fallback
+ * path is untouched — TreeSitterExtractor applies the same hook itself on the
+ * RAW source it receives, so a kernel error/defer still extracts identically.
+ * Every blank is an equal-length-space replacement, so offsets, lines, and
+ * columns survive; `filePath` rides along for the extension-gated dialect
+ * blanks (`.metal` attributes; `.cu`/`.cuh` + content-gated CUDA).
+ */
+function preParsedSource(filePath: string, source: string, language: Language): string {
+  const pre = EXTRACTORS[language]?.preParse;
+  return pre ? pre(source, filePath) : source;
+}
 
 function isRouted(language: Language): boolean {
   const env = process.env.CODEGRAPH_KERNEL_LANGS;
@@ -72,6 +95,37 @@ export function kernelRoutes(language: Language): boolean {
 
 /** Warned-once registry so a broken language logs a single line, not one per file. */
 const warned = new Set<string>();
+
+/**
+ * One-slot defer memo. A file the kernel defers (parse errors → wasm) used to
+ * pay the full pipeline again at every seam: the worker's raw try blanked +
+ * native-parsed it, extractFromSource's kernel try blanked + native-parsed it
+ * AGAIN, and the wasm extractor then re-applied preParse a third time. On a
+ * high-deferral tree (the Linux kernel defers ~79% of files) that waste
+ * dominated the arm's parse phase. The slot remembers the LAST deferred
+ * (file, source, language) so (a) a repeat kernel attempt for the same file
+ * short-circuits to null, and (b) the wasm fallback can reuse the
+ * already-blanked source instead of re-running preParse. Source is matched by
+ * string identity — the worker passes the same string through every seam.
+ */
+let deferSlot: { filePath: string; source: string; language: Language; pre: string } | null = null;
+
+/** The hoisted preParse output for a just-deferred file, if it matches. */
+export function takeDeferredPreParse(
+  filePath: string,
+  source: string,
+  language: Language
+): string | null {
+  if (
+    deferSlot &&
+    deferSlot.filePath === filePath &&
+    deferSlot.source === source &&
+    deferSlot.language === language
+  ) {
+    return deferSlot.pre;
+  }
+  return null;
+}
 
 /** The raw table buffers + the cheap facts the orchestrator needs pre-decode. */
 export interface KernelRawResult {
@@ -96,8 +150,10 @@ export function tryKernelExtractRaw(
   if (!kernelRoutes(language) || POST_PASSES[language]) return null;
   const kernel = getKernel();
   if (!kernel) return null;
+  if (takeDeferredPreParse(filePath, source, language) !== null) return null; // already deferred
+  const pre = preParsedSource(filePath, source, language);
   try {
-    const buffers = kernel.extractFile(filePath, source, language);
+    const buffers = kernel.extractFile(filePath, pre, language);
     const meta = buffers.meta;
     if (meta.readUInt8(LAYOUT_META.version) !== LAYOUT_ABI) {
       throw new Error(`kernel buffer ABI ${meta.readUInt8(0)} != expected ${LAYOUT_ABI}`);
@@ -118,7 +174,10 @@ export function tryKernelExtractRaw(
     return { buffers, counts, errors };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('defer:')) return null;
+    if (message.includes('defer:')) {
+      deferSlot = { filePath, source, language, pre };
+      return null;
+    }
     if (!warned.has(language)) {
       warned.add(language);
       process.stderr.write(
@@ -166,13 +225,11 @@ export function tryKernelExtract(
   if (!kernelRoutes(language)) return null;
   const kernel = getKernel();
   if (!kernel) return null;
+  if (takeDeferredPreParse(filePath, source, language) !== null) return null; // already deferred
   const t0 = Date.now();
+  const pre = preParsedSource(filePath, source, language);
   try {
-    // NOTE(T2 languages): when a preParse-carrying language (csharp #237,
-    // metal #1121, cuda #1172, c/cpp macro blanking) routes here, its
-    // offset-preserving preParse hook must be applied to `source` first —
-    // wire that alongside the language's port, gated WITH its equivalence run.
-    const buffers = kernel.extractFile(filePath, source, language);
+    const buffers = kernel.extractFile(filePath, pre, language);
     const result = decodeExtractBuffers(buffers, filePath, language);
     POST_PASSES[language]?.(result, source);
     result.durationMs = Date.now() - t0;
@@ -182,7 +239,10 @@ export function tryKernelExtract(
     // `defer:` is the kernel's expected-routing signal (files with parse
     // errors take the wasm path — its error RECOVERY is the canonical one;
     // recovery differs between UTF-8 and UTF-16 parsing). Silent by design.
-    if (message.includes('defer:')) return null;
+    if (message.includes('defer:')) {
+      deferSlot = { filePath, source, language, pre };
+      return null;
+    }
     if (!warned.has(language)) {
       warned.add(language);
       process.stderr.write(

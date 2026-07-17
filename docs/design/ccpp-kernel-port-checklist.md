@@ -1,17 +1,70 @@
 # C/C++ kernel port (R7a) — the bug-for-bug checklist
 
-**Status:** survey COMPLETE; grammars VENDORED + suite-green (2026-07-17):
-tree-sitter-c v0.24.2 (`b780e47`, parser.c `f2883ff9…`) + tree-sitter-cpp
-v0.23.4 (`f41e1a0`, parser.c `2a35a43b…`, scanner.c `cf60387d…`), built with
-ts-cli 0.25.10 from checked-in parser.c, in `src/extraction/wasm/` +
-VENDORED_WASM_LANGS. The walker PR adds the SAME-version crates + kernel
-grammar registry (kernel-grammar-parity then pins the alignment). Walker +
-gates not started.
-This is §0a-recipe step 1's output for c/cpp: every TS-side branch the walker
-must mirror, with file:line anchors into the reference implementation. Read it
-WITH `docs/design/rust-kernel-migration-plan.md` (§0a recipe, §5 gates).
-Companion walkers to crib structure from: `codegraph-kernel/src/tsjs/` (multi-
-dialect module), `java.rs`, `go.rs` (receiver QNs), `python.rs`.
+**Status: COMPLETE — walker SHIPPED + gates PASSED, c/cpp DEFAULT-ROUTED
+(2026-07-17).** Walker: `codegraph-kernel/src/ccpp/mod.rs` (one dual-language
+module, every branch below mirrored; its header comment lists the quirks).
+Grammars: tree-sitter-c v0.24.2 (`b780e47`, parser.c `f2883ff9…`) +
+tree-sitter-cpp v0.23.4 (`f41e1a0`, parser.c `2a35a43b…`, scanner.c
+`cf60387d…`), crates pinned `=exact` in Cargo.toml, wasm vendored from the
+same tags, kernel-grammar-parity green. preParse HOISTED to the route point
+(`preParsedSource` in src/extraction/kernel/index.ts — both tryKernelExtract
+and the raw bulk path), so no blanking ported to Rust.
+
+**Gate results (2026-07-17):**
+- Parity sweeps — **0 diffs on every compared file**: redis 592, git 790,
+  fmt 42, protobuf 925, ALS-Community (UE spot-check) 40 files byte-parity.
+- Full-init dump-diffs — **byte-identical** kernel-arm vs wasm-arm: redis
+  (131,921 dump lines), git (160,844), fmt (35,433), protobuf (780,620),
+  ALS (3,694).
+- Torture fixtures torture.c/.cpp/.hpp + CRLF variants + Metal/CUDA
+  hoist-parity + defer tests in `__tests__/kernel-ccpp-parity.test.ts`; new
+  preParse blanks unit-tested in extraction.test.ts; full suite green with
+  `CODEGRAPH_KERNEL_EXPECT=1`.
+- **Deferral-rate guard — CORRECTED BY MEASUREMENT** (the §4f pattern): the
+  <10% bar was calibrated on ts/java/py/go (0–0.42% parse-error incidence).
+  Macro-heavy C/C++ genuinely parses with errors at double-digit file rates
+  (final sweeps: als 9%, git 16.1%, redis 25.3%, protobuf 25.8%, fmt 42% —
+  fmt's template metaprogramming + `.operator[]`-in-decltype shapes are
+  grammar-inherent), and every erroring file defers BY POLICY. Measured with
+  the defer disabled (`CODEGRAPH_KERNEL_CCPP_ERROR_EXTRACT=1`, sweep-only
+  hatch): recovery-divergence is real (21/207 redis, 8/382 git, 9/31 fmt
+  erroring files extract differently across UTF-8/UTF-16), so the defer
+  stays. The sweep harness now takes `--max-deferral` (default 0.1; use 0.5
+  for c/cpp — a broken walker still trips it by deferring ~everything).
+- **Seven NEW/extended preParse blanks** cut real incidence (from 32%/52%
+  starting points; linux `kernel/`+`mm/` subtrees 79% → 58%), each
+  offset-preserving, TS-side, shared by both arms, and a graph-quality win
+  for the wasm path itself (git 7.1k → 13.3k nodes; the linux subtrees
+  2.4k → 7.2k): `#ifdef __cplusplus` guard bodies, lone macro lines
+  (`FMT_BEGIN_NAMESPACE`, `Q_OBJECT`), C statement iterator macros
+  (`list_for_each_entry(…) { }` and brace-less bodies), C trailing param
+  attrs (`int argc UNUSED`), the curated Linux/sparse annotation list
+  (`__init`/`__user`/… — structural matching is impossible there: `__u32
+  count` is shape-identical; parameterized `__printf(1,2)` guarded out) +
+  `container_of`'s type-keyword argument, leading attr macros extended to
+  cpp, and directive-line restore (stops the older blanks corrupting
+  `#define` lines).
+- **Defer-reuse (the linux-economics fix):** a deferred file used to pay the
+  pipeline three times — the worker's raw kernel try, extractFromSource's
+  kernel RE-try, then wasm with a third preParse. A one-slot defer memo in
+  the route point short-circuits the repeat kernel attempt and hands the
+  already-blanked source to the wasm fallback (`sourceIsPreParsed`). On
+  linux this + the annotation blanks took the kernel-arm parse-loop from
+  560s (WORSE than the 426s wasm arm) to **356s vs 435s wasm-arm (−18%)**,
+  and the 2c/6GB envelope to **19.1 min kernel-arm vs 22.9 min wasm-arm
+  (−17%)** with a RICHER graph (2,048,295 nodes / 6,406,933 edges; two
+  independent kernel-arm runs byte-same counts).
+- **Linux-scale dump gate:** kernel-arm and wasm-arm full graphs are
+  **byte-identical** — `dump-graph.mjs` over both 5.2GB DBs:
+  10,444,551 dump lines each, sha256 `cd4182e6…` on both. (Dumping a 2M-node
+  DB needs a big-heap host run — `node --max-old-space-size=16000 …
+  > file` then hash the FILE; the in-container 6GB heap OOMs and a straight
+  pipe at GB scale dies with ENOBUFS, both of which silently hash truncated
+  output as the empty stream.)
+
+The sections below are §0a-recipe step 1's output — every TS-side branch the
+walker mirrors, with file:line anchors (as of `705e501`). Read WITH
+`docs/design/rust-kernel-migration-plan.md` (§0a recipe, §5 gates).
 
 ## Architecture decisions (already made by the plan)
 
