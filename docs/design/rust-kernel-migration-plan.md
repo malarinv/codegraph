@@ -3,44 +3,131 @@
 **Audience:** the agent/engineer executing the native-kernel project. Self-contained handoff:
 context, current state, per-language tracker, gates, and the follow-on roadmap.
 **Companion:** `docs/design/native-extraction-kernel.md` (architecture + spike detail).
-**Written:** 2026-07-16, after the perf arc that shipped #1305, #1320, #1321, #1322, #1323.
+**Written:** 2026-06-12 planning → executed 2026-07-16/17. **R1–R6 ARE DONE.** The shipped
+records live in §3a and §4a–§4f; the per-language tracker is current; §0a is the
+cold-start handoff for the next session. Read §0 + §0a first — parts of §1/§6 below
+them are the ORIGINAL plan and carry expectations that measurement later corrected
+(each is annotated where superseded).
 
 ---
 
-## 0. Execution order (the whole plan as one checklist)
+## 0. Status checklist (R1–R6 done; what remains)
 
-Work top to bottom; each step has a section below with the detail.
+- [x] **R1. Scaffold the napi-rs crate** — done 2026-07-16, §3a. Buffer contract v1,
+      routing + per-file wasm fallback, kill switch, build/release wiring,
+      grammar-source-parity CI.
+- [x] **R2. Port TypeScript/JavaScript (tsx/jsx)** — done 2026-07-16, §4a. The generic
+      `.scm` emitter was SUPERSEDED by bespoke per-language walkers (queries can't
+      express extraction parity); byte-parity from day one of the harness.
+- [x] **R3. TS/JS equivalence gate → DEFAULT-ON** — done 2026-07-16, §4b. Dumps
+      byte-identical (express/excalidraw/vscode + flask control). Found + fixed:
+      encoding-dependent error recovery → per-file `defer:` policy.
+- [x] **R4. Java (incl. Lombok synthesis) → DEFAULT-ON** — done 2026-07-16, §4c.
+      dubbo 441k-row dump byte-identical. Found + fixed: node-ID-collision dedupe
+      (cross-language). Found: many-core parse-loop wall is NOT extraction (→ §4d).
+- [x] **Direct-to-store decode** — done 2026-07-16, §4d. Main thread never
+      materializes nodes; measured: the many-core fresh-index wall is single-writer
+      SQLite ingest (94% of dubbo's parse-loop) — a store-architecture arc, out of
+      scope here.
+- [x] **R5. Python + Go → DEFAULT-ON** — done 2026-07-16, §4e. django 360.8k /
+      prometheus 213.8k row dumps byte-identical; 2-CPU envelope 1.32× / 1.46×.
+- [x] **R6. Kernel-scale re-validation (cg1212)** — done 2026-07-17, §4f. No
+      regression (26.4min vs ~27min, identical 2.05M-node graph). The "parse 6m→2m"
+      premise was wrong for THIS repo: the Linux tree is ~99% C (unported T2) —
+      the expectation transfers to the C/C++ port.
 
-- [x] **R1. Scaffold the napi-rs crate** (`codegraph-kernel`): buffer contract, generic
-      `.scm` emitter, build-pipeline integration, `CODEGRAPH_KERNEL=0` kill switch,
-      wasm fallback, grammar-source-parity CI. (§3) — **done 2026-07-16, see §3a.**
-- [x] **R2. Port TypeScript/JavaScript extraction** (tsx/jsx included) as language one. (§4)
-      — **ported 2026-07-16, see §4a**: full-fidelity Rust walker, byte-parity on this repo
-      (353 files) + excalidraw (643 files) + torture fixtures; extraction 2.6× single-thread.
-      R3's gate (large repo, retrieval invariants, agent A/B, Linux/Windows) still gates
-      default-on.
-- [x] **R3. Run TS/JS through the equivalence gate** — graph parity, retrieval
-      invariants, agent A/B, perf + control repo. Ship behind the env flag, then default-on. (§5)
-      — **passed + DEFAULT-ON 2026-07-16, see §4b.** One deferred leg: Windows-VM run
-      (VM stopped, `prlctl start` needs Parallels Pro — benign: no .node ⇒ wasm fallback;
-      the release matrix builds + gates win32 prebuilds).
-- [x] **R4. Port Java** → re-run the dubbo benchmark → the cbm-parity headline. (§4, §6)
-      — **ported + gate passed + DEFAULT-ON 2026-07-16, see §4c.** Benchmark reality
-      check: dubbo's parse-loop WALL on many-core machines is main-thread-bound (store/
-      dispatch), so the Mac headline barely moves (~11.3→11.1s; parse-loop 5.0→4.4s);
-      the win shows where worker CPU binds (dubbo on 2-CPU: 28→22.5s, ~1.25×). The
-      identified follow-up lever for the Mac number is decode-direct-to-store (§4c).
-- [x] **R5. Port Python, Go.** (§4) — **ported + gates passed + DEFAULT-ON 2026-07-16, §4e.**
-- [x] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
-      — **run 2026-07-17, see §4f.** No regression (26.4min total vs ~27min baseline,
-      identical graph scale, exit 0, all new machinery active) — but the parse
-      expectation was mis-premised: the Linux kernel is ~99% C, an UNPORTED T2
-      language, so "6m → ~2m" transfers to the C/C++ port (R7).
-- [ ] **R7. Long-tail languages opportunistically** per the tracker; T3 may stay TS forever. (§4)
-- [ ] **P1. Kernel-scale resolution speed** — the 19.5-min sequential wall at 2M nodes. (§7a)
-- [ ] **P2. Arc 3, graph richness** — in priority order: test edges → code metrics →
-      read/write refs → raises → doc sections → IaC nodes. Each behind the standard gate. (§7b)
-- [ ] **P3. Parked items** — only with explicit maintainer approval. (§7c)
+**Open, in recommended order (rationale in §0a):**
+
+- [ ] **O1. Merge the `rust-kernel` branch** (9 commits, fully gated) — everything
+      below builds on it; the vendored grammar upgrades alone are worth landing.
+- [ ] **O2. Windows VM validation** — the one deferred gate leg. Blocked on the
+      MAINTAINER starting the VM in Parallels (`prlctl start` needs Pro). Then:
+      install Rust + MSVC Build Tools on the guest, `bash scripts/build-kernel.sh`,
+      run the three kernel suites with `CODEGRAPH_KERNEL_EXPECT=1`. Close before the
+      first release that ships prebuilds (fallback makes a broken win32 .node safe —
+      Windows silently gets wasm — but safe ≠ validated).
+- [ ] **P1. Kernel-scale resolution speed** (§7a) — NOW THE TOP PERF LEVER: 19.2m of
+      the 26.4m Linux-kernel wall (73%). First step is cheap and may reshape it:
+      the 2-CPU run resolves SEQUENTIALLY BY DESIGN (the resolver pool needs ≥4
+      cores) — re-run cg1212 at ≥4 cores where the pool + parallel synthesis
+      (#1321/#1322) engage, then profile what remains. Target: <10min on 8 cores.
+- [ ] **R7a. C/C++ port** — biggest single-language effort; unlocks cg1212's parse
+      expectation (6.2m → ~1.5–2m, 23% of that wall) + CARLA/UE/llvm-class repos;
+      Metal + CUDA ride along (their blanking pre-passes stay TS-side — `preParse`
+      is offset-preserving and the route point can apply it before the kernel call;
+      see the T2 note in `src/extraction/kernel/index.ts`). Largest per-language
+      surface in tree-sitter.ts: namespace prefix stacks (#1291), local fn-pointer
+      tables (#932), operator calls (#1247), stack construction (#1035), macro
+      salvage + `.h` content detection (stays at detectLanguage, upstream — free).
+- [ ] **R7b. Remaining long tail** per the tracker (§4) — ruby/php/csharp/rust/… T1s
+      are now ~1-day-each with the walker pattern; T3 may stay TS forever (fine).
+- [ ] **P2. Arc 3, graph richness** (§7b) — product-priority call, standard gates.
+- [ ] **P3. Parked items** (§7c) — only with explicit maintainer approval.
+
+## 0a. Cold-start handoff (state as of 2026-07-17)
+
+**Where the work lives:** branch `rust-kernel` off `main`, 9 commits (`c5eebe6` R1 →
+`2a79432` R6 record), unmerged, suite green (2,471 tests). All scratchpad clones
+(excalidraw/vscode/dubbo/django/…) were throwaway; re-clone fresh for new gate runs.
+The cg1212 docker container (Linux kernel, 2 CPU/6GB) is long-lived on the dev Mac
+and has the current build deployed at `/app` (tree at `/work/linux`).
+
+**What exists:**
+- `codegraph-kernel/` — napi-rs crate. One WALKER MODULE per language
+  (`tsjs/`, `java.rs`, `python.rs`, `go.rs`) mirroring `TreeSitterExtractor`'s
+  per-language paths bug-for-bug; shared `buffers.rs` (wire contract — twin of
+  `src/extraction/kernel/layout.ts`, byte-matched, ABI-versioned), `ids.rs`
+  (sha node ids, test-pinned to `generateNodeId`), `docstring.rs`, `textutil.rs`
+  (UTF-16 columns/slices, generated-file patterns, shared regexes), `langs.rs`
+  (grammar registry).
+- `src/extraction/kernel/` — loader (contract-verifies before routing; a stale
+  .node silently degrades to wasm; `CODEGRAPH_KERNEL_DEBUG=1` explains), decode,
+  routing (`DEFAULT_ROUTED` = ts/tsx/js/jsx/java/python/go;
+  `CODEGRAPH_KERNEL_LANGS` REPLACES the set; `CODEGRAPH_KERNEL=0` kills), and the
+  deferred-decode transport (`tryKernelExtractRaw` → buffers ride to the store
+  worker; files with applicable framework `extract()` hooks keep the decoded path).
+- Gates in-repo: `scripts/kernel-parity.mjs` (per-file kernel↔wasm diff,
+  ORDER-sensitive, full-object; deferral-rate guard), `scripts/dump-graph.mjs`
+  (natural-key full-DB dump for the byte-identical diff),
+  `__tests__/kernel-{scaffold,grammar-parity,tsjs-parity}.test.ts` (+ torture
+  fixtures under `__tests__/fixtures/kernel-parity/`) — all in `npm test`;
+  the release workflow builds a 6-target prebuild matrix (continue-on-error;
+  kernel is optional everywhere) and runs the suites with
+  `CODEGRAPH_KERNEL_EXPECT=1`.
+
+**Build/run:** `npm run build:kernel` (needs rustup; stages
+`codegraph-kernel/prebuilds/<plat>-<arch>/codegraph-kernel.node`) → `npm run build`
+→ `npm test`. Parity sweep: `node scripts/kernel-parity.mjs <dir>`. Dump gate:
+init twice (kernel arm vs `CODEGRAPH_KERNEL=0`), `dump-graph.mjs` each, `cmp`.
+
+**Adding a language (the proven recipe, ~a day for a T1):**
+1. Read its `languages/<lang>.ts` config AND every branch of tree-sitter.ts it
+   exercises (visitNode dispatch, extractCall's language branch, inheritance
+   clauses, fn-ref spec in function-ref.ts, value-ref prune cases). Port
+   bug-for-bug — quirks included (each walker's header comments list its own).
+2. Add the crates.io grammar; **vendor the wasm from the SAME tag** (clone tag,
+   sha-match parser.c against the cargo registry copy, `tree-sitter-cli 0.25.10
+   build --wasm` from CHECKED-IN parser.c, drop into `src/extraction/wasm/`, add
+   to VENDORED_WASM_LANGS) — tree-sitter-wasms is 2023-era for most languages.
+3. Torture fixture + parity sweeps (small/medium/large real repos) → full-init
+   dump-diffs byte-identical → add to DEFAULT_ROUTED + tests + changelog.
+
+**Traps already paid for (do not relearn):**
+- **Error recovery is ENCODING-dependent** (UTF-8 native vs UTF-16 web-tree-sitter,
+  same grammar bytes + same core) → every walker defers `has_error()` files via
+  the `defer:` signal. Incidence 0–0.42%; the harness fails >10% deferral.
+- **Node IDs collide** for same-(kind,name,line) — routine in minified one-liners.
+  Any dedupe/self-check that the TS side keys on node IDs must compare ID STRINGS,
+  not table rows (`node_ids` vec in every walker).
+- **Positions and JS string slices are UTF-16** (`textutil::col16`/`slice_utf16`) —
+  that's what web-tree-sitter reports and what `.slice(0,100)` means.
+- The extraction seam contract is **exactly what extractFromSource returns** — e.g.
+  refs carry NO denormalized filePath/language (the store fills them). The strict
+  full-object parity compare exists because a loose one masked precisely this.
+- Grammar bumps: crate + vendored wasm move TOGETHER or kernel-grammar-parity fails.
+- Perf claims: measure before believing — the plan's own §1/§6 expectations were
+  corrected twice (many-core parse-loop wall = store-writer, §4d; cg1212 parse =
+  C-bound, §4f).
 
 ---
 
@@ -65,6 +152,15 @@ Expected end state: parse-loop 4.7s → ~1.0–1.5s on dubbo-class repos → tot
 **parity with cbm on their best surface**, while keeping every win we already hold
 (sync 2.4–2.8×, agent A/B decisive, call-graph density 1.3–2.3×, byte-identical
 determinism, constrained-hardware envelope).
+
+> **SUPERSEDED BY MEASUREMENT (§4c/§4d):** the many-core parse-loop wall turned out
+> to be the single-writer SQLite ingest (94% of it on dubbo), not extraction — 8 wasm
+> workers already hid extraction CPU behind the main thread on big-core machines. So
+> the Mac dubbo total stays ~11s and closing the remaining cbm gap there is a
+> STORE-ARCHITECTURE arc, not a kernel task. The kernel's wins are real where worker
+> CPU binds: the 2-CPU/6GB CI envelope (excalidraw ~1.5×, dubbo ~1.25×, django 1.32×,
+> prometheus 1.46×) and vscode-scale-on-Mac (1.28×). Every "keep" item held —
+> byte-identical determinism is now enforced per language by the dump gate.
 
 ## 2. What the kernel is — and the boundary that makes it safe
 
@@ -402,6 +498,12 @@ Byte-identity vs hand-written extractors is NOT expected — the gate is behavio
 
 ## 6. Rollout order and expected wins
 
+> **Executed 2026-07-16/17; outcomes vs these expectations are in §4a–§4f.** Two
+> expectations below were corrected by measurement: (2) the dubbo-on-Mac headline is
+> store-writer-bound, not extraction-bound (§4c/§4d — the win lands on the low-core
+> envelope instead); (4) cg1212 is ~99% C, an unported T2 language, so its parse
+> expectation belongs to the C/C++ port (§4f).
+
 1. **TS/JS/TSX/JSX** — most indexed files in the funnel; excalidraw 3.3s → ~2.3s expected.
 2. **Java** — dubbo 11.1s → ~7.5s expected (**the cbm-parity headline**).
 3. **Python, Go** — rounds out ~90% of real-world indexed files.
@@ -421,12 +523,14 @@ Measurement discipline (hard-won this week — do NOT relearn these):
 
 ## 7. AFTER the kernel: the follow-on roadmap (in order)
 
-### 7a. Kernel-scale resolution speed
-The kernel makes parse fast; at Linux-kernel scale resolution is now the wall (19.5min
-sequential in the 2-CPU container; the resolver pool requires ≥4 cores to engage).
-Steps: re-run cg1212 validation on ≥4-core allocation (pool + parallel synthesis engage);
-profile; likely levers: worker count scaling, batch size at scale, `warmCachesYielding`
-on multi-GB DBs. Target: kernel <10min on a normal 8-core host.
+### 7a. Kernel-scale resolution speed — NOW THE TOP OPEN PERF ITEM
+Confirmed by the R6 run (§4f): resolution is 19.2min of the 26.4min Linux-kernel
+wall (73%) — sequential BY DESIGN in the 2-CPU container (the resolver pool requires
+≥4 cores to engage). Parse is 6.2min (23%) and belongs to the C/C++ port (R7a).
+Steps: re-run cg1212 validation on ≥4-core allocation (pool + parallel synthesis
+#1321/#1322 engage — this first measurement is cheap and may reshape the whole
+problem); profile; likely levers: worker count scaling, batch size at scale,
+`warmCachesYielding` on multi-GB DBs. Target: kernel <10min on a normal 8-core host.
 
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
