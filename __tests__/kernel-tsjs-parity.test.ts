@@ -60,7 +60,7 @@ let savedEnv: Record<string, string | undefined>;
 describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
   beforeAll(async () => {
     await initGrammars();
-    await loadGrammarsForLanguages(['typescript', 'tsx', 'javascript', 'jsx']);
+    await loadGrammarsForLanguages(['typescript', 'tsx', 'javascript', 'jsx', 'java']);
   });
 
   beforeEach(() => {
@@ -103,6 +103,11 @@ describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
   it('torture fixture (js): field methods, wrappers, vuex module shape', () => {
     const file = path.join(FIXTURE_DIR, 'torture.js');
     assertParity('fixtures/torture.js', fs.readFileSync(file, 'utf8'), 'javascript');
+  });
+
+  it('torture fixture (java): Lombok, anonymous classes, method refs, chains', () => {
+    const file = path.join(FIXTURE_DIR, 'Torture.java');
+    assertParity('fixtures/Torture.java', fs.readFileSync(file, 'utf8'), 'java');
   });
 
   it.each(REAL_SOURCES)('real source parity: %s', (rel) => {

@@ -9,10 +9,9 @@
 //! parity gate fails. Positions are emitted in UTF-16 code units (what
 //! web-tree-sitter reports), see util::col16.
 
-mod docstring;
 mod extractors;
 mod fnref;
-pub(crate) mod util;
+use crate::textutil as util;
 
 use crate::buffers::{
     build_meta, edge_kind_index, node_kind_index, Arena, BoolFlags, EdgeRow, EmitOut, NodeRow,
@@ -148,6 +147,11 @@ pub struct Walker<'t> {
     arena: Arena,
     tables: Tables,
     stack: Vec<Scope>,
+    /// Node id string per row. Rows are unique but IDS COLLIDE for same
+    /// (kind, name, line) nodes — routine in minified one-line files — and the
+    /// TS extractor's fn-ref dedupe and value-ref self-checks key on the ID,
+    /// so parity requires comparing ids, not rows.
+    node_ids: Vec<String>,
     /// Function/method names defined in this file (fn-ref flush gate).
     defined_fn_names: HashSet<String>,
     /// Simple names from `imports` refs (fn-ref flush gate).
@@ -198,6 +202,7 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         arena: Arena::default(),
         tables: Tables::default(),
         stack: Vec::new(),
+        node_ids: Vec::new(),
         defined_fn_names: HashSet::new(),
         imported_names: HashSet::new(),
         fn_ref_cands: Vec::new(),
@@ -234,6 +239,7 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         return_type: NONE_STR,
         extra_json: NONE_STR,
     });
+    w.node_ids.push(ids::file_node_id(file_path));
     w.stack.push(Scope { row: 0, kind: "file", name: base_name.to_string() });
 
     w.visit_node(tree.root_node());
@@ -399,6 +405,7 @@ impl<'t> Walker<'t> {
             target_id_str: NONE_STR,
         });
 
+        self.node_ids.push(id);
         if kind == "function" || kind == "method" {
             self.defined_fn_names.insert(name.to_string());
         }
@@ -485,7 +492,9 @@ impl<'t> Walker<'t> {
 
         let refs_kind = edge_kind_index("references").unwrap();
         for scope in &scopes {
-            let mut seen: HashSet<u32> = HashSet::new();
+            // Self-skip and per-scope dedupe compare node ID STRINGS (which
+            // collide for same-(kind, name, line) nodes), matching the TS side.
+            let mut seen: HashSet<&str> = HashSet::new();
             let mut stack: Vec<Node> = vec![scope.node];
             let mut visited = 0usize;
             while let Some(n) = stack.pop() {
@@ -496,8 +505,12 @@ impl<'t> Walker<'t> {
                 if matches!(n.kind(), "identifier" | "constant" | "name" | "simple_identifier") {
                     let ref_name = self.text(n);
                     if let Some(&target_row) = targets.get(ref_name) {
-                        if target_row != scope.row && ref_name != scope.name && !seen.contains(&target_row) {
-                            seen.insert(target_row);
+                        let target_id = self.node_ids[target_row as usize].as_str();
+                        if target_id != self.node_ids[scope.row as usize]
+                            && ref_name != scope.name
+                            && !seen.contains(&target_id)
+                        {
+                            seen.insert(target_id);
                             let meta = self.arena.put(r#"{"valueRef":true}"#);
                             self.tables.push_edge(&EdgeRow {
                                 source_idx: scope.row,
@@ -559,7 +572,7 @@ impl<'t> Walker<'t> {
         if cands.is_empty() || util::is_generated_file(self.file_path) {
             return;
         }
-        let mut seen: HashSet<(u32, String)> = HashSet::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
         for (from, c) in cands {
             // Gate: `this.<member>` always flushes; everything else must match
             // a same-file function/method or an imported name. (The `::` and
@@ -571,7 +584,10 @@ impl<'t> Walker<'t> {
             {
                 continue;
             }
-            if !seen.insert((from, c.name.clone())) {
+            // Dedupe on the node ID STRING, not the row — ids collide for
+            // same-(kind, name, line) nodes (minified one-liners) and the TS
+            // side keys its dedupe on `${fromNodeId}|${name}`.
+            if !seen.insert((self.node_ids[from as usize].clone(), c.name.clone())) {
                 continue;
             }
             let column = util::col16(self.src, &self.line_starts, c.row, c.column_byte);

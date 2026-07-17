@@ -24,7 +24,12 @@ Work top to bottom; each step has a section below with the detail.
       — **passed + DEFAULT-ON 2026-07-16, see §4b.** One deferred leg: Windows-VM run
       (VM stopped, `prlctl start` needs Parallels Pro — benign: no .node ⇒ wasm fallback;
       the release matrix builds + gates win32 prebuilds).
-- [ ] **R4. Port Java** → re-run the dubbo benchmark → the cbm-parity headline. (§4, §6)
+- [x] **R4. Port Java** → re-run the dubbo benchmark → the cbm-parity headline. (§4, §6)
+      — **ported + gate passed + DEFAULT-ON 2026-07-16, see §4c.** Benchmark reality
+      check: dubbo's parse-loop WALL on many-core machines is main-thread-bound (store/
+      dispatch), so the Mac headline barely moves (~11.3→11.1s; parse-loop 5.0→4.4s);
+      the win shows where worker CPU binds (dubbo on 2-CPU: 28→22.5s, ~1.25×). The
+      identified follow-up lever for the Mac number is decode-direct-to-store (§4c).
 - [ ] **R5. Port Python, Go.** (§4)
 - [ ] **R6. Kernel-scale re-validation** in the cg1212 container (expect parse 6m → ~2m). (§6)
 - [ ] **R7. Long-tail languages opportunistically** per the tracker; T3 may stay TS forever. (§4)
@@ -221,6 +226,44 @@ Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
 `src/extraction/kernel/index.ts`. `CODEGRAPH_KERNEL_LANGS` REPLACES the set;
 `CODEGRAPH_KERNEL=0` kills. Changelog entry added under [Unreleased].
 
+### 4c. R4 — Java PORTED + gate PASSED + DEFAULT-ON (2026-07-16)
+
+- **Walker:** `codegraph-kernel/src/java.rs` (self-contained, sharing the crate-level
+  docstring/textutil modules) — package namespaces, imports, javadoc, annotations →
+  decorates, type_list inheritance, fields/constants (static-final → constant),
+  enum_constant members, anonymous classes (`<T$anon@line>` incl. the TS side's
+  0-based-line quirk, mirrored bug-for-bug), method_invocation calls with the
+  `this.field` unwrap + the `Foo.getInstance().bar()` chain encoding, static-member
+  value reads, method_reference fn-refs (`this::x` / `Type::m`), value refs, and the
+  **full Lombok member synthesizer** (#912: @Getter/@Setter/@Data/@Value/@Builder/
+  @ToString/@EqualsAndHashCode/@Slf4j-family, taken-member dedup by exact
+  `classQN::name`). Grammar: tree-sitter-java crate 0.23.5; wasm vendored from the
+  SAME tag (94703d5, parser.c sha-matched), replacing tree-sitter-wasms' ^0.20.2 build.
+- **Parity:** extraction sweeps — gson 262/262, retrofit 341/341, dubbo 4,048/4,048,
+  torture fixture (`__tests__/fixtures/kernel-parity/Torture.java`, in `npm test`).
+  Full-init dump-diffs byte-identical: gson (49,766 rows), retrofit (62,735),
+  **dubbo (441,266 rows)**. All R2/R3 repos re-verified after the fix below.
+- **The gate caught a REAL cross-language bug:** retrofit's minified website JS
+  exposed that fn-ref dedupe and value-ref self-checks must compare node **ID
+  strings**, not table rows — IDs collide for same-(kind,name,line) nodes (routine in
+  minified one-liners: many `function e` on line 3) and the TS side keys on
+  `${fromNodeId}|${name}`. Fixed in BOTH walkers (`node_ids` per row); this affected
+  tsjs too (latent since R2, never released).
+- **Benchmark honesty (the §6 expectation was wrong about WHERE the win lands):**
+  dubbo fresh-init on the 11-core M3 Pro is ~FLAT end-to-end (11.3–11.5 wasm →
+  11.0–11.6 kernel; parse-loop wall 5,020→4,394ms) because that phase's wall is
+  **main-thread-bound** (file reads + result store + SQLite), not worker-CPU-bound —
+  8 wasm workers already hide extraction CPU behind the main thread on big-core
+  machines. Where worker CPU binds, the kernel delivers: **dubbo on 2-CPU/6GB Linux
+  27.8–28.6s → 22.3–22.8s (~1.25×)**; excalidraw same envelope ~1.5×; vscode-on-Mac
+  1.28×. The **cbm-parity Mac headline therefore needs the next lever: decode the
+  kernel's buffers DIRECTLY into store rows** (skip per-node JS object
+  materialization on the main thread) — buffer contract already carries everything;
+  tracked as the top §7a-adjacent follow-up.
+- **Platforms:** Linux container (arm64): all 23 kernel tests green EXPECT=1;
+  Windows VM still deferred (same fallback rationale as §4b).
+- Default routing now includes `java`.
+
 ## 4. Per-language tracker
 
 Tiers: **T1** = mostly `.scm` + mapping config. **T2** = needs bespoke pre/post passes kept
@@ -239,7 +282,7 @@ parity before porting the language.
 | Language(s) | Today | Tier | Grammar source | Migration notes / known traps | Status |
 |---|---|---|---|---|---|
 | typescript, tsx, javascript, jsx | `languages/typescript.ts`, `javascript.ts` + shared branches | T1 | crates.io | First target. Value-reference edges (#895/#897) and component recognition (#841 forwardRef/memo/styled) must survive — they're extraction-side. Largest test surface; gate is strictest here. **PORTED + GATE PASSED + DEFAULT-ON (§4a/§4b); erroring files defer to wasm per-file.** | ✅ |
-| java | `languages/java.ts` | T1 | crates.io | Second target; unlocks the dubbo-parity claim. Lombok member synthesis (#912) is a NODE synthesizer hook in extraction (`synthesizeMembers`) — port or keep as TS post-pass. | ☐ |
+| java | `languages/java.ts` | T1 | crates.io | Second target; unlocks the dubbo-parity claim. Lombok member synthesis (#912) is a NODE synthesizer hook in extraction (`synthesizeMembers`) — port or keep as TS post-pass. **PORTED incl. Lombok + gate passed + DEFAULT-ON (§4c).** | ✅ |
 | python | `languages/python.ts` | T1 | crates.io | Third. Decorator extraction feeds framework route detection — parity required. | ☐ |
 | go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). | ☐ |
 | ruby, php | dedicated files | T1 | crates.io | Straightforward; PHP property-receiver shapes (#1220/#1251) are RESOLUTION-side, unaffected. | ☐ |

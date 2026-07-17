@@ -3,7 +3,7 @@
 //! src/extraction/tree-sitter.ts; TS-file line references are as of the R2
 //! port. Bug-for-bug fidelity is deliberate — fix the TS side first.
 
-use super::util;
+use crate::textutil as util;
 use super::{
     body_of, is_builtin_type, is_literal_receiver, is_react_hoc, is_variable_type,
     is_vue_collection_name, Extra, Scope, Walker,
@@ -43,7 +43,7 @@ impl<'t> Walker<'t> {
         }
 
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             signature: self.signature_of(node),
             visibility: self.visibility_of(node),
             is_exported: Some(self.is_exported(node)),
@@ -120,7 +120,7 @@ impl<'t> Walker<'t> {
         let resolved_body = body_of(node); // skipBodilessClass unset for TS/JS
         let name = self.extract_name(node);
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             visibility: self.visibility_of(node),
             is_exported: Some(self.is_exported(node)),
             ..Extra::default()
@@ -161,7 +161,7 @@ impl<'t> Walker<'t> {
 
         let name = self.extract_name(node);
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             signature: self.signature_of(node),
             visibility: self.visibility_of(node),
             is_async: Some(self.is_async(node)),
@@ -187,7 +187,7 @@ impl<'t> Walker<'t> {
     pub(super) fn extract_interface(&mut self, node: Node<'t>) {
         let name = self.extract_name(node);
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             is_exported: Some(self.is_exported(node)),
             ..Extra::default()
         };
@@ -209,7 +209,7 @@ impl<'t> Walker<'t> {
         let Some(body) = body_of(node) else { return };
         let name = self.extract_name(node);
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             visibility: self.visibility_of(node),
             is_exported: Some(self.is_exported(node)),
             ..Extra::default()
@@ -255,7 +255,7 @@ impl<'t> Walker<'t> {
     // --- extractProperty (#808 property-classified class fields) ---------------------
 
     pub(super) fn extract_property(&mut self, node: Node<'t>) -> Option<(u32, String)> {
-        let docstring = super::docstring::preceding_docstring(node, self.src);
+        let docstring = crate::docstring::preceding_docstring(node, self.src);
         let visibility = self.visibility_of(node);
         let is_static = Some(self.is_static(node).unwrap_or(false)); // `?? false` — always present
 
@@ -296,7 +296,7 @@ impl<'t> Walker<'t> {
     pub(super) fn extract_variable(&mut self, node: Node<'t>) {
         let is_const = self.is_const_decl(node);
         let kind: &'static str = if is_const { "constant" } else { "variable" };
-        let docstring = super::docstring::preceding_docstring(node, self.src);
+        let docstring = crate::docstring::preceding_docstring(node, self.src);
         let is_exported = self.is_exported(node); // `?? false` — always present
 
         for i in 0..node.named_child_count() {
@@ -807,7 +807,7 @@ impl<'t> Walker<'t> {
             return false;
         }
         let extra = Extra {
-            docstring: super::docstring::preceding_docstring(node, self.src),
+            docstring: crate::docstring::preceding_docstring(node, self.src),
             is_exported: Some(self.is_exported(node)),
             ..Extra::default()
         };
@@ -858,7 +858,7 @@ impl<'t> Walker<'t> {
                     "property"
                 };
                 let extra = Extra {
-                    docstring: super::docstring::preceding_docstring(child, self.src),
+                    docstring: crate::docstring::preceding_docstring(child, self.src),
                     signature: Some(self.text(child).to_string()),
                     qualified_name: Some(format!("{alias_name}::{member_name}")),
                     ..Extra::default()

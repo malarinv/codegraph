@@ -279,15 +279,17 @@ export async function initGrammars(): Promise<void> {
  * parse identically and per-language routing stays graph-neutral:
  *   - tree-sitter/tree-sitter-typescript v0.23.2 (f975a62) → typescript + tsx
  *   - tree-sitter/tree-sitter-javascript v0.25.0 (44c892e) → javascript + jsx
+ *   - tree-sitter/tree-sitter-java v0.23.5 (94703d5) → java
  * Built from each repo's CHECKED-IN parser.c (no `generate`) with
- * tree-sitter-cli 0.25.10 `build --wasm` — the same tables crates.io compiles.
+ * tree-sitter-cli 0.25.10 `build --wasm` — the same tables crates.io compiles
+ * (parser.c sha-matched against the crates.io tarball).
  * The kernel-grammar-parity test asserts this alignment; bump the crate and
  * the vendored wasm together.
  */
 const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   'pascal', 'scala', 'lua', 'luau', 'csharp', 'r', 'cfml', 'cfscript', 'cfquery',
   'cobol', 'vbnet', 'erlang', 'terraform', 'arkts', 'nix',
-  'typescript', 'tsx', 'javascript', 'jsx',
+  'typescript', 'tsx', 'javascript', 'jsx', 'java',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */
