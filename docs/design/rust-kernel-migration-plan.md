@@ -678,6 +678,37 @@ is pending (est. ~17.5min from the stage arithmetic). Remaining levers by size:
 parse 351s→R7a C/C++ port; cFnPtrEdges 306s; backpressure 121s (I/O floor —
 shrinks only by writing fewer bytes); settle 88s; read-mapping 57s.
 
+#### 7a.4 cFnPtrEdges round (2026-07-17, #1341) — 2.07× standalone, probe-driven
+
+Iterated with a STANDALONE in-container probe against the live kernel DB
+(readonly; ~4min/cycle instead of 25-min inits) with per-sweep sub-timings
+(`CODEGRAPH_SYNTH_TIMINGS` prints the `cFnPtr sub:` line):
+
+| Iteration | Standalone total | What moved |
+|---|---|---|
+| baseline | 278.8s | attribution: E 112s, D 92s, strip 71.8s (4.4×/file), C 41s |
+| regex hoists + D field-name pre-gate + incremental line count | 249.3s | D −24s |
+| budget-aware strip cache (first cut) | — | **thrash lesson: a partial LRU on cyclic sweeps ≈ 0% cross-sweep hits** — cap ~61k AND cap == files.length both lost (includes push the working set over) |
+| all-or-nothing cache + 5% slack | 187.8s | strips exactly 1.0/file; `getNodesInFile` theory killed (10s, not 127s) |
+| `sliceLines` → split-once-per-file | **134.8s** | ~1.6M full-file splits eliminated (D 46→20.5s, E 94.5→69.1s) |
+
+**Identity proof at full scale:** optimized edge set (merge-dedup + canonical
+sort, 274,762 edges) SHA256 `21c2a971…` == the pre-optimization edges
+extracted from the live kernel DB — this pass never runs on the dubbo gate
+repo (C-gated), so the DB comparison is the right gate. Suite 2,491.
+
+**In-run validation (2c/6GB): total 17.6min (from 19.3; −33% cumulative vs
+R6), synthesis 336→251s, counts byte-exact, WAL 1.09GB.** Honest caveat: the
+full strip cache did NOT engage in-run at 6GB (mid-run memory budget below
+the 2×-cache safety threshold → deliberate fallback to the 128 floor; strips
+283k, costing ~60s vs the probe) — the memory-safe degradation working as
+designed. Boxes with headroom get the full 2.07×; the 6GB envelope gets the
+algorithmic wins only.
+
+**Levers remaining, re-ranked:** parse 338s (R7a C/C++ port — the last big
+rock) > backpressure ~120s (checkpoint I/O floor) > E-scan 69–93s (approaching
+honest regex work over 1.5GB) > settle 88s > read-mapping 57s.
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
