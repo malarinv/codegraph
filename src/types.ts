@@ -276,6 +276,23 @@ export interface ExtractionResult {
 
   /** Extraction duration in milliseconds */
   durationMs: number;
+
+  /**
+   * Deferred-decode transport (native kernel, bulk-index path): when present,
+   * `nodes`/`edges`/`unresolvedReferences` are EMPTY and the file's tables
+   * ride as flat buffers to be decoded at the store boundary (the store
+   * worker), so the MAIN thread never materializes per-node objects.
+   * `kernelCounts` carries the table sizes for bookkeeping. Decode into a
+   * plain result with `materializeKernelResult` (src/extraction/kernel).
+   */
+  kernelBuffers?: {
+    meta: Uint8Array;
+    nodes: Uint8Array;
+    edges: Uint8Array;
+    refs: Uint8Array;
+    arena: Uint8Array;
+  };
+  kernelCounts?: { nodes: number; edges: number; refs: number };
 }
 
 /**

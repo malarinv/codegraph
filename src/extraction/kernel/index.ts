@@ -17,6 +17,11 @@
 import type { ExtractionResult, Language } from '../../types';
 import { getKernel, kernelSupports } from './loader';
 import { decodeExtractBuffers } from './decode';
+import {
+  KERNEL_ABI_VERSION as LAYOUT_ABI,
+  META as LAYOUT_META,
+  NONE as LAYOUT_NONE,
+} from './layout';
 
 export { getKernel, kernelSupports, resetKernelForTests } from './loader';
 export { decodeExtractBuffers } from './decode';
@@ -65,6 +70,84 @@ export function kernelRoutes(language: Language): boolean {
 
 /** Warned-once registry so a broken language logs a single line, not one per file. */
 const warned = new Set<string>();
+
+/** The raw table buffers + the cheap facts the orchestrator needs pre-decode. */
+export interface KernelRawResult {
+  buffers: NonNullable<ExtractionResult['kernelBuffers']>;
+  counts: { nodes: number; edges: number; refs: number };
+  errors: ExtractionResult['errors'];
+}
+
+/**
+ * Extract via the kernel WITHOUT decoding — the bulk-index fast path. The
+ * tables ride to the store boundary as buffers (decoded on the store worker),
+ * so the main thread never materializes per-node objects. Returns null under
+ * exactly the conditions tryKernelExtract does, PLUS when the language has a
+ * registered post() pass (post passes operate on decoded results, so those
+ * languages keep the decoded path).
+ */
+export function tryKernelExtractRaw(
+  filePath: string,
+  source: string,
+  language: Language
+): KernelRawResult | null {
+  if (!kernelRoutes(language) || POST_PASSES[language]) return null;
+  const kernel = getKernel();
+  if (!kernel) return null;
+  try {
+    const buffers = kernel.extractFile(filePath, source, language);
+    const meta = buffers.meta;
+    if (meta.readUInt8(LAYOUT_META.version) !== LAYOUT_ABI) {
+      throw new Error(`kernel buffer ABI ${meta.readUInt8(0)} != expected ${LAYOUT_ABI}`);
+    }
+    const counts = {
+      nodes: meta.readUInt32LE(LAYOUT_META.nodeCount),
+      edges: meta.readUInt32LE(LAYOUT_META.edgeCount),
+      refs: meta.readUInt32LE(LAYOUT_META.refCount),
+    };
+    let errors: ExtractionResult['errors'] = [];
+    const errorsOff = meta.readUInt32LE(LAYOUT_META.errorsOff);
+    if (errorsOff !== LAYOUT_NONE) {
+      const errorsLen = meta.readUInt32LE(LAYOUT_META.errorsLen);
+      errors = JSON.parse(
+        buffers.arena.toString('utf8', errorsOff, errorsOff + errorsLen)
+      ) as ExtractionResult['errors'];
+    }
+    return { buffers, counts, errors };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('defer:')) return null;
+    if (!warned.has(language)) {
+      warned.add(language);
+      process.stderr.write(
+        `[codegraph-kernel] ${language} extraction failed (${message}) — falling back to the wasm path\n`
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * Decode a buffer-carrying result (see ExtractionResult.kernelBuffers) into a
+ * plain, fully-materialized ExtractionResult — the fallback for store paths
+ * that need objects (main-thread store, tests).
+ */
+export function materializeKernelResult(
+  result: ExtractionResult,
+  filePath: string,
+  language: Language
+): ExtractionResult {
+  if (!result.kernelBuffers) return result;
+  const b = result.kernelBuffers;
+  const asBuf = (u: Uint8Array) => Buffer.from(u.buffer, u.byteOffset, u.byteLength);
+  const decoded = decodeExtractBuffers(
+    { meta: asBuf(b.meta), nodes: asBuf(b.nodes), edges: asBuf(b.edges), refs: asBuf(b.refs), arena: asBuf(b.arena) },
+    filePath,
+    language
+  );
+  decoded.durationMs = result.durationMs;
+  return decoded;
+}
 
 /**
  * Extract via the native kernel. Returns null when the kernel doesn't apply

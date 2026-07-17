@@ -264,6 +264,31 @@ Default routing: `DEFAULT_ROUTED = {typescript, tsx, javascript, jsx}` in
   Windows VM still deferred (same fallback rationale as §4b).
 - Default routing now includes `java`.
 
+### 4d. Direct-to-store decode (2026-07-16) — and where the wall ACTUALLY is
+
+Kernel-routed files now ship their flat buffers from the parse worker all the way
+to the STORE WORKER, which decodes + finalizes them there (`tryKernelExtractRaw` →
+`ExtractionResult.kernelBuffers` → `KernelStoreBundle` → `decodeKernelBundle`;
+filter semantics shared via `finalizeStoreBundle`). The main thread's per-file work
+drops to O(1) + the content hash — it never materializes per-node objects, and both
+postMessage hops move flat bytes instead of object graphs. Files whose applicable
+frameworks carry an `extract()` hook keep the decoded path (hooks merge into decoded
+results); non-writer paths (main-thread store, tests) materialize via
+`materializeKernelResult`. Byte-identical dumps re-verified on dubbo, excalidraw,
+express, gson.
+
+**Measurement that closes the §4c question:** with the store worker instrumented,
+dubbo's parse-loop wall is **94% store-writer busy time** (4,202ms of 4,493ms on the
+kernel arm). The many-core fresh-index wall is the single-writer SQLite ingest —
+not extraction, not main-thread work. d2s still improves the writer lane ~11%
+(4,726→4,202ms: buffers skip structured-clone deserialization ON the writer) and
+frees the main thread, but the remaining cbm gap on many-core medium repos is a
+STORE-ARCHITECTURE question (their RAM-first design defers all durability). Next
+levers there (a separate perf arc, not this project): deferred/bulk index builds
+during the parse phase, multi-file write transactions, buffer→bind without object
+materialization. Note the #1320-arc post-mortem already measured statement batching
+and sorted inserts as ~zero on this path — B-tree maintenance is the floor.
+
 ## 4. Per-language tracker
 
 Tiers: **T1** = mostly `.scm` + mapping config. **T2** = needs bespoke pre/post passes kept
