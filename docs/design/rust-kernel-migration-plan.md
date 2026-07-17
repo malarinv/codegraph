@@ -38,19 +38,27 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
 
 **Open, in recommended order (rationale in §0a):**
 
-- [ ] **O1. Merge the `rust-kernel` branch** (9 commits, fully gated) — everything
-      below builds on it; the vendored grammar upgrades alone are worth landing.
-- [ ] **O2. Windows VM validation** — the one deferred gate leg. Blocked on the
-      MAINTAINER starting the VM in Parallels (`prlctl start` needs Pro). Then:
-      install Rust + MSVC Build Tools on the guest, `bash scripts/build-kernel.sh`,
-      run the three kernel suites with `CODEGRAPH_KERNEL_EXPECT=1`. Close before the
-      first release that ships prebuilds (fallback makes a broken win32 .node safe —
-      Windows silently gets wasm — but safe ≠ validated).
-- [ ] **P1. Kernel-scale resolution speed** (§7a) — NOW THE TOP PERF LEVER: 19.2m of
-      the 26.4m Linux-kernel wall (73%). First step is cheap and may reshape it:
-      the 2-CPU run resolves SEQUENTIALLY BY DESIGN (the resolver pool needs ≥4
-      cores) — re-run cg1212 at ≥4 cores where the pool + parallel synthesis
-      (#1321/#1322) engage, then profile what remains. Target: <10min on 8 cores.
+- [x] **O1. Merge the `rust-kernel` branch** — DONE 2026-07-17: PR #1326, **merge
+      commit** (the integration-branch exception — 9 milestone commits preserved),
+      main tip `c1dc78d`. Suite green pre-merge (2,472 passed / 4 skipped,
+      `CODEGRAPH_KERNEL_EXPECT=1`).
+- [ ] **O2. Windows VM validation** — IN PROGRESS 2026-07-17: maintainer started the
+      VM; guest repo at `c1dc78d`, rustc 1.97.1 (aarch64-pc-windows-msvc) via
+      rustup, MSVC Build Tools (VCTools workload + VC.Tools.ARM64 + Win11 SDK)
+      installing via **scheduled task** — Windows sshd kills detached children on
+      session close, `schtasks` is the survival pattern. Remaining: `bash
+      scripts/build-kernel.sh`, `npm ci`+build, kernel suites with
+      `CODEGRAPH_KERNEL_EXPECT=1`. Close before the first release that ships
+      prebuilds (fallback makes a broken win32 .node safe — Windows silently gets
+      wasm — but safe ≠ validated).
+- [ ] **P1. Kernel-scale resolution speed** (§7a) — measurement round RUN 2026-07-17
+      and it RESHAPED the arc (full record §7a.1): the "sequential at 2 CPUs"
+      premise was FALSE (pool sizing is cpuset-blind; R6 already ran 6 workers),
+      and both 8-core re-runs failed STRUCTURALLY before yielding a clean number —
+      container OOM at 7GB (memory-blind pool sizing), WAL blowup to 22GB on a
+      4.6GB DB (pool reader snapshots starve checkpoint truncation at kernel
+      scale). Revised order: (1) WAL containment, (2) memory-aware pool sizing,
+      (3) then the speed re-measure. Target unchanged: <10min on 8 cores.
 - [ ] **R7a. C/C++ port** — biggest single-language effort; unlocks cg1212's parse
       expectation (6.2m → ~1.5–2m, 23% of that wall) + CARLA/UE/llvm-class repos;
       Metal + CUDA ride along (their blanking pre-passes stay TS-side — `preParse`
@@ -66,8 +74,9 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
 
 ## 0a. Cold-start handoff (state as of 2026-07-17)
 
-**Where the work lives:** branch `rust-kernel` off `main`, 9 commits (`c5eebe6` R1 →
-`2a79432` R6 record), unmerged, suite green (2,471 tests). All scratchpad clones
+**Where the work lives:** MERGED to `main` 2026-07-17 (PR #1326, merge commit
+`c1dc78d`; the 9 milestone commits `c5eebe6` R1 → `2a79432` R6 are preserved in
+history). All scratchpad clones
 (excalidraw/vscode/dubbo/django/…) were throwaway; re-clone fresh for new gate runs.
 The cg1212 docker container (Linux kernel, 2 CPU/6GB) is long-lived on the dev Mac
 and has the current build deployed at `/app` (tree at `/work/linux`).
@@ -525,12 +534,60 @@ Measurement discipline (hard-won this week — do NOT relearn these):
 
 ### 7a. Kernel-scale resolution speed — NOW THE TOP OPEN PERF ITEM
 Confirmed by the R6 run (§4f): resolution is 19.2min of the 26.4min Linux-kernel
-wall (73%) — sequential BY DESIGN in the 2-CPU container (the resolver pool requires
-≥4 cores to engage). Parse is 6.2min (23%) and belongs to the C/C++ port (R7a).
+wall (73%) — ~~sequential BY DESIGN in the 2-CPU container (the resolver pool requires
+≥4 cores to engage)~~ **(premise corrected in §7a.1: it was pooled all along)**.
+Parse is 6.2min (23%) and belongs to the C/C++ port (R7a).
 Steps: re-run cg1212 validation on ≥4-core allocation (pool + parallel synthesis
 #1321/#1322 engage — this first measurement is cheap and may reshape the whole
 problem); profile; likely levers: worker count scaling, batch size at scale,
 `warmCachesYielding` on multi-GB DBs. Target: kernel <10min on a normal 8-core host.
+
+#### 7a.1 First measurement round (2026-07-17) — the arc reshaped
+
+The cheap first measurement was run and did exactly what it was for: it invalidated
+the premise and surfaced two structural defects that now gate any speed work.
+
+- **Premise correction — resolution was NEVER sequential in cg1212.** Pool sizing
+  (`resolver-pool.ts` `tryCreate`: `min(os.cpus().length − 2, 6)`, engage at ≥2)
+  uses `os.cpus()`, which is **cpuset-blind** — inside the 2-CPU container it saw
+  the Docker VM's 8 CPUs and ran **6 workers time-slicing 2 cores** (r6 log: 6×
+  `worker open`, 14k pool-timing lines). A real <4-CPU host (`os.cpus()` < 4) gets
+  no pool at all. This also explains why the earlier "19.5m sequential" and R6's
+  19.2m match: same 6-on-2 topology. `os.availableParallelism()` (cgroup/affinity-
+  aware) is the honest sizing input — candidate fix rides item (2) below.
+- **Failure 1 — container at 8 real cores / 7GB: cgroup OOM (`oom_kill=5`,
+  `OOMKilled=true`), silent `EXIT=1`** (SIGKILL inside the liftoff re-exec surfaces
+  as code 1, no output). Died mid-parallel-synthesis, 4 passes in. At 8 real cores
+  all 6 workers hold peak anon memory *simultaneously* — the 2-core runs survived
+  only because time-slicing kept concurrent peak lower. **The pool sizes by cores
+  only; there is no memory-aware term and no size knob** (`CODEGRAPH_NO_PARALLEL_
+  RESOLVE` is all-or-nothing).
+- **Failure 2 — WAL blowup at kernel scale: 22.2GB WAL on a 4.6GB DB** (container,
+  at death; the Mac-native attempt was watchdog-killed at 5GB free disk with the
+  WAL already 2.8GB at resolution *start*). Mechanism: the pooled resolution/
+  synthesis superphase writes continuously while 6 workers hold overlapping read
+  snapshots — checkpointing can never truncate past the oldest reader, so the WAL
+  accretes ~the phase's entire write volume. Invisible on medium repos (writes are
+  ~100s of MB); at kernel scale it is a ~5× disk blowup and a page-cache pressure
+  source that feeds Failure 1. The #1231 WAL valve doesn't contain it (valve
+  checkpoints can't truncate past pinned readers either). Fix direction: workers
+  recycle their DB connection between batch rounds (release snapshots at a
+  checkpoint barrier), or an equivalent writer-coordinated `wal_checkpoint(RESTART)`
+  window; instrument to confirm the starvation point before building.
+- **What did move: parse-loop 371.9s → 199.2s (1.87×) at 2→8 cores** (container,
+  clean window) — already riding the single-writer store floor (§4d), so the C/C++
+  port (R7a) will cut worker CPU but the parse wall won't drop below the writer
+  lane on many-core hosts.
+- **Parity spot-check:** Mac-native post-parse node count 2,048,675 vs R6's final
+  2,048,664 (+11 across 2.05M; post-parse vs post-maintenance and a contended run —
+  not a parity gate, just no red flag; the dump-diff gates remain the authority).
+- **Host truth for the target claim:** the dev Mac is 8 logical cores / 24GB —
+  literally the P1 target class. Its constraint is transient DISK (fresh kernel-
+  scale init currently needs ~25GB+ free for tree+DB+WAL until the WAL fix lands).
+
+**Revised P1 order: (1) WAL containment → (2) memory-aware, cgroup-honest pool
+sizing → (3) re-run the 8-core measurement (container at ≥12GB or the Mac with
+disk headroom) → then profile what remains.** The <10min-on-8-cores target stands.
 
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
