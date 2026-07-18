@@ -904,6 +904,44 @@ each ~16min), then the fix in two cadence iterations:
   without full-park folds — e.g. passive-checkpoint nudges at the recycle
   boundary) > backpressure byte volume > recreate.
 
+#### 7a.8 cFnPtr calibration round (2026-07-18) — the 230s decomposed; fuse-then-link is step 1
+
+Three quick measurements before any port, two of them killing assumptions:
+
+- **JS strip rewrite: killed by measurement.** stripCStyle's `split('')`
+  looked like allocator pathology; a segment-builder rewrite (byte-identical,
+  pinned by `__tests__/strip-cstyle-differential.test.ts` — kept as the
+  oracle for any future rewrite) measured **1.0×** on 15.1M chars of linux
+  C. V8's scan rate is the honest cost: **~73MB/s**, and 283k strips ≈ 4
+  strips/file × ~20KB × that rate ≈ the observed 78s. The strip lever is
+  the **4× redundancy** (all-or-nothing cache declined at 6–7GB → every
+  sweep re-strips), not the scanner.
+- **E-stage regexes alone: ~46MB/s → ~30s of E's 95s.** DISPATCH_RE +
+  ARRAY_DISPATCH_RE over stripped kernel/ text yield 1,112 matches / 15.1M
+  chars. The other ~65s is per-match logic, body slicing, lineAt, and
+  getNodesInFile. A native regex scan alone caps at −30s.
+- **Calibrated attack for the ~230s, re-ordered:**
+  1. **Fuse-then-link refactor (TS, step 1):** one per-file extraction pass
+     computes strip ONCE and collects {function macros, object macros,
+     defined sets, struct fields, raw registration matches, raw dispatch
+     matches, per-function declared-receiver types}; a text-free global
+     linking pass then builds registries and edges. Kills the 4× strip
+     (−~58s) + repeated reads (−~8s) + part of E's slicing overhead.
+     Parity discipline: collectors insert in the same file order the
+     global passes iterate today (Map insertion order = current registry
+     order), FANOUT_CAP and match-evaluation order preserved per function;
+     gate = edge-set hash vs the live kernel DB (§7a.4 probe) + linux dump
+     sha. The chain/receiver resolution must be pre-collected as per-file
+     declared-type tables so linking never touches text.
+  2. **Native per-file extractor (step 2):** the same boundary then accepts
+     a Rust implementation of the per-file pass (raw text in, collected
+     records out — no preParse interaction; the synthesizer reads raw disk
+     text). Bug-for-bug regex semantics required; worth it only for the
+     remaining ~100s of per-file scan+logic after step 1 lands.
+- Note for step 2 sizing: strip at native memchr rates (~500MB/s+) would
+  be ~6-10s for the full corpus even before redundancy cuts — but marshal
+  (UTF-16↔UTF-8 across napi) eats seconds at GB scale; batch the calls.
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
