@@ -85,10 +85,15 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       most SYMBOLS on deferred files; the real win is EDGES (+6,585),
       phantom cleanup, and native-path coverage. Remaining deferral is
       policy-skips (CONFIG interleaves, TP_PROTO DSL, module_init-no-semi)
-      + small buckets — this lever is largely SPENT. Queue now: **per-ref
-      resolution path** (the core-invariant superphase) > backpressure
-      ~120s (checkpoint I/O floor) > E-scan/settle/read-mapping (~70–90s
-      each, approaching honest work).
+      + small buckets — this lever is largely SPENT. Per-ref measurement
+      round DONE 2026-07-18 (§7a.6): fresh 2c/8c stage tables; the pool
+      double-buffer WORKS (8c settle 3.6s — "core-invariant" superseded);
+      2c record now 16.5min, 8c range 15.0–16.4 (n=2). Two cache
+      experiments killed by measurement same-day (nameCache scaling, lazy
+      candidates — §7a.6 has the numbers; code reverted). Queue now:
+      **writes-under-readers probe** (8c deletes+inserts +102s under the
+      pool — the biggest attributed delta) > **cFnPtr native site
+      extraction** (synthesis ~230s) > backpressure byte volume > recreate.
 - [x] **R7a. C/C++ port** — DONE 2026-07-17, same-day walker+gates after the
       survey (#1344) and grammar vendoring (#1345). One dual-language walker
       (`codegraph-kernel/src/ccpp/`), preParse HOISTED to the route point
@@ -777,6 +782,73 @@ core-invariant resolution superphase. Deferral cuts can't materially move the
 8c envelope (parse is already at the writer lane); they remain queued for
 graph richness + the 2c/low-core envelope. The 8c target now lives or dies on
 the per-ref resolution path (§7a.2's lever (a)).
+
+#### 7a.6 Per-ref path measurement round (2026-07-18) — fresh tables, two falsifications, two live levers
+
+Fresh `CODEGRAPH_RESOLVE_PROFILE` tables on the round-2 build (v7.2-rc2 tree,
+cg1212), then two cache experiments run against them — both killed by
+measurement, code reverted same-day; this section is what survives.
+
+| stage (batch loop) | 2c sequential (clean host) | 8c pool-4 |
+|---|---|---|
+| read | 37.0s | 33.9s |
+| settle (resolveOne) | 79.7s | **3.6s** |
+| backpressure | 138.3s | 121.9s |
+| createEdges | 3.4s | 7.6s |
+| insertEdges | 33.8s | **55.3s** |
+| deletes | 37.7s | **118.8s** |
+| marks | 5.3s | 6.5s |
+| **loop total** | **339s** | **357s** |
+
+2c: superphase 645s (loop + synth 251.6s [cFnPtr ~230: E 95.0 + strip 78.5
+at n=283k, budget-declined again + C/D 88.8] + recreate 54.5); envelope
+**16.5min — the new 2c record** (the 17.1 r2-gate figure carried host
+contamination). Settle decomposition: exact-match 35.1s @ 11µs × 3.17M,
+import 16.9s, fail:calls 9.2s × 1.63M. 8c: superphase 655.5s (+ synth 242.6
++ recreate 56.1), envelope 14.95min — **n=2 range 15.0–16.4min with the
+morning's run; report ranges, never single runs on this box.** 8c parse
+178.5s: round 2's deferral cuts DID move the 8c parse wall (202.6 → 178.5)
+— §7a.5's "writer-floor won't move" prediction was partly wrong.
+
+- **The pool double-buffer WORKS.** settle 3.6s at 8c — the workers absorb
+  the entire 3.17M exact-match population (12–17s per worker, parallel).
+  §7a.2's "resolution is core-invariant" framing is superseded: the 8c cost
+  was never resolveOne.
+- **THE 8c anomaly — writes-under-readers:** deletes 37.7 → 118.8s (+81)
+  and insertEdges 33.8 → 55.3s (+22) with 4 readonly workers attached.
+  Main-thread B-tree writes run ~3× slower under the pool. Mechanism
+  UNPROVEN — candidates: page-cache competition (4 × 32MB worker caches +
+  reads), WAL read-through depth while readers hold positions, wal-index
+  lock contention. Next probe: instrument (per-op delete timing vs worker
+  activity windows), then either shorten reader hold-times (worker
+  connection recycling at the barrier — §7a.1's original fix direction,
+  never built) or cut delete volume. Potential ≈ −100s at 8c.
+- **Killed by measurement #1 — nameCache scaling (the 5k-thrash theory).**
+  v1: budget-scaled classic LRU (~478k entries) → settle 102.7s,
+  exact-match 52.7s @ 17µs — WORSE; delete+set-per-get churn on a huge Map
+  plus resident-array GC ate more than the SQLite statements saved. v2:
+  mutation-free second-chance cache at 250k → exact-match 37.9s @ 12µs ≈
+  the 35.1s baseline. Verdict: the 11µs is NOT refetch overhead — the 5k
+  cache already holds the true Zipf head, the tail doesn't repeat enough
+  to cache at any size, and the floor is the per-ref JS around one indexed
+  lookup. Both variants byte-correct (counts 2,049,153/6,413,518; git dumps
+  byte-identical) — correctness was never the issue. Code reverted; the
+  second-chance design lives in this entry if a big-RAM-validated attempt
+  ever wants it.
+- **Killed by measurement #2 — lazy `candidates` JSON parse:** read stage
+  37.0 → 38–40s across variants (flat). The eager parse was never the read
+  cost; row materialization + the statement walk is. Reverted.
+- **Levers, re-ranked:** writes-under-readers probe (+102s at 8c — the
+  single biggest attributed delta) > cFnPtr NATIVE SITE EXTRACTION
+  (synthesis ~230s: emit fn-ptr assignment sites from the C walker at parse
+  time for the now-66% kernel-routed population — E-scan 95s + reads + much
+  of strip 78s die; needs bug-for-bug regex-semantics parity in Rust and
+  the raw-vs-preParsed scan-text question settled first) > backpressure
+  byte volume (~122–138s I/O floor; value-neutral schema interning is
+  migration-wide — parked) > recreate 54–70s.
+- Box note: cg1212's 6–7GB deliberately degrades the cFnPtr strip cache
+  (~80s paid in-container that a 24GB target-class box gets back free) —
+  container numbers UNDERSTATE the true 8-core-class target.
 
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
