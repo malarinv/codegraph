@@ -66,12 +66,29 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       envelope now **19.1min on a substantially RICHER graph** (the new
       preParse blanks recover previously-error-swallowed code; wasm-arm on
       the same graph is 22.9min — the 17.6 record was the old smaller graph
-      and isn't directly comparable). The <10min-on-8c target remains open;
-      levers left, ranked: **C/C++ deferral cuts (58% of linux files still
-      defer to wasm — each recovered idiom moves parse toward the native
-      floor)** > backpressure ~120s (checkpoint I/O floor) > E-scan/settle/
-      read-mapping (~70–90s each, approaching honest work) > the 8c re-run
-      formality.
+      and isn't directly comparable). 8c re-run DONE post-R7a (§7a.5):
+      **16.4min** (pre-R7a record 18.3min), EXIT 0, counts == both 2c arms,
+      WAL 1.34GB. The <10min-on-8c target remains open, and the re-run
+      re-ranked the levers honestly: at 8c the parse-loop (202.6s) is
+      already AT the single-writer floor, so **the target gap is ~entirely
+      the core-invariant resolution superphase (715s ≈ 12 of the 16.4min)
+      — the per-ref path is THE 8c lever**. C/C++ deferral round 2 DONE
+      2026-07-18 (full record: checklist doc): eight new C-only preParse
+      passes + word-list extensions took kernel/+mm/ deferral
+      **58.6% → 33.9%** (git 16.1 → 12.2%, redis 25.3 → 24.1%,
+      fmt/protobuf unchanged — cpp-dominant, correct no-op), five-repo
+      sweeps 0-diff, linux full-tree both arms **2,049,153 / 6,413,518**
+      with **byte-identical dumps** (10,446,478 lines, sha `6dd1185b…`);
+      kernel-arm parse-loop **356 → 306s** at 2c, envelope ~17.1min
+      (host-contaminated, indicative). Honesty note: full-graph node
+      deltas are small (+858) — wasm error recovery was already salvaging
+      most SYMBOLS on deferred files; the real win is EDGES (+6,585),
+      phantom cleanup, and native-path coverage. Remaining deferral is
+      policy-skips (CONFIG interleaves, TP_PROTO DSL, module_init-no-semi)
+      + small buckets — this lever is largely SPENT. Queue now: **per-ref
+      resolution path** (the core-invariant superphase) > backpressure
+      ~120s (checkpoint I/O floor) > E-scan/settle/read-mapping (~70–90s
+      each, approaching honest work).
 - [x] **R7a. C/C++ port** — DONE 2026-07-17, same-day walker+gates after the
       survey (#1344) and grammar vendoring (#1345). One dual-language walker
       (`codegraph-kernel/src/ccpp/`), preParse HOISTED to the route point
@@ -740,6 +757,26 @@ algorithmic wins only.
 **Levers remaining, re-ranked:** parse 338s (R7a C/C++ port — the last big
 rock) > backpressure ~120s (checkpoint I/O floor) > E-scan 69–93s (approaching
 honest regex work over 1.5GB) > settle 88s > read-mapping 57s.
+
+#### 7a.5 8-core re-run, post-R7a (2026-07-17) — 16.4min; the 8c gap is now all resolution
+
+Same provisioning as the §7a.2 retry (cg1212 at cpuset 0-7 / 7GB), the deployed
+R7a build, fresh init of the v7.2-rc2 tree: **EXIT 0, envelope 981s = 16.4min**
+(pre-R7a 8c record: 18.3min — and that was the smaller pre-blank graph).
+Counts **2,048,295 / 6,406,933 == both 2c arms**; WAL peak 1.34GB (same
+contained regime as 1.09–1.57GB records). Phases: parse-loop **202.6s**
+(pre-R7a all-wasm 8c: 208.7s — both sit ON the single-writer store floor, so
+8c parse is writer-bound, not extraction-bound) · resolution superphase
+**715.0s** (was 835.9s) containing callback-synthesis **257.4s** (was 338.7s)
+and edge-index-recreate 52.0s · maintenance 47.6s. The −1.9min vs the record
+is the post-#1336 rounds (#1339 countGuard, #1341 cFnPtr, R7a native parse +
+defer-reuse) landing at 8c for the first time.
+
+**Consequence for the <10min target:** ~12 of the 16.4 minutes are the
+core-invariant resolution superphase. Deferral cuts can't materially move the
+8c envelope (parse is already at the writer lane); they remain queued for
+graph richness + the 2c/low-core envelope. The 8c target now lives or dies on
+the per-ref resolution path (§7a.2's lever (a)).
 
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
