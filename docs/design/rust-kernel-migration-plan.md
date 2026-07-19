@@ -942,6 +942,62 @@ Three quick measurements before any port, two of them killing assumptions:
   be ~6-10s for the full corpus even before redundancy cuts — but marshal
   (UTF-16↔UTF-8 across napi) eats seconds at GB scale; batch the calls.
 
+#### 7a.9 cFnPtr fuse-then-link step 1 landed (2026-07-19) — pass −22%, strips halved
+
+Step 1 shipped, with one deliberate deviation from the §7a.8 sketch. The
+"text-free global linking" ideal is unreachable at byte-parity without
+retaining per-file text or macro tables, and a sizing probe on the linux tree
+killed retention: **6.1M `#define` lines** (the amdgpu register headers alone
+are most of them — 565MB of define text), and unrestricted initializer-body
+capture is a #1212-class hazard. What ships instead:
+
+- **One extraction sweep** (read+strip per file exactly once): typedef names,
+  per-struct-node field declarations parsed structurally with fn-pointer
+  classification DEFERRED (typedef sets aren't complete mid-sweep), resolved
+  local includes, an alias-shaped-object-macro name set, and per-file
+  SURVIVAL FILTERS — distinct init type tokens, array element types,
+  inline-struct summaries, field-assign pairs, dispatch fields/array names.
+  All interned; a few MB at kernel scale (measured distinct: 110k assign
+  pairs, 87.6k init tokens, 38.7k dispatch fields; only 16% of files have any
+  dispatch-shaped match at all).
+- **Linking replays the ORIGINAL pass bodies verbatim**, gated by the
+  filters: struct layouts register by replaying the struct kind-scan (rowid
+  order — same-name precedence is order-sensitive), and the
+  registration/propagation/dispatch loops run only for surviving files, whose
+  text is lazily re-stripped (LRU-served). Filters only ever over-approximate
+  (full-file no-skip scans ⊇ the jump-cursor/per-body scans the real passes
+  run), and a filtered-out file is one where every match fails the pass's own
+  gates before any side effect — so parity is by construction, not by hope.
+  Macro tables stay lazy (LRU + strip-on-miss) per the 6.1M-defines probe.
+- **Why not pure one-sweep C:** the inline-struct scan's cursor jump is gated
+  on the fn-ptr-field test, which needs the complete typedef sets — a
+  collect-time emulation diverges on the gate-fail rescan path. Keeping
+  today's scan code and paying a filtered second strip is the parity-safe
+  trade.
+
+Measured (8c cg1212, quiet host, fresh kernel init): cFnPtr sub
+**A=94.5s B=1.5s C=39.7s D=24.8s E=18.5s = 179s vs the §7a.8 ~230s (−22%)**;
+strips **283.5k → 132.4k** (4.44 → 2.08/file; 78s → 46.6s); stage E collapsed
+95 → 18.5s (survivor-only slicing/getNodesInFile), C+D 89 → 64.5s;
+callback-synthesis phase 250 → **199.9s**. Standalone probe-to-probe on the
+same live DB (warm cache): 139 → 122s. Resolution superphase unaffected
+(622.7s ≈ #1362's 633.6). Under the −70-90s hope — the honest ledger is that
+~0.6 sweeps of survivor re-strips + the unchanged include-unit machinery stay,
+and A now carries all regex scans.
+
+Gates, all green: probe-hash identical on the live kernel DB (279,335 edge
+rows, `f6e1713d…` both builds); git/redis/vim/SameBoy full dumps
+byte-identical old-vs-new (705/852/433/180 fn-ptr edges — macro tables,
+`commands.def`, `#ifdef` include-units, inline structs, bare arrays all
+exercised); kernel-parity 0-diffs on git/redis/fmt/protobuf with deferral
+unchanged (12.2/24.1/42.5/25.7%); linux counts exact 2,049,153/6,413,518;
+linux dump sha reproduced (`6dd1185b…`); full suite green.
+
+Step 2's boundary is now stage A verbatim: raw text in → records out, no
+graph access inside the sweep except `getNodesInFile` for struct extents. Its
+94.5s (46.6s strip + scans) is the native-extractor prize; C's 39.7s
+(macro-env + include units) and D's 24.8s stay TS.
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
