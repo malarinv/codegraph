@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { stripCommentsForRegex } from '../src/resolution/strip-comments';
+import { getKernel } from '../src/extraction/kernel/loader';
 
 /**
  * The pre-optimization split('')-based stripCStyle, kept verbatim as the
@@ -111,5 +112,34 @@ describe('stripCStyle segment-builder vs split-based oracle', () => {
   it('comment-free input returns the identical string (zero-copy path)', () => {
     const src = 'static int add(int a, int b) {\n\treturn a + b;\n}\n';
     expect(stripCommentsForRegex(src, 'c')).toBe(src);
+  });
+});
+
+// The native kernel's C stripper (codegraph-kernel/src/cfnptr.rs) blanks per
+// UTF-16 code unit precisely so its output is string-identical to the TS
+// stripper — the cFnPtr extraction sweep's scanners then run over the same
+// character stream on both paths. Pinned here against the same fixtures and
+// randomized corpus as the TS rewrite.
+const kernelStrip = getKernel()?.cfnptrStripC;
+describe.runIf(typeof kernelStrip === 'function')('native cfnptrStripC vs TS stripper (c mode)', () => {
+  for (const [name, src] of FIXTURES) {
+    it(`fixture: ${name}`, () => {
+      expect(kernelStrip!(src)).toBe(stripCommentsForRegex(src, 'c'));
+    });
+  }
+
+  it('randomized differential (seeded, 500 cases)', () => {
+    let seed = 0x2fn;
+    const rand = (max: number): number => {
+      seed = (seed * 6364136223846793005n + 1442695040888963407n) & 0xffffffffffffffffn;
+      return Number(seed % BigInt(max));
+    };
+    const ATOMS = ['/*', '*/', '//', '\n', '"', "'", '`', '\\', 'x', ' ', '/', '*', 'é', '🚀', '\r\n', 'int a;'];
+    for (let caseN = 0; caseN < 500; caseN++) {
+      let s = '';
+      const len = rand(40);
+      for (let k = 0; k < len; k++) s += ATOMS[rand(ATOMS.length)]!;
+      expect(kernelStrip!(s), `case ${caseN}: ${JSON.stringify(s)}`).toBe(stripCommentsForRegex(s, 'c'));
+    }
   });
 });

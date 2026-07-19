@@ -88,6 +88,8 @@ import type { MaybeYield } from './cooperative-yield';
 import { memoryBudgetBytes } from './memory-budget';
 import { LRUCache } from './lru-cache';
 import { stripCommentsForRegex } from './strip-comments';
+import { getKernel } from '../extraction/kernel/loader';
+import type { CfnptrFactsOut, CfnptrFileIn } from '../extraction/kernel/loader';
 
 const C_CPP_EXT = /\.(c|h|cc|cpp|cxx|hpp|hh|hxx|cppm|ipp|inl|tcc)$/i;
 const FN_KINDS = new Set(['function', 'method']);
@@ -627,8 +629,93 @@ export async function cFnPointerDispatchEdges(
   };
 
   // ---- Stage A: the extraction sweep — ONE read + strip per file ----
+  //
+  // Two implementations, record-identical by the differential suite:
+  //   • native (task #5 step 2): the kernel's `cfnptrScanFiles` strips and
+  //     scans a BATCH of files per NAPI call (codegraph-kernel/src/cfnptr.rs —
+  //     hand-rolled byte machines replicating the JS regex semantics), and the
+  //     TS side only reads files, ships batches, and interns the returned
+  //     facts. Include-path resolution stays here (it needs the filesystem).
+  //   • JS: the original sweep, kept verbatim — the fallback for platforms
+  //     without a kernel binary, older binaries (feature detection), the
+  //     CODEGRAPH_KERNEL=0 kill switch, and CODEGRAPH_KERNEL_CFNPTR=0 (this
+  //     scanner's own switch).
+  const kernel =
+    process.env.CODEGRAPH_KERNEL === '0' || process.env.CODEGRAPH_KERNEL_CFNPTR === '0'
+      ? null
+      : getKernel();
+  const nativeSweep =
+    kernel && typeof kernel.cfnptrScanFiles === 'function' ? kernel.cfnptrScanFiles.bind(kernel) : null;
+
+  const mergeNativeFacts = (file: string, out: CfnptrFactsOut): void => {
+    for (const t of out.fnPtrTypedefs) fnPtrTypedefs.add(intern(t));
+    for (const t of out.fnTypeTypedefs) fnTypeTypedefs.add(intern(t));
+    for (const so of out.structs) {
+      if (!so.parsed) continue; // body never parsed — the JS sweep records nothing either
+      rawFieldsByNode.set(
+        so.id,
+        so.fields.map((f) => ({ name: f.name || null, index: f.index, ptr: f.ptr, type: f.type }))
+      );
+    }
+    for (const t of out.inlineTags) inlineTags.add(intern(t));
+    for (const t of out.aliasNames) aliasNames.add(intern(t));
+    const includes: string[] = [];
+    for (const cap of out.includes) {
+      if (!INCLUDABLE_EXT.test(cap)) continue;
+      const t = resolveInclude(file, cap);
+      if (t) includes.push(intern(t));
+    }
+    if (
+      out.initTokens.length || out.arrayElems.length || out.inlinePtr || out.inlineTypes.length ||
+      out.dPairs.length || out.dispatchFields.length || out.arrayDispatchNames.length || includes.length
+    ) {
+      factsByFile.set(file, {
+        initTokens: out.initTokens.length ? out.initTokens.map(intern) : null,
+        arrayElems: out.arrayElems.length ? out.arrayElems.map(intern) : null,
+        inlinePtr: out.inlinePtr,
+        inlineTypes: out.inlineTypes.length ? out.inlineTypes.map(intern) : null,
+        dPairs: out.dPairs.length ? out.dPairs.map(intern) : null,
+        dispatchFields: out.dispatchFields.length ? out.dispatchFields.map(intern) : null,
+        arrayDispatchNames: out.arrayDispatchNames.length ? out.arrayDispatchNames.map(intern) : null,
+        includes: includes.length ? includes : NO_INCLUDES,
+      });
+    }
+  };
+
   let tPass = Date.now();
-  for (const file of files) {
+  if (nativeSweep) {
+    // Batch of 16 = the tick/onFraction cadence, so yielding and progress
+    // reporting keep their shape while the boundary crossing amortizes.
+    const BATCH = 16;
+    let batch: { file: string; input: CfnptrFileIn }[] = [];
+    const flush = (): void => {
+      if (batch.length === 0) return;
+      const outs = nativeSweep(batch.map((b) => b.input));
+      for (let bi = 0; bi < batch.length; bi++) mergeNativeFacts(batch[bi]!.file, outs[bi]!);
+      batch = [];
+    };
+    for (const file of files) {
+      await tick();
+      const rawText = raw(file);
+      if (!rawText) continue; // unreadable or empty — the JS sweep skips these too
+      const tN = prof ? Date.now() : 0;
+      const fileNodes = ctx.getNodesInFile(file);
+      if (prof) { prof.nodesMs += Date.now() - tN; prof.nodesN++; }
+      const structs: CfnptrFileIn['structs'] = [];
+      for (const st of fileNodes) {
+        if (st.kind !== 'struct') continue;
+        // sliceLinesPre semantics ride along: falsy startLine never parses,
+        // and `endLine ?? startLine` is applied here so the kernel sees the
+        // exact slice bounds the JS sweep would use.
+        structs.push({ id: st.id, startLine: st.startLine ?? 0, endLine: st.endLine ?? st.startLine ?? 0 });
+      }
+      batch.push({ file, input: { text: rawText, structs } });
+      if (batch.length >= BATCH) flush();
+    }
+    flush();
+  }
+  // JS sweep (fallback path — see the stage comment above).
+  if (!nativeSweep) for (const file of files) {
     await tick();
     const s = src(file);
     if (!s) continue;

@@ -998,6 +998,57 @@ graph access inside the sweep except `getNodesInFile` for struct extents. Its
 94.5s (46.6s strip + scans) is the native-extractor prize; C's 39.7s
 (macro-env + include units) and D's 24.8s stay TS.
 
+#### 7a.10 cFnPtr native sweep landed (2026-07-19) — step 2 done, pass 230→151s across the arc
+
+Step 2 shipped: `cfnptr_scan_files` in the kernel (codegraph-kernel/src/
+cfnptr.rs) runs the entire extraction sweep natively — strip + all ten
+scanners — batched 16 files per NAPI call; the TS sweep remains as the
+fallback (no binary, feature detection against older binaries,
+`CODEGRAPH_KERNEL=0`, or the scanner's own `CODEGRAPH_KERNEL_CFNPTR=0`).
+What made it land at byte-parity:
+
+- **Hand-rolled byte machines, not the regex crate.** The JS engine's
+  semantics are the spec: `\w`/`\b` are ASCII while `\s` is the Unicode
+  class (NBSP/U+2000-200A/FEFF — decoded explicitly from UTF-8), alternation
+  order, `lastIndex` resume, and the observable backtracking dimensions
+  (INIT/ARRAY modifier-count and `struct`/star/bracket optionals, DISPATCH's
+  greedy segment loop) are reproduced structurally; greedy-only shortcuts are
+  taken solely where analysis shows backtracking can never rescue a match
+  (documented per scanner).
+- **The native stripper blanks per UTF-16 code unit** (two spaces for an
+  astral char), so its output is string-identical to the TS stripper — the
+  scanners run over the very character stream the JS regexes see, and the
+  strip differential oracle gained a kernel arm pinning that equality on the
+  same fixtures + 500 seeded random cases.
+- **Gates, all green:** record/edge differential suite (adversarial fixture
+  project indexed native-vs-JS: identical edge streams; CRLF, NBSP,
+  continuations, decoy strings, unterminated comments, backtracking shapes);
+  repo differential on git/redis/vim/SameBoy (edge streams IDENTICAL,
+  705/852/433/180); probe-hash on the live kernel DB reproduced
+  `f6e1713d…` (279,335 rows) exactly; linux init counts exact
+  2,049,153/6,413,518 and dump sha `6dd1185b…` reproduced; full suite green
+  ×2 (153 files / 2588).
+
+Measured (8c cg1212, quiet host — one contaminated run discarded: the Mac
+slept mid-init on battery and froze the VM, inflating resolution 4×; pmset
+log confirmed, re-run caffeinated): cFnPtr sub **A=47.9s B=1.1 C=40.9 D=24.1
+E=36.8 = 150.9s** vs step 1's 179s (−28s) and the pre-arc 230s (**−79s
+cumulative, −34%**). The sweep itself halved (94.5 → 47.9s; JS strips
+132.4k → 68.9k — exactly the sweep's share moved native). E's attributed
+wall grew (18.5 → 36.8s): parallel synthesis overlap shifted as A finishes
+earlier — stage walls absorb concurrent passes' contention; the phase total
+is the honest number and **callback-synthesis fell 199.9 → 171.1s**.
+Remaining cFnPtr ledger: C 40.9s (macro envs + include units, TS),
+E's replay + overlap, D 24.1s, A's remaining 47.9s (reads, batching,
+interning, DB struct extents — diminishing). The pass is no longer the
+dominant synthesis lever; next per §7a.7 ranking: continuous-shallow WAL,
+backpressure bytes.
+
+Deploy note: this change ships RUST code — dist-only deploys are no longer
+sufficient for it; rebuild the `.node` per platform (cg1212: cargo build in
+`rust:1-bookworm` with `CARGO_TARGET_DIR=target-linux`, stage the `.so` as
+`prebuilds/linux-arm64/codegraph-kernel.node`).
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
