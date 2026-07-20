@@ -18,12 +18,17 @@ use tree_sitter::Language;
 extern "C" {
     fn tree_sitter_kotlin() -> *const ();
 }
+// Vendored lua grammar (build.rs-compiled C — the wasm's v0.4.1 revision is
+// not on crates.io; see grammars/lua and the lua-luau checklist).
+extern "C" {
+    fn tree_sitter_lua() -> *const ();
+}
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 16] = [
+pub const LANGUAGES: [&str; 18] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php", "swift", "kotlin", "r",
+    "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -60,6 +65,14 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         // R7b batch 4: crate =1.2.0, sha-identical to the r-lib v1.2.0 tag
         // the vendored wasm was built from (r checklist §Grammar prep).
         "r" => Some(tree_sitter_r::LANGUAGE.into()),
+        // R7b batch 4: v0.4.1 vendored C compiled in build.rs (revision not
+        // on crates.io — the wasm is the v0.4.1 tag, table-identical).
+        "lua" => {
+            Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_lua) }.into())
+        }
+        // R7b batch 4: crate =1.2.0, sha-identical to the v1.2.0 tag the
+        // vendored wasm was built from (lua-luau checklist §Grammar prep).
+        "luau" => Some(tree_sitter_luau::LANGUAGE.into()),
         _ => None,
     }
 }

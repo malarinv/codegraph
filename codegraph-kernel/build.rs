@@ -20,4 +20,23 @@ fn main() {
     c.flag_if_supported("-utf-8"); // msvc
     c.compile("tree-sitter-kotlin");
     println!("cargo:rerun-if-changed=grammars/kotlin");
+
+    // Lua grammar — vendored C (second vendored-grammar-C language): the
+    // vendored wasm is tree-sitter-grammars/tree-sitter-lua v0.4.1 (tag
+    // 816840c592), which is NOT on crates.io (only 0.1/0.2/0.5 exist; 0.5.0
+    // adds Lua-5.5 `global` — a future bump with its own gate). Sources are
+    // the v0.4.1 tag's checked-in generated artifacts, sha-recorded in the
+    // lua-luau checklist §Grammar prep:
+    //   parser.c  b34a362e43f0311f405721f3089e94f97f31da403b154d456d093e64609a4081
+    //   scanner.c 35bbd630b5a7421d46d2e91185eeea09bf78565d44cb676b63ca20d0f1b54bbd
+    let mut lua = cc::Build::new();
+    lua.include("grammars/lua");
+    lua.file("grammars/lua/parser.c");
+    lua.file("grammars/lua/scanner.c");
+    lua.flag_if_supported("-Wno-unused-parameter");
+    lua.flag_if_supported("-Wno-unused-but-set-variable");
+    lua.flag_if_supported("-Wno-trigraphs");
+    lua.flag_if_supported("-utf-8"); // msvc
+    lua.compile("tree-sitter-lua");
+    println!("cargo:rerun-if-changed=grammars/lua");
 }

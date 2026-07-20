@@ -48,7 +48,7 @@ if (paths.length === 0) {
   process.exit(2);
 }
 
-const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp', 'rust', 'csharp', 'ruby', 'php', 'swift', 'kotlin', 'r']);
+const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp', 'rust', 'csharp', 'ruby', 'php', 'swift', 'kotlin', 'r', 'lua', 'luau']);
 const EXTS = new Map([
   ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'],
   ['.tsx', 'tsx'], ['.js', 'javascript'], ['.mjs', 'javascript'],
@@ -65,6 +65,7 @@ const EXTS = new Map([
   ['.swift', 'swift'], // R7b
   ['.kt', 'kotlin'], ['.kts', 'kotlin'], // R7b
   ['.r', 'r'], // R7b batch 4 — real-world casing is `.R`; extname lowercased below
+  ['.lua', 'lua'], ['.luau', 'luau'], // R7b batch 4
 ]);
 
 /** Collect candidate files. */

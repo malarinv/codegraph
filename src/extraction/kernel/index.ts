@@ -87,6 +87,13 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // moustache-template pseudo-R file, both-arm): any deferral on an R sweep
   // is a walker-bug signal, not grammar reality.
   'r',
+  // R7b batch 4 (2026-07-20): one walker, two dialects. Parity swept 0-diff
+  // on kong/lazy.nvim/lua-resty-core (lua) + lune/Fusion (luau) + full-init
+  // dump-diffs byte-identical. Lua error incidence ~0% (any deferral is a
+  // walker-bug signal); luau 1.4–7.1% both-arm grammar reality (generic type
+  // packs, default type params) — a JUMP past ~10% is the bug signal.
+  'lua',
+  'luau',
 ]);
 
 /**

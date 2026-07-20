@@ -52,6 +52,11 @@ tree-sitter-swift = "=0.7.3"
 # predates the ABI-15 generator) — parity asserts same-revision, not
 # same-ABI (ruby precedent). Bump crate + wasm together.
 tree-sitter-r = "=1.2.0"
+# luau: the vendored wasm IS tree-sitter-grammars v1.2.0 and this crate's
+# tarball ships parser.c/scanner.c sha-identical to the tag (8f25bc17… /
+# a157bb52… — lua-luau checklist §Grammar prep). ABI 14. Lua itself is
+# vendored C (build.rs) — its v0.4.1 revision is not on crates.io.
+tree-sitter-luau = "=1.2.0"
 
 # tree-sitter-language: the version-agnostic LanguageFn shim for the vendored
 # kotlin grammar C (see build.rs — no kotlin crate dep is possible).
