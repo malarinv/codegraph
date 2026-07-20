@@ -41,6 +41,11 @@ tree-sitter-ruby = "=0.23.1"
 # php: the walker calls LANGUAGE_PHP (the full HTML-interleaving variant the
 # wasm ships) — NEVER LANGUAGE_PHP_ONLY, which errors on leading HTML.
 tree-sitter-php = "=0.24.2"
+# swift: the vendored wasm is built from THIS crate's tarball src/ (the tag's
+# checked-in parser.c is an older ABI-14 generation that can never sha-match;
+# grammar.json rules are JSON-equal — swift checklist header). parser.c is
+# ~20MB generated — expect slow compiles.
+tree-sitter-swift = "=0.7.3"
 
 [build-dependencies]
 napi-build = "2"

@@ -15,9 +15,9 @@ use tree_sitter::Language;
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 13] = [
+pub const LANGUAGES: [&str; 14] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php",
+    "csharp", "ruby", "php", "swift",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -44,6 +44,9 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         // R7b: v0.24.2, the full HTML-interleaving variant — LANGUAGE_PHP,
         // NEVER LANGUAGE_PHP_ONLY (which errors on leading HTML).
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        // R7b: crate 0.7.3 — the vendored wasm is built from this crate's own
+        // tarball src/ (table identity by construction; see grammars.ts).
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
         _ => None,
     }
 }

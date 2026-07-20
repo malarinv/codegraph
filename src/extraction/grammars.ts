@@ -313,6 +313,15 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // tarball. Replaces the ^0.22 tree-sitter-wasms build (ABI 14 → 15). NOT
   // graph-neutral — the classified delta list lives in the php checklist doc.
   'php',
+  // R7b (Swift kernel port prep): tree-sitter-swift crate 0.7.3. Built from
+  // the CRATE TARBALL's src/ (NOT a tag sha-match: alex-pinkus keeps
+  // generated files off main and the 0.7.3-with-generated-files tag ships an
+  // older ABI-14 generation; grammar.json rules are JSON-equal, and the crate
+  // tarball is byte-for-byte what the kernel's cargo build compiles — table
+  // identity by construction). Replaces the ^0.4.0 tree-sitter-wasms build
+  // (ABI 13 → 15). NOT graph-neutral — delta is error-set membership only;
+  // classified list in the swift checklist doc.
+  'swift',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

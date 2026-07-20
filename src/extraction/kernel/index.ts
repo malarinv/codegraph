@@ -68,6 +68,12 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // symfony (13,950 files byte-parity) + full-init dump-diffs byte-identical
   // ×3. Deferral ≈0–0.1% (genuinely-broken fixtures) — default sweep guard.
   'php',
+  // R7b (2026-07-20): parity swept 0-diff on Alamofire/vapor/swift-nio (720
+  // clean files byte-parity; Alamofire's 348 #1020 property nodes reproduced
+  // exactly) + full-init dump-diffs byte-identical ×3. Swift error incidence
+  // is structurally 9–27% on BOTH arms (heavy #if conditionalization) —
+  // sweeps run --max-deferral 0.3; a deferral-rate JUMP is the bug signal.
+  'swift',
 ]);
 
 /**
