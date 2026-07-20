@@ -15,8 +15,8 @@ use tree_sitter::Language;
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 10] =
-    ["typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust"];
+pub const LANGUAGES: [&str; 11] =
+    ["typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust", "csharp"];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
     match language {
@@ -33,6 +33,9 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
         // R7b: v0.24.2, sha-matched with the vendored wasm (grammars.ts).
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        // R7b: 0.23.5, table-identical to the vendored ABI-15 wasm (#717;
+        // verified against the crates.io tarball — csharp checklist header).
+        "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
         _ => None,
     }
 }

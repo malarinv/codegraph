@@ -31,6 +31,10 @@ tree-sitter-go = "0.23"
 tree-sitter-c = "=0.24.2"
 tree-sitter-cpp = "=0.23.4"
 tree-sitter-rust = "=0.24.2"
+# csharp: the vendored wasm (#717) predates the kernel and was verified
+# table-identical to this crate's tarball (ABI 15, STATE_COUNT 8053, node-kind
+# and field tables — csharp checklist header). Bump crate + wasm together.
+tree-sitter-c-sharp = "=0.23.5"
 
 [build-dependencies]
 napi-build = "2"

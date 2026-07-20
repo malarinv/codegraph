@@ -54,6 +54,11 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // parser crates, 18%) error on BOTH arms — grammar-inherent, not a walker
   // signal.
   'rust',
+  // R7b (2026-07-20): parity swept 0-diff on serilog/Newtonsoft.Json/jellyfin
+  // (3,229 files byte-parity) + full-init dump-diffs byte-identical ×3.
+  // Deferral 0.05–3.3% — both-branches-kept `#if` damage that errors on BOTH
+  // arms (the preParse blanking hoist keeps the kernel's input identical).
+  'csharp',
 ]);
 
 /**
