@@ -1049,6 +1049,46 @@ sufficient for it; rebuild the `.node` per platform (cg1212: cargo build in
 `rust:1-bookworm` with `CARGO_TARGET_DIR=target-linux`, stage the `.so` as
 `prebuilds/linux-arm64/codegraph-kernel.node`).
 
+#### 7a.11 Continuous-shallow WAL probe (2026-07-19) — KILLED BY MEASUREMENT; fold I/O is a fixed budget
+
+The §7a.7 queue's next lever — close the gap between recycling's attributed
+write-stage costs and the valve-64 shallow floors via passive-checkpoint
+nudges at the recycle boundary — was probed in two shapes at 8c
+(`CODEGRAPH_RESOLVE_PROFILE` stage tables, caffeinated, same day/build,
+counts exact 2,049,153/6,413,518 in every arm):
+
+| arm | read | backpressure | insertEdges | deletes | recycle | resolution |
+|---|---|---|---|---|---|---|
+| baseline (main, post-#1365) | 37.2 | 148.8 (27 parks) | 59.3 | 81.1 | 0.2 | **575.1** |
+| nudge fire-and-forget | 36.4 | 97.7 (22 parks) | 37.7 | **170.6** | 0.2 | 588.9 |
+| nudge AWAITED | **16.6** | **16.8** (6 parks) | **31.4** | **50.0** | **207.4** | 587.3 |
+
+- **Fire-and-forget regressed**: the concurrent fold stole the keyed
+  deletes' I/O (81→171s), and — because a pass that ends while the writer
+  appends reports `log>checkpointed` and never advances the growth
+  baseline — the hard-cap parks kept firing anyway (143 nudges and STILL 22
+  parks: double folding).
+- **Awaited reached every §7a.7 floor** (read 16.6 vs valve-64's 16.8,
+  inserts 31.4 vs 27.8, deletes 50.0 vs 56.5 — even beat it) — and paid
+  exactly what it saved: 207.4s of attributed fold time at the boundary.
+  36 nudges instead of ~143: after a full fold the WAL WRAPS, the file stops
+  growing, and the size-based growth gate goes blind until the high-water
+  mark moves — each nudge therefore carried several recycles' backlog.
+- **The triangulated conclusion:** the phase's fold I/O is a fixed budget.
+  The baseline already hides most of it in overlapped off-thread timer
+  passes during pool-busy windows, paying attributed time only at hard-cap
+  parks; forcing MORE folding just relocates the cost (concurrent → delete
+  contention, awaited → boundary parks). All three arms land within ~2.5%
+  of each other; the "~45s gap to the shallow floor" (§7a.7) is illusory —
+  the floor costs its savings. Code reverted; the valve + recycling as
+  shipped in #1362 remain the optimum of this family.
+
+P1 queue after this kill: backpressure byte volume (value-neutral schema
+interning — migration-wide, parked, needs explicit approval) > recreate
+(~50-68s). The <10min-on-8c target's remaining mass sits in resolution's
+~575s superphase and parse's ~190s writer floor — both store-architecture
+arcs (§4d), which is also where the cbm dubbo bar lives.
+
 ### 7b. Arc 3 — graph richness (forensics-backed; adopt cbm's real extras, skip inflation)
 Priority order, each gated by the standard A/B + node-explosion probes:
 1. **Test→subject edges** (first-class `tests` edges at index time; we compute covering
