@@ -47,8 +47,13 @@ tree-sitter-php = "=0.24.2"
 # ~20MB generated — expect slow compiles.
 tree-sitter-swift = "=0.7.3"
 
+# tree-sitter-language: the version-agnostic LanguageFn shim for the vendored
+# kotlin grammar C (see build.rs — no kotlin crate dep is possible).
+tree-sitter-language = "0.1"
+
 [build-dependencies]
 napi-build = "2"
+cc = "1"
 
 [profile.release]
 lto = true

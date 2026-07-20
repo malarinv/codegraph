@@ -1,6 +1,16 @@
 # Kotlin kernel port (R7b) — the bug-for-bug checklist
 
-**Status: SURVEY COMPLETE (2026-07-20) — PORT NOT STARTED.** Survey basis: every
+**Status: PORT COMPLETE (2026-07-20)** — walker `codegraph-kernel/src/kotlin.rs`
++ the vendored-grammar-C build (codegraph-kernel/grammars/kotlin via build.rs
+cc — the mechanism's first use), all gates passed (bump dumps byte-identical
+old-vs-new ×3 as predicted; parity sweeps 0-diff okio 299/322 / okhttp
+531/580 / kotlinx.coroutines 1031/1082 with exactly the predicted 23/49/51
+deferrals; kernel-arm dumps byte-identical ×3; KMP expect/actual synthesis
+IDENTICAL — 412 edges both arms; kernel-kotlin-parity suite; DEFAULT_ROUTED
++= kotlin — 15 languages). One fixture note: the survey's torture.kt itself
+tripped the PHANTOM-error class (one-line class/object bodies) and deferred —
+the checked-in parity fixture reflows those to multi-line, and the phantom
+shape is pinned in the defer test instead. Survey basis: every
 TS-side branch a `.kt`/`.kts` file exercises, with file:line anchors as of
 **`a6c62d7`** (HEAD at survey time, clean main). Every grammar-shape claim below
 was **probed against both the production tree-sitter-wasms build and a fresh

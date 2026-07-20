@@ -24,6 +24,7 @@ mod docstring;
 mod ids;
 mod go;
 mod java;
+mod kotlin;
 mod langs;
 mod php;
 mod ruby;
@@ -221,6 +222,7 @@ pub fn extract_file(file_path: String, content: String, language: String) -> Res
         "ruby" => ruby::extract(&file_path, &content).map_err(Error::from_reason)?,
         "php" => php::extract(&file_path, &content).map_err(Error::from_reason)?,
         "swift" => swift::extract(&file_path, &content).map_err(Error::from_reason)?,
+        "kotlin" => kotlin::extract(&file_path, &content).map_err(Error::from_reason)?,
         _ => tsjs::extract(&file_path, &content, &language).map_err(Error::from_reason)?,
     };
     Ok(ExtractBuffers {

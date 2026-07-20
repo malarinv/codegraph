@@ -74,6 +74,13 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // is structurally 9–27% on BOTH arms (heavy #if conditionalization) —
   // sweeps run --max-deferral 0.3; a deferral-rate JUMP is the bug signal.
   'swift',
+  // R7b (2026-07-20): parity swept 0-diff on okio/okhttp/kotlinx.coroutines
+  // (1,861 clean files byte-parity; KMP expect/actual synthesis identical —
+  // 412 edges both arms on kotlinx.coroutines) + full-init dump-diffs
+  // byte-identical ×3. Deferral 4.7–8.5% both-arm grammar reality
+  // (fun-interface misparses + PHANTOM hasError files) — default sweep guard
+  // holds; a JUMP past ~10% is the bug signal.
+  'kotlin',
 ]);
 
 /**

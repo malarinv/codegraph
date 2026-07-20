@@ -322,6 +322,14 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // (ABI 13 → 15). NOT graph-neutral — delta is error-set membership only;
   // classified list in the swift checklist doc.
   'swift',
+  // R7b (Kotlin kernel port prep): fwcd tree-sitter-kotlin 0.3.8 (tag
+  // e1a2d5a), parser.c/scanner.c sha-matched crate↔tag; behavior-IDENTICAL
+  // to the tree-sitter-wasms build (0 CST/error disagreements across the
+  // gate repos) — a reproducibility re-vendor, ABI stays 14. The crates.io
+  // crate is UNUSABLE by the kernel (pins tree-sitter <0.23) and
+  // tree-sitter-kotlin-ng is a different grammar — the kernel compiles the
+  // same vendored C sources instead (codegraph-kernel/grammars/kotlin).
+  'kotlin',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

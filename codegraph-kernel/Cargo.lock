@@ -46,6 +46,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "codegraph-kernel"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "napi",
  "napi-build",
  "napi-derive",
@@ -58,6 +59,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-java",
  "tree-sitter-javascript",
+ "tree-sitter-language",
  "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-ruby",

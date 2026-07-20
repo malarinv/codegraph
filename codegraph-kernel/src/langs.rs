@@ -13,11 +13,17 @@
 
 use tree_sitter::Language;
 
+// Vendored kotlin grammar (build.rs-compiled C — no usable crate exists;
+// see grammars/kotlin and the kotlin checklist §Grammar prep).
+extern "C" {
+    fn tree_sitter_kotlin() -> *const ();
+}
+
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 14] = [
+pub const LANGUAGES: [&str; 15] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php", "swift",
+    "csharp", "ruby", "php", "swift", "kotlin",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -47,6 +53,10 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         // R7b: crate 0.7.3 — the vendored wasm is built from this crate's own
         // tarball src/ (table identity by construction; see grammars.ts).
         "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
+        // R7b: fwcd 0.3.8, vendored C compiled in build.rs (crate unusable).
+        "kotlin" => {
+            Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_kotlin) }.into())
+        }
         _ => None,
     }
 }
