@@ -59,6 +59,11 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // Deferral 0.05–3.3% — both-branches-kept `#if` damage that errors on BOTH
   // arms (the preParse blanking hoist keeps the kernel's input identical).
   'csharp',
+  // R7b (2026-07-20): parity swept 0-diff on sinatra/jekyll/rails (3,763
+  // files byte-parity, 0 deferrals — ruby error incidence is 0.00%) +
+  // full-init dump-diffs byte-identical ×3. Any deferral on a ruby sweep is
+  // a walker-bug signal, not grammar reality.
+  'ruby',
 ]);
 
 /**

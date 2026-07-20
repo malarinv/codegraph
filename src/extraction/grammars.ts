@@ -301,6 +301,11 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // parser.c/scanner.c sha-matched against the crates.io tarball. Replaces the
   // 2023-era tree-sitter-wasms build (ABI 14 → 15).
   'rust',
+  // R7b (Ruby kernel port prep): tree-sitter-ruby v0.23.1 (71bd32f),
+  // parser.c/scanner.c sha-matched against the crates.io tarball. Replaces the
+  // ^0.20.1 tree-sitter-wasms build. Content bump only — the tag's checked-in
+  // parser.c is still ABI 14 (predates the ABI-15 generator).
+  'ruby',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

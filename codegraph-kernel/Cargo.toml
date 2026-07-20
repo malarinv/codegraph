@@ -35,6 +35,9 @@ tree-sitter-rust = "=0.24.2"
 # table-identical to this crate's tarball (ABI 15, STATE_COUNT 8053, node-kind
 # and field tables — csharp checklist header). Bump crate + wasm together.
 tree-sitter-c-sharp = "=0.23.5"
+# ruby: content bump, ABI stays 14 (the v0.23.1 tag predates the ABI-15
+# generator) — kernel-grammar-parity asserts same-revision, not same-ABI.
+tree-sitter-ruby = "=0.23.1"
 
 [build-dependencies]
 napi-build = "2"
