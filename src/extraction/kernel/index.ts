@@ -81,6 +81,12 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // (fun-interface misparses + PHANTOM hasError files) — default sweep guard
   // holds; a JUMP past ~10% is the bug signal.
   'kotlin',
+  // R7b batch 4 (2026-07-20): parity swept 0-diff on dplyr/ggplot2/shiny +
+  // AnomalyDetection + full-init dump-diffs byte-identical ×3. R error
+  // incidence is ~0% (deferrals 0/0/0/1 across the gate repos — the 1 is a
+  // moustache-template pseudo-R file, both-arm): any deferral on an R sweep
+  // is a walker-bug signal, not grammar reality.
+  'r',
 ]);
 
 /**

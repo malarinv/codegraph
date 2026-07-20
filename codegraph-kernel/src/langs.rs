@@ -21,9 +21,9 @@ extern "C" {
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 15] = [
+pub const LANGUAGES: [&str; 16] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php", "swift", "kotlin",
+    "csharp", "ruby", "php", "swift", "kotlin", "r",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -57,6 +57,9 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         "kotlin" => {
             Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_kotlin) }.into())
         }
+        // R7b batch 4: crate =1.2.0, sha-identical to the r-lib v1.2.0 tag
+        // the vendored wasm was built from (r checklist §Grammar prep).
+        "r" => Some(tree_sitter_r::LANGUAGE.into()),
         _ => None,
     }
 }

@@ -46,6 +46,12 @@ tree-sitter-php = "=0.24.2"
 # grammar.json rules are JSON-equal — swift checklist header). parser.c is
 # ~20MB generated — expect slow compiles.
 tree-sitter-swift = "=0.7.3"
+# r: the vendored wasm IS r-lib v1.2.0 and this crate's tarball ships both
+# generated artifacts sha-identical to the tag (parser.c 6221657347…,
+# scanner.c 1209d11076… — r checklist §Grammar prep). ABI 14 (the tag
+# predates the ABI-15 generator) — parity asserts same-revision, not
+# same-ABI (ruby precedent). Bump crate + wasm together.
+tree-sitter-r = "=1.2.0"
 
 # tree-sitter-language: the version-agnostic LanguageFn shim for the vendored
 # kotlin grammar C (see build.rs — no kotlin crate dep is possible).

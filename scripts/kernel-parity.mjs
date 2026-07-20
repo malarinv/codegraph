@@ -48,7 +48,7 @@ if (paths.length === 0) {
   process.exit(2);
 }
 
-const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp', 'rust', 'csharp', 'ruby', 'php', 'swift', 'kotlin']);
+const KERNEL_LANGS = new Set(['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp', 'rust', 'csharp', 'ruby', 'php', 'swift', 'kotlin', 'r']);
 const EXTS = new Map([
   ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'],
   ['.tsx', 'tsx'], ['.js', 'javascript'], ['.mjs', 'javascript'],
@@ -64,6 +64,7 @@ const EXTS = new Map([
   ['.php', 'php'], ['.module', 'php'], ['.install', 'php'], ['.theme', 'php'], ['.inc', 'php'], // R7b
   ['.swift', 'swift'], // R7b
   ['.kt', 'kotlin'], ['.kts', 'kotlin'], // R7b
+  ['.r', 'r'], // R7b batch 4 — real-world casing is `.R`; extname lowercased below
 ]);
 
 /** Collect candidate files. */
@@ -78,8 +79,10 @@ function collect(p, out) {
     const base = path.basename(p);
     if (base === 'node_modules' || base === '.git' || base === 'dist' || base === '.codegraph') return;
     for (const e of fs.readdirSync(p)) collect(path.join(p, e), out);
-  } else if (EXTS.has(path.extname(p))) {
-    const lang = EXTS.get(path.extname(p));
+  } else if (EXTS.has(path.extname(p).toLowerCase())) {
+    // Lowercased to match the real indexer's routing (detectLanguage
+    // lowercases the extension — `.R` is the dominant real-world casing).
+    const lang = EXTS.get(path.extname(p).toLowerCase());
     // 'detect' (.h) resolves per file in the run loop; under --lang it rides
     // along whenever either C-family language is requested.
     const passes =
