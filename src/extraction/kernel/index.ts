@@ -48,6 +48,12 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // scripts/kernel-parity.mjs --max-deferral).
   'c',
   'cpp',
+  // R7b (2026-07-20): parity swept 0-diff on ripgrep/tokio/rust-analyzer
+  // (2,108 files byte-parity) + full-init dump-diffs byte-identical. Rust
+  // deferral is ~0% on normal repos; token-macro-table sources (rust-analyzer's
+  // parser crates, 18%) error on BOTH arms — grammar-inherent, not a walker
+  // signal.
+  'rust',
 ]);
 
 /**

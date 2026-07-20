@@ -127,8 +127,24 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       **19.1 min kernel-arm** (parse-loop 560 → 356s; R6 26.4 → P1 17.6 on
       the old smaller graph → 19.1 on the new richer one:
       2,048,295 nodes / 6,406,933 edges, two runs byte-same).
-- [ ] **R7b. Remaining long tail** per the tracker (§4) — ruby/php/csharp/rust/… T1s
+- [~] **R7b. Remaining long tail** per the tracker (§4) — ruby/php/csharp/… T1s
       are now ~1-day-each with the walker pattern; T3 may stay TS forever (fine).
+      **rust DONE 2026-07-20** (first R7b port): grammar bumped to
+      tree-sitter-rust v0.24.2 (crate `=0.24.2` + vendored wasm from tag
+      `77a3747`, parser.c/scanner.c sha-matched; replaces the 2023 ABI-14
+      tree-sitter-wasms build — wasm-path bump validated standalone: ripgrep/
+      tokio node sections IDENTICAL, small precision-positive edge churn only,
+      full suite green), walker `codegraph-kernel/src/rustlang.rs` (survey
+      artifact: rust-lang-kernel-port-checklist.md — isAsync dead-code,
+      impl-pushes-no-scope, trait-receiver bug on `impl Trait for Generic<T>`,
+      phantom const identifiers, use-binding triple emission, all preserved
+      bug-for-bug). Gates: parity sweeps **0 diffs** on ripgrep (101/101,
+      0 deferred) / tokio (790/790, 0 deferred) / rust-analyzer (1217/1488,
+      0 diffs; 271 deferrals are token-macro-table sources — `T![~]`, `[$]` —
+      that error on BOTH arms, grammar-inherent like fmt's C++ 42%); full-init
+      dump-diffs **byte-identical** ×3 (3,857 / 13,440 / 39,030 nodes);
+      DEFAULT_ROUTED += rust; kernel-rustlang-parity suite (torture + CRLF +
+      defer) in `npm test`.
 - [ ] **P2. Arc 3, graph richness** (§7b) — product-priority call, standard gates.
 - [ ] **P3. Parked items** (§7c) — only with explicit maintainer approval.
 
@@ -590,7 +606,8 @@ parity before porting the language.
 | go | `languages/go.ts` | T1 | crates.io | Third (tie). Value-reference edges ship here too (#897). **PORTED + DEFAULT-ON (§4e).** | ✅ |
 | ruby, php | dedicated files | T1 | crates.io | Straightforward; PHP property-receiver shapes (#1220/#1251) are RESOLUTION-side, unaffected. | ☐ |
 | csharp | `languages/csharp.ts` | T1 | crates.io | Plain. | ☐ |
-| rust, dart, scala, lua, luau, r | dedicated files | T1 | crates.io (luau/r/scala: verify crate freshness vs our wasm) | Long-tail T1; port opportunistically after the big five. | ☐ |
+| rust | `languages/rust.ts` | T1 | crates.io | **DONE (R7b #1, 2026-07-20)** — `rustlang.rs` walker; grammar bumped to v0.24.2 (crate + vendored wasm together). Parity 0-diff on ripgrep/tokio/rust-analyzer + dump byte-identical ×3; rust-analyzer's parser crates defer 18% (token-macro tables, both-arm parse errors — grammar-inherent). Quirk list: docs/design/rust-lang-kernel-port-checklist.md. | ☑ |
+| dart, scala, lua, luau, r | dedicated files | T1 | crates.io (luau/r/scala: verify crate freshness vs our wasm) | Long-tail T1; port opportunistically after the big five. | ☐ |
 | kotlin | `languages/kotlin.ts` | T1½ | crates.io | Expect/actual pairing is synthesis-side (fine); extraction is clean but validate against a KMP repo. | ☐ |
 | swift | shared + dedicated branch | T1½ | crates.io | **Trap:** in-class property extraction lives in `tree-sitter.ts`'s DEDICATED branch, not `swift.ts` (#1020 — Alamofire went 0→348 props). Gate on Alamofire. | ☐ |
 | c, cpp | `languages/c-cpp.ts` | **T2** | crates.io | **DONE (R7a, 2026-07-17)** — `ccpp/` walker; ALL pre-passes stayed TS-side via the route-point preParse hoist (+6 new blanks added during gating — see the checklist doc); content-based `.h` C-vs-C++ detection stays upstream at detectLanguage. Parity 0-diff + dump byte-identical on redis/git/fmt/protobuf/ALS. | ☑ |

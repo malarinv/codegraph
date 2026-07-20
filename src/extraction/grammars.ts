@@ -297,6 +297,10 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // the crates.io tarballs. `.metal`/`.cu` map to language 'cpp', so the
   // dialects ride the same (single, coherent) upgraded grammar.
   'c', 'cpp',
+  // R7b (Rust kernel port prep): tree-sitter-rust v0.24.2 (77a3747),
+  // parser.c/scanner.c sha-matched against the crates.io tarball. Replaces the
+  // 2023-era tree-sitter-wasms build (ABI 14 → 15).
+  'rust',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

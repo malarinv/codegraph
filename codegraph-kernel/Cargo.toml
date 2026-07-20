@@ -30,6 +30,7 @@ tree-sitter-go = "0.23"
 # (R7a prep, #1345). A patch bump here without re-vendoring breaks the match.
 tree-sitter-c = "=0.24.2"
 tree-sitter-cpp = "=0.23.4"
+tree-sitter-rust = "=0.24.2"
 
 [build-dependencies]
 napi-build = "2"
