@@ -64,6 +64,10 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // full-init dump-diffs byte-identical ×3. Any deferral on a ruby sweep is
   // a walker-bug signal, not grammar reality.
   'ruby',
+  // R7b (2026-07-20): parity swept 0-diff on monolog/laravel-framework/
+  // symfony (13,950 files byte-parity) + full-init dump-diffs byte-identical
+  // ×3. Deferral ≈0–0.1% (genuinely-broken fixtures) — default sweep guard.
+  'php',
 ]);
 
 /**

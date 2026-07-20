@@ -306,6 +306,13 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // ^0.20.1 tree-sitter-wasms build. Content bump only — the tag's checked-in
   // parser.c is still ABI 14 (predates the ABI-15 generator).
   'ruby',
+  // R7b (PHP kernel port prep): tree-sitter-php v0.24.2 (5b5627f), the FULL
+  // `php` grammar variant (HTML interleaving — php_only errors on leading
+  // HTML), built from the tag's checked-in php/src/parser.c + scanner.c
+  // (+ shared common/scanner.h), all sha-matched against the crates.io
+  // tarball. Replaces the ^0.22 tree-sitter-wasms build (ABI 14 → 15). NOT
+  // graph-neutral — the classified delta list lives in the php checklist doc.
+  'php',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

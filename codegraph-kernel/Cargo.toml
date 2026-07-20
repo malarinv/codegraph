@@ -38,6 +38,9 @@ tree-sitter-c-sharp = "=0.23.5"
 # ruby: content bump, ABI stays 14 (the v0.23.1 tag predates the ABI-15
 # generator) — kernel-grammar-parity asserts same-revision, not same-ABI.
 tree-sitter-ruby = "=0.23.1"
+# php: the walker calls LANGUAGE_PHP (the full HTML-interleaving variant the
+# wasm ships) — NEVER LANGUAGE_PHP_ONLY, which errors on leading HTML.
+tree-sitter-php = "=0.24.2"
 
 [build-dependencies]
 napi-build = "2"

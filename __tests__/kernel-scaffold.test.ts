@@ -73,11 +73,11 @@ describe.skipIf(!kernelBuilt)('kernel scaffold', () => {
   });
 
   it('TS/JS family + Java + Python + Go route to the kernel by default; others stay wasm', () => {
-    for (const lang of ['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'ruby'] as const) {
+    for (const lang of ['typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'ruby', 'php'] as const) {
       expect(kernelRoutes(lang), lang).toBe(true);
     }
-    expect(kernelRoutes('php')).toBe(false);
-    expect(tryKernelExtract('src/a.php', '<?php function f() {}\n', 'php')).toBeNull();
+    expect(kernelRoutes('kotlin')).toBe(false);
+    expect(tryKernelExtract('src/a.kt', 'fun f() {}\n', 'kotlin')).toBeNull();
     // CODEGRAPH_KERNEL_LANGS REPLACES the default set when present.
     process.env.CODEGRAPH_KERNEL_LANGS = 'tsx';
     expect(kernelRoutes('typescript')).toBe(false);
