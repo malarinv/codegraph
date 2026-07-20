@@ -513,6 +513,36 @@ during the parse phase, multi-file write transactions, buffer→bind without obj
 materialization. Note the #1320-arc post-mortem already measured statement batching
 and sorted inserts as ~zero on this path — B-tree maintenance is the floor.
 
+**Store-arc round 1 SHIPPED (2026-07-19): parse-lane index deferral.** The
+first named lever landed as `beginBulkParseLoad`/`endBulkParseLoad`
+(fresh-init only — incremental runs delete per-file rows through the
+file_path indexes): the parse window drops all 15 nodes/unresolved_refs/files
+secondary indexes plus the 4 non-unique edge indexes (identity stays for
+OR-IGNORE dedup), and rebuilds each in one scan before resolution — the edge
+window's measured trade applied to the whole parse lane. Results:
+
+- **dubbo (the cbm bar repo): parse-loop 4,306 → 1,787ms (−58%), rebuild
+  665ms, warm wall 10.5-11.3 → 8.46-9.39s** — the bar gap shrank from ~3s to
+  ~1.1s vs cbm's ~7.5s.
+- **Linux kernel 8c: envelope ≈ 14.2min — best ever** (prior best 14.8). The
+  parse-loop itself stayed ~189s (linux parse is EXTRACTION-bound — the
+  wasm-deferred C tail — unlike writer-bound dubbo) and the rebuild costs
+  21.6s, but every downstream phase dropped: resolution 517-589 → 423.4s,
+  edge-recreate → 36.5s, synthesis → 157.1s, maintenance → 16.3s. Mechanism:
+  bulk-rebuilt B-trees are densely packed where incrementally-grown ones are
+  fragmented, so every index-mediated read for the rest of the run pays fewer
+  pages. The rebuild is the gift that keeps giving downstream.
+- Gates: dubbo/gson/express/excalidraw dumps byte-identical (441,270-line
+  dubbo dump reproduced), linux counts exact + dump sha `6dd1185b…`
+  reproduced, suite green ×2.
+
+Remaining store levers, re-ranked: dubbo's residual vs cbm is now resolution
+(~5.3s of the 8.5s wall) + boot (~1s) — the parse lane is no longer the
+gap. Multi-file write transactions are likely ~zero on the fastInit path
+(memory journal, synchronous OFF — same class as the killed statement
+batching); buffer→bind remains a CPU-side option if the writer re-emerges as
+the wall.
+
 ## 4. Per-language tracker
 
 Tiers: **T1** = mostly `.scm` + mapping config. **T2** = needs bespoke pre/post passes kept

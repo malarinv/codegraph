@@ -493,6 +493,11 @@ export class CodeGraph {
         // triggers, rebuild nodes_fts once from the nodes table afterwards.
         // Crash inside the window is healed on the next DatabaseConnection.open.
         this.db.beginBulkNodeLoad();
+        // Fresh-init only: also drop the parse-lane secondary indexes for the
+        // mass insert (the store-writer's B-tree-maintenance floor, plan §4d)
+        // and rebuild each in one scan afterwards. Incremental runs keep them
+        // — they delete per-file rows mid-phase through the file_path indexes.
+        if (freshDb) this.db.beginBulkParseLoad();
         let result: IndexResult;
         try {
           result = await this.orchestrator.indexAll(
@@ -506,6 +511,11 @@ export class CodeGraph {
             freshDb ? { dbPath: this.db.getPath(), fastInit } : null
           );
         } finally {
+          if (freshDb) {
+            const tIdx = Date.now();
+            await this.db.endBulkParseLoad();
+            if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] parse-index-rebuild: ${Date.now() - tIdx}ms`);
+          }
           const tFts = Date.now();
           this.db.endBulkNodeLoad();
           if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] fts-rebuild: ${Date.now() - tFts}ms`);

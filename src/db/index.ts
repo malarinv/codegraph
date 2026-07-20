@@ -152,6 +152,76 @@ export class DatabaseConnection {
   }
 
   /**
+   * NON-UNIQUE secondary indexes maintained per-row during the parse phase's
+   * bulk inserts — the store-architecture arc's first lever (plan §4d: dubbo's
+   * parse-loop wall is 94% store-writer busy, and the #1320 post-mortem showed
+   * statement batching and sorted inserts are ~zero on this path because
+   * B-TREE MAINTENANCE is the floor). A fresh init writes every row of
+   * nodes/unresolved_refs/files exactly once and reads none of them until
+   * resolution, so the parse window can drop all of these and rebuild each in
+   * one table scan afterwards — the same measured trade as the resolution
+   * phase's edge-index window (2.8s → 1.1s inserting, ~0.3s recreating).
+   * Primary keys and UNIQUE constraints stay (upserts and OR-IGNORE dedup
+   * conflict on them).
+   */
+  private static readonly BULK_PARSE_INDEX_NAMES = [
+    'idx_nodes_kind',
+    'idx_nodes_name',
+    'idx_nodes_qualified_name',
+    'idx_nodes_file_path',
+    'idx_nodes_language',
+    'idx_nodes_file_line',
+    'idx_nodes_lower_name',
+    'idx_unresolved_from_node',
+    'idx_unresolved_name',
+    'idx_unresolved_file_path',
+    'idx_unresolved_from_name',
+    'idx_unresolved_status',
+    'idx_unresolved_failed_tail',
+    'idx_files_language',
+    'idx_files_modified_at',
+  ] as const;
+
+  /**
+   * Enter bulk-parse-load mode (FRESH-INIT ONLY — the caller gates on a fresh
+   * DB, because an incremental index deletes per-file rows mid-phase and needs
+   * the file_path indexes): drop every parse-lane secondary index, including
+   * the four non-unique edge indexes (parse inserts contains-edges too; the
+   * UNIQUE identity index stays for INSERT OR IGNORE dedup, and its `source`
+   * prefix keeps source-keyed reads indexed, as in the edge window). MUST be
+   * paired with endBulkParseLoad(); a crash inside the window is healed on the
+   * next DatabaseConnection open (schema.sql re-applies CREATE INDEX IF NOT
+   * EXISTS).
+   */
+  beginBulkParseLoad(): void {
+    for (const idx of DatabaseConnection.BULK_PARSE_INDEX_NAMES) {
+      this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
+    }
+    this.beginBulkEdgeLoad();
+  }
+
+  /**
+   * Leave bulk-parse-load mode: recreate everything the window dropped, one
+   * table scan per index, with a yield between statements (same
+   * liveness-watchdog rationale as endBulkEdgeLoad — at kernel scale each
+   * build is a long synchronous scan). The edge indexes are rebuilt here too,
+   * so paths that never enter the resolution phase's own bulk-edge window
+   * (small runs) are left with a complete schema; the batched resolver's
+   * beginBulkEdgeLoad simply re-drops them (DROP IF EXISTS — idempotent).
+   */
+  async endBulkParseLoad(): Promise<void> {
+    const schemaPath = path.join(__dirname, 'schema.sql');
+    const schema = fs.readFileSync(schemaPath, 'utf-8');
+    for (const idx of DatabaseConnection.BULK_PARSE_INDEX_NAMES) {
+      const m = schema.match(new RegExp(`CREATE INDEX IF NOT EXISTS ${idx}\\b[^;]*;`));
+      if (!m) throw new Error(`schema.sql: parse index ${idx} not found for bulk-load recreation`);
+      this.db.exec(m[0]);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await this.endBulkEdgeLoad();
+  }
+
+  /**
    * Names of the NON-UNIQUE edge indexes dropped for a bulk edge load.
    * idx_edges_identity deliberately stays: INSERT OR IGNORE's dedup conflicts
    * on it (#1034), and its leftmost column is `source`, so the source-keyed
