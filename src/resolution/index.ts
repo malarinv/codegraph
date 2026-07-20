@@ -1388,6 +1388,10 @@ export class ReferenceResolver {
     parallel?: {
       dbPath: string;
       bulkEdgeLoad?: { begin: () => void; end: () => void | Promise<void> };
+      /** unresolved_refs index window for the batched loop — the loop only
+       *  reads the status index + PK; dropping the sync-path ref indexes cuts
+       *  each per-batch DELETE's B-tree work (DatabaseConnection.beginBulkRefLoad). */
+      refIndexLoad?: { begin: () => void; end: () => void | Promise<void> };
       backpressure?: () => Promise<void> | null;
     }
   ): Promise<ResolutionResult> {
@@ -1531,6 +1535,16 @@ export class ReferenceResolver {
         parallel.bulkEdgeLoad.begin();
         bulkEdgesActive = true;
       } catch { /* keep the indexes; inserts just pay the per-row maintenance */ }
+    }
+    // Same gate for the ref-index window: the loop's deletes stop maintaining
+    // the five sync-path unresolved_refs indexes, and the end-of-loop rebuild
+    // is near-free (only failed refs survive the loop).
+    let bulkRefsActive = false;
+    if (parallel?.refIndexLoad && total >= minRefsForPool()) {
+      try {
+        parallel.refIndexLoad.begin();
+        bulkRefsActive = true;
+      } catch { /* keep the indexes; deletes just pay the per-row maintenance */ }
     }
 
     try {
@@ -1717,6 +1731,11 @@ export class ReferenceResolver {
       // Recreate the edge indexes BEFORE synthesis (kind-keyed reads) and on
       // any error path. A crash before this line is healed by the next
       // DatabaseConnection open (schema.sql re-applies IF NOT EXISTS).
+      if (bulkRefsActive) {
+        const tRef = Date.now();
+        await parallel!.refIndexLoad!.end();
+        if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] ref-index-recreate: ${Date.now() - tRef}ms`);
+      }
       if (bulkEdgesActive) {
         const tIdx = Date.now();
         await parallel!.bulkEdgeLoad!.end();

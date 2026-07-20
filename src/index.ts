@@ -1175,6 +1175,10 @@ export class CodeGraph {
         begin: () => this.db.beginBulkEdgeLoad(),
         end: () => this.db.endBulkEdgeLoad(),
       },
+      refIndexLoad: {
+        begin: () => this.db.beginBulkRefLoad(),
+        end: () => this.db.endBulkRefLoad(),
+      },
       backpressure,
     });
   }

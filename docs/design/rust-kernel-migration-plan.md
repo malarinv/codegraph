@@ -543,6 +543,30 @@ gap. Multi-file write transactions are likely ~zero on the fastInit path
 batching); buffer→bind remains a CPU-side option if the writer re-emerges as
 the wall.
 
+**Store-arc round 2 SHIPPED (2026-07-19): resolution ref-index window.** The
+batched resolution loop reads unresolved_refs ONLY through the status index
++ PK keyset pager; the other five ref indexes (from_node, name, file_path,
+from_name, failed_tail) serve sync-time paths — yet every per-batch DELETE
+maintained all of them. `beginBulkRefLoad`/`endBulkRefLoad` (same
+`minRefsForPool` gate as the edge window) drop the five for the loop and
+rebuild at the end, where the table holds only the surviving failed refs
+(resolved rows are deleted by then), making the recreate near-free.
+
+- **dubbo**: deletes 1.2 → 0.2s, marks 0.6 → 0.3s (recreate 219ms) — but the
+  wall stayed ~8.5s: the freed main-lane time moved into `settle` (the
+  worker lane now binds the double-buffer). The honest read: at medium
+  scale, resolution's floor is now the WORKER lane + pool spin-up, not the
+  writer.
+- **Linux kernel 8c: resolution 423.4 → 275.9s** — deletes 50-81 → **3.2s**,
+  backpressure 16.8 → 7.4s (fewer index writes → less WAL → cheaper folds,
+  compounding), ref recreate 10.3s, edge recreate 26.8s. Synthesis 149.0s.
+  **Envelope ≈ 11.0min** (phase sum 659.7s) — from 14.8min best-ever before
+  this arc's rounds. **The <10min-on-8c target needs ~1 more minute**; the
+  remaining mass is parse-loop 190s (extraction-bound on linux — R7b's
+  wasm-deferred C tail + the store lane) and synthesis 149s.
+- Gates: dubbo/gson dumps byte-identical, linux counts exact + dump sha
+  `6dd1185b…` reproduced, suite green ×2.
+
 ## 4. Per-language tracker
 
 Tiers: **T1** = mostly `.scm` + mapping config. **T2** = needs bespoke pre/post passes kept

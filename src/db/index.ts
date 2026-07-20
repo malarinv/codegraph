@@ -222,6 +222,50 @@ export class DatabaseConnection {
   }
 
   /**
+   * unresolved_refs secondary indexes NOT read by the batched resolution
+   * loop. The loop pages pending refs by keyset (`status='pending' AND id>?`
+   * — the status index + PK), deletes resolved rows by id, and parks failures
+   * with a status UPDATE; every other ref index serves SYNC-time paths
+   * (per-file re-index deletes, name-keyed retry, failed-tail heal). Each
+   * per-batch DELETE maintains all of them — the biggest single main-thread
+   * stage on the dubbo profile (deletes 1.2s of a 5.4s resolution phase) —
+   * so the batched loop drops them and rebuilds at the end, where the table
+   * holds only the surviving FAILED refs (resolved rows are gone), making
+   * the recreate near-free.
+   */
+  private static readonly BULK_REF_INDEX_NAMES = [
+    'idx_unresolved_from_node',
+    'idx_unresolved_name',
+    'idx_unresolved_file_path',
+    'idx_unresolved_from_name',
+    'idx_unresolved_failed_tail',
+  ] as const;
+
+  /**
+   * Enter bulk-ref mode for the batched resolution loop — see
+   * BULK_REF_INDEX_NAMES. MUST be paired with endBulkRefLoad(); a crash
+   * inside the window heals on the next open (schema.sql re-applies
+   * CREATE INDEX IF NOT EXISTS).
+   */
+  beginBulkRefLoad(): void {
+    for (const idx of DatabaseConnection.BULK_REF_INDEX_NAMES) {
+      this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
+    }
+  }
+
+  /** Leave bulk-ref mode: recreate each index in one scan (yield between). */
+  async endBulkRefLoad(): Promise<void> {
+    const schemaPath = path.join(__dirname, 'schema.sql');
+    const schema = fs.readFileSync(schemaPath, 'utf-8');
+    for (const idx of DatabaseConnection.BULK_REF_INDEX_NAMES) {
+      const m = schema.match(new RegExp(`CREATE INDEX IF NOT EXISTS ${idx}\\b[^;]*;`));
+      if (!m) throw new Error(`schema.sql: ref index ${idx} not found for bulk-load recreation`);
+      this.db.exec(m[0]);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  /**
    * Names of the NON-UNIQUE edge indexes dropped for a bulk edge load.
    * idx_edges_identity deliberately stays: INSERT OR IGNORE's dedup conflicts
    * on it (#1034), and its leftmost column is `source`, so the source-keyed
