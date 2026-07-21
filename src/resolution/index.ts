@@ -1473,17 +1473,38 @@ export class ReferenceResolver {
     // costs zero wall-clock. Any failure downgrades to sequential permanently.
     let pool: ResolverPool | null = null;
     let poolReady = false;
-    const tPoolStart = Date.now();
-    if (parallel && total >= minRefsForPool()) {
-      pool = ResolverPool.tryCreate(parallel.dbPath, this.projectRoot);
-      pool?.ready().then(
+    // True once pool creation has been attempted by EITHER engage site (the
+    // up-front ref-count gate or the adaptive projection below) — a pool that
+    // failed or was destroyed must stay down (downgrade is permanent), and
+    // tryCreate's sizing probes shouldn't re-run every batch on hosts that
+    // declined.
+    let poolEngageTried = false;
+    const createPool = (t0: number, why: string): ResolverPool | null => {
+      poolEngageTried = true;
+      if (!parallel) return null;
+      const p = ResolverPool.tryCreate(parallel.dbPath, this.projectRoot);
+      p?.ready().then(
         () => {
           poolReady = true;
-          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] pool ready after ${Date.now() - tPoolStart}ms`);
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] pool ready after ${Date.now() - t0}ms (${why})`);
         },
-        () => { void pool?.destroy().catch(() => undefined); pool = null; }
+        () => {
+          void p.destroy().catch(() => undefined);
+          if (pool === p) pool = null;
+        }
       );
+      return p;
+    };
+    if (parallel && total >= minRefsForPool()) {
+      pool = createPool(Date.now(), 'ref-count');
     }
+    // Adaptive engagement bar (see the batch-loop hook): projected remaining
+    // sequential settle above this boots the pool mid-loop. Boot is async and
+    // fan-out waits for ready, so a marginal engage costs background boot
+    // only; the bar just needs to clear the fan-out's own overhead class.
+    const ADAPTIVE_ENGAGE_SETTLE_MS = 400;
+    let adaptiveSeqMs = 0;
+    let adaptiveSeqRefs = 0;
 
     // Process in PIPELINED batches (double-buffer). The enumeration is the
     // head of the pending set in rowid order; every ref a persisted batch
@@ -1605,6 +1626,28 @@ export class ReferenceResolver {
       const result = await settleBatch(inFlight, batch);
       if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] batch ${inFlight.mode}: ${batch.length} refs in ${Date.now() - tBatch}ms`);
       lp('settle', tBatch);
+
+      // Adaptive pool engagement: the fixed ref-count gate can't see PER-REF
+      // cost, and settle rates differ ~9× by language (56k Rust refs cost
+      // more sequential settle than 154k Go refs — 36µs vs 4µs measured on
+      // tokio/prometheus). After each sequential batch, project the remaining
+      // settle from the observed rate and boot the pool mid-loop when it
+      // clears the bar. The loop already switches to fan-out only when the
+      // async boot reports ready, admission order is mode-independent, and
+      // 2-core/low-memory hosts still decline inside tryCreate's sizing —
+      // so the switch changes wall-clock, never the graph.
+      if (inFlight.mode === 'seq' && parallel && pool === null && !poolEngageTried) {
+        adaptiveSeqMs += Date.now() - tBatch;
+        adaptiveSeqRefs += batch.length;
+        const remaining = total - processed - batch.length;
+        const projectedMs = (adaptiveSeqMs / Math.max(1, adaptiveSeqRefs)) * Math.max(0, remaining);
+        if (projectedMs >= ADAPTIVE_ENGAGE_SETTLE_MS) {
+          if (process.env.CODEGRAPH_SYNTH_TIMINGS) {
+            console.error(`[pool-timing] adaptive engage: projected ${Math.round(projectedMs)}ms sequential settle over ${remaining} remaining refs`);
+          }
+          pool = createPool(Date.now(), 'adaptive');
+        }
+      }
 
       // WAL-valve backstop at the ONE pool-idle boundary of the double-buffer
       // (this batch settled, the next not yet fanned out): past the hard cap
