@@ -39,4 +39,25 @@ fn main() {
     lua.flag_if_supported("-utf-8"); // msvc
     lua.compile("tree-sitter-lua");
     println!("cargo:rerun-if-changed=grammars/lua");
+
+    // Scala grammar — vendored C (third vendored-grammar-C language): the
+    // vendored wasm is tree-sitter/tree-sitter-scala master@0aca5d0a6f (the
+    // 2026-04-22 generation sync — 30 states PAST the v0.26.0 tag/crate, so a
+    // crate pin would be a silent downgrade). Sources are that commit's
+    // checked-in generated artifacts, sha-recorded in the scala checklist
+    // §Grammar prep:
+    //   parser.c  bc3c3c794f19461d99d04de6c31d57fa3e41243509b9ab023a9b88ed3273d102
+    //   scanner.c e4ba242568ee3493015598997bf60f613802616eade62717c21109287ef64752
+    // parser.c is 35 MB — the biggest grammar in the tree; expect a slow cc
+    // step on clean builds.
+    let mut scala = cc::Build::new();
+    scala.include("grammars/scala");
+    scala.file("grammars/scala/parser.c");
+    scala.file("grammars/scala/scanner.c");
+    scala.flag_if_supported("-Wno-unused-parameter");
+    scala.flag_if_supported("-Wno-unused-but-set-variable");
+    scala.flag_if_supported("-Wno-trigraphs");
+    scala.flag_if_supported("-utf-8"); // msvc
+    scala.compile("tree-sitter-scala");
+    println!("cargo:rerun-if-changed=grammars/scala");
 }

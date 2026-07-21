@@ -94,6 +94,15 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // packs, default type params) — a JUMP past ~10% is the bug signal.
   'lua',
   'luau',
+  // R7b batch 4 (2026-07-20): parity swept 0-diff on os-lib/cats + scala3
+  // compiler/src + library/src + full-init dump-diffs byte-identical.
+  // Error incidence is bimodal: mainstream Scala-2-style repos ~0-2%
+  // (os-lib 0%, cats 1.8%) but scala-3-frontier code runs 10-18% with
+  // PHANTOM-dominated error sets (hasError=true, zero ERROR nodes —
+  // capture-checking `^` types; defer on the FLAG). Sweeps over
+  // scala3-style repos use --max-deferral 0.3 (swift precedent); a
+  // deferral JUMP on cats/os-lib-style code is the bug signal.
+  'scala',
 ]);
 
 /**

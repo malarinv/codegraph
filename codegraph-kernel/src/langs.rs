@@ -23,12 +23,17 @@ extern "C" {
 extern "C" {
     fn tree_sitter_lua() -> *const ();
 }
+// Vendored scala grammar (build.rs-compiled C — the wasm is master@0aca5d0a6f,
+// 30 states past the v0.26.0 crate; see grammars/scala and the scala checklist).
+extern "C" {
+    fn tree_sitter_scala() -> *const ();
+}
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 18] = [
+pub const LANGUAGES: [&str; 19] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau",
+    "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau", "scala",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -73,6 +78,11 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         // R7b batch 4: crate =1.2.0, sha-identical to the v1.2.0 tag the
         // vendored wasm was built from (lua-luau checklist §Grammar prep).
         "luau" => Some(tree_sitter_luau::LANGUAGE.into()),
+        // R7b batch 4: master@0aca5d0a6f vendored C compiled in build.rs (the
+        // revision is not a release — crate 0.26.0 is 30 states behind).
+        "scala" => {
+            Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_scala) }.into())
+        }
         _ => None,
     }
 }
