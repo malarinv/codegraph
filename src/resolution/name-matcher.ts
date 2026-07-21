@@ -587,12 +587,16 @@ export function resolveMethodOnType(
     // populated in the conformance pass. Still VALIDATED (the method must exist on
     // a supertype), so a wrong inference produces no edge.
     if (depth < 4 && context.getSupertypes) {
-      for (const supertype of context.getSupertypes(typeName, ref.language)) {
-        const via = resolveMethodOnType(
-          supertype, methodName, ref, context, confidence, resolvedBy, preferredFqn, depth + 1,
-        );
-        if (via) return via;
-      }
+      const viaSupers = nmTimedT('rmot-supers', ref, (): ResolvedRef | null => {
+        for (const supertype of context.getSupertypes!(typeName, ref.language)) {
+          const via = resolveMethodOnType(
+            supertype, methodName, ref, context, confidence, resolvedBy, preferredFqn, depth + 1,
+          );
+          if (via) return via;
+        }
+        return null;
+      });
+      if (viaSupers) return viaSupers;
     }
     return null;
   }
@@ -1685,7 +1689,7 @@ export function matchMethodCall(
               .getImportMappings(ref.filePath, ref.language)
               .find((i) => i.localName === inferredType)?.source
           : undefined;
-      const typedMatch = resolveMethodOnType(
+      const typedMatch = nmTimedT('mc-rmot', ref, () => resolveMethodOnType(
         inferredType,
         methodName!,
         ref,
@@ -1693,7 +1697,7 @@ export function matchMethodCall(
         0.9,
         'instance-method',
         importedFqn,
-      );
+      ));
       if (typedMatch) {
         return typedMatch;
       }
@@ -1728,7 +1732,7 @@ export function matchMethodCall(
       // imported FQN so resolveMethodOnType can disambiguate (#314).
       const imports = context.getImportMappings(ref.filePath, ref.language);
       const importedFqn = imports.find((i) => i.localName === inferredType)?.source;
-      const typedMatch = resolveMethodOnType(
+      const typedMatch = nmTimedT('mc-rmot', ref, () => resolveMethodOnType(
         inferredType,
         methodName!,
         ref,
@@ -1736,7 +1740,7 @@ export function matchMethodCall(
         0.9,
         'instance-method',
         importedFqn,
-      );
+      ));
       if (typedMatch) {
         return typedMatch;
       }
