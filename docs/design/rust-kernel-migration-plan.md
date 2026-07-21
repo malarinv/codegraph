@@ -127,8 +127,20 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       **19.1 min kernel-arm** (parse-loop 560 → 356s; R6 26.4 → P1 17.6 on
       the old smaller graph → 19.1 on the new richer one:
       2,048,295 nodes / 6,406,933 edges, two runs byte-same).
-- [~] **R7b. Remaining long tail** per the tracker (§4) — ruby/php/csharp/… T1s
-      are now ~1-day-each with the walker pattern; T3 may stay TS forever (fine).
+- [x] **R7b. Remaining long tail — COMPLETE 2026-07-20** (all details in the
+      §4 tracker rows). Eleven languages shipped across four same-day batches:
+      rust #1371, then csharp #1378 / ruby #1379 / php #1380 (batch 2), swift
+      #1381 / kotlin #1382 (batch 3), and batch 4's r #1383 / lua+luau #1384 /
+      scala #1385 / dart #1386 — **20 languages DEFAULT_ROUTED**. Batch 4 ran
+      the grammar probe UPFRONT (all five tail crates use the
+      tree-sitter-language shim — no kotlin-style pin conflicts; provenance
+      fingerprinted and validated standalone before any walker) and went
+      4-for-4 first-run parity (12-of-13 arc-wide; swift remains the only
+      walker that ever needed a fix). Grammar routes: crate pins (r, luau),
+      vendored-C (lua v0.4.1, scala master@0aca5d0a6f, dart d4d8f3e — the
+      dart wasm is now a byte-copied vendor too, closing tree-sitter-wasms'
+      unpinned-github-dep hazard). T3 (svelte/vue/liquid/dfm + niche grammars)
+      may stay TS forever (fine).
       **rust DONE 2026-07-20** (first R7b port): grammar bumped to
       tree-sitter-rust v0.24.2 (crate `=0.24.2` + vendored wasm from tag
       `77a3747`, parser.c/scanner.c sha-matched; replaces the 2023 ABI-14
