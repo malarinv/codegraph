@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.0] - 2026-07-21
+
 # ⚡ The Rust engine release — with near-instant sync
 
 **This release rebuilds CodeGraph's parsing engine as a native Rust kernel, overhauls the resolution pipeline around it, and makes the live graph effectively instant: a save now reaches the graph in well under a second, even on a 27,000-file repository. It is the largest performance upgrade in the project's history — and every graph is verified byte-for-byte identical to the previous engine.**
@@ -707,3 +710,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.3.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.3.1
 [1.4.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.0
 [1.4.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.1
+[1.5.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.5.0
