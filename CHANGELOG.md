@@ -9,9 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-# ⚡ The Rust engine release
+# ⚡ The Rust engine release — with near-instant sync
 
-**This release rebuilds CodeGraph's parsing engine as a native Rust kernel and overhauls the resolution pipeline around it — the largest performance upgrade in the project's history, with every graph verified byte-for-byte identical to the previous engine.**
+**This release rebuilds CodeGraph's parsing engine as a native Rust kernel, overhauls the resolution pipeline around it, and makes the live graph effectively instant: a save now reaches the graph in well under a second, even on a 27,000-file repository. It is the largest performance upgrade in the project's history — and every graph is verified byte-for-byte identical to the previous engine.**
 
 - **Native Rust parsing for 20 languages** — TypeScript, JavaScript (+TSX/JSX), Java, Python, Go, C, C++, Rust, C#, Ruby, PHP, Swift, Kotlin, Scala, Dart, R, Lua, and Luau now parse in a compiled Rust kernel (Metal and CUDA ride the C++ path). Platforms without a prebuilt binary, and individual files with syntax errors, fall back to the previous engine automatically — same graph either way, proven on repositories from small libraries to the Linux kernel.
 - **Adaptive to your machine** — CodeGraph sizes its parse workers, resolver pool, and caches from what the system actually has: real core counts (container/cgroup-aware, not the host's), honest available memory on macOS and Linux, and measured per-project resolution cost. A big workstation gets the full parallel pipeline; a 2-core VPS gets a pipeline tuned to finish reliably instead of running out of memory — the Linux kernel (70k files) indexes to completion on a 2-core, 6GB machine in under 12 minutes — down from 26 at the start of this cycle.
