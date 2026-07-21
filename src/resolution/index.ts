@@ -16,7 +16,7 @@ import {
   FrameworkResolver,
   ImportMapping,
 } from './types';
-import { matchReference, matchFunctionRef, matchDottedCallChain, matchScopedCallChain, matchMethodCall, sameLanguageFamily, crossesKnownFamily, dumpNameMatcherProfile } from './name-matcher';
+import { matchReference, matchFunctionRef, matchDottedCallChain, matchScopedCallChain, matchMethodCall, sameLanguageFamily, crossesKnownFamily, dumpNameMatcherProfile, clearNameMatcherMemos } from './name-matcher';
 import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, clearImportResolverMemos } from './import-resolver';
 import { ResolverPool, minRefsForPool } from './resolver-pool';
 import { detectFrameworks } from './frameworks';
@@ -373,9 +373,12 @@ export class ReferenceResolver {
     this.knownNames = null;
     this.knownFiles = null;
     this.cachesWarmed = false;
-    // The import-resolver's per-context memos assume the same stable window
-    // as the caches above — drop them together.
-    if (this.context) clearImportResolverMemos(this.context);
+    // The import-resolver's and name-matcher's per-context memos assume the
+    // same stable window as the caches above — drop them together.
+    if (this.context) {
+      clearImportResolverMemos(this.context);
+      clearNameMatcherMemos(this.context);
+    }
   }
 
   /** `readFile` through the LRU content cache (null = read failed, also cached). */
