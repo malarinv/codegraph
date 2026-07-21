@@ -20,6 +20,7 @@ mod buffers;
 mod ccpp;
 mod cfnptr;
 mod csharp;
+mod dart;
 mod docstring;
 mod ids;
 mod go;
@@ -229,6 +230,7 @@ pub fn extract_file(file_path: String, content: String, language: String) -> Res
         "r" => rlang::extract(&file_path, &content).map_err(Error::from_reason)?,
         "lua" | "luau" => lua::extract(&file_path, &content, &language).map_err(Error::from_reason)?,
         "scala" => scala::extract(&file_path, &content).map_err(Error::from_reason)?,
+        "dart" => dart::extract(&file_path, &content).map_err(Error::from_reason)?,
         _ => tsjs::extract(&file_path, &content, &language).map_err(Error::from_reason)?,
     };
     Ok(ExtractBuffers {

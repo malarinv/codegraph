@@ -330,6 +330,14 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // tree-sitter-kotlin-ng is a different grammar — the kernel compiles the
   // same vendored C sources instead (codegraph-kernel/grammars/kotlin).
   'kotlin',
+  // R7b batch 4 (Dart kernel port prep): the byte-copied tree-sitter-wasms
+  // 0.1.13 artifact (sha256 7f5364e4…, built from UserNobody14/
+  // tree-sitter-dart master@d4d8f3e337d8). tree-sitter-wasms' dart dep is an
+  // UNPINNED github ref, so a routine tree-sitter-wasms update would have
+  // silently changed dart's grammar — vendoring kills that hazard. The
+  // kernel compiles the same-commit vendored C (codegraph-kernel/grammars/
+  // dart); crates.io tree-sitter-dart is a different-lineage fork (rejected).
+  'dart',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */

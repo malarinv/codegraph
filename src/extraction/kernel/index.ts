@@ -103,6 +103,13 @@ const DEFAULT_ROUTED: ReadonlySet<Language> = new Set<Language>([
   // scala3-style repos use --max-deferral 0.3 (swift precedent); a
   // deferral JUMP on cats/os-lib-style code is the bug signal.
   'scala',
+  // R7b batch 4 (2026-07-20): parity swept 0-diff on shelf/bloc/flutter +
+  // full-init dump-diffs byte-identical. Error incidence 3.4-20.7% both-arm
+  // grammar reality (empty object patterns — the sealed-class idiom — and
+  // unnamed `library;` dominate; flutter sits at ~21%) — sweeps use
+  // --max-deferral 0.3; the RATE, not the count, is the signal (flutter
+  // HEAD drifts).
+  'dart',
 ]);
 
 /**

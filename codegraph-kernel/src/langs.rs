@@ -28,12 +28,17 @@ extern "C" {
 extern "C" {
     fn tree_sitter_scala() -> *const ();
 }
+// Vendored dart grammar (build.rs-compiled C — UserNobody14 d4d8f3e; the
+// crates.io crate is a different-lineage fork; see grammars/dart).
+extern "C" {
+    fn tree_sitter_dart() -> *const ();
+}
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 19] = [
+pub const LANGUAGES: [&str; 20] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
-    "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau", "scala",
+    "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau", "scala", "dart",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -82,6 +87,11 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         // revision is not a release — crate 0.26.0 is 30 states behind).
         "scala" => {
             Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_scala) }.into())
+        }
+        // R7b batch 4: UserNobody14 d4d8f3e vendored C compiled in build.rs
+        // (same commit as the byte-copied tree-sitter-wasms 0.1.13 artifact).
+        "dart" => {
+            Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_dart) }.into())
         }
         _ => None,
     }
