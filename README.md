@@ -10,7 +10,9 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 
 ### Supercharge Claude Code, Cursor, Codex, OpenCode, Hermes Agent, Gemini, Antigravity, and Kiro with Semantic Code Intelligence
 
-**Surgical context · fewer tool calls · faster answers · 100% local**
+**The fastest complete code graph · surgical context · built for how agents actually work · 100% local**
+
+<img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/rust.svg?v=1" height="18" alt="Rust" align="top"> <sub><b>Kernel powered by Rust</b> — 20 languages parsed natively, scaling itself to your machine's cores and memory</sub>
 
 ### [Documentation & Website →](https://colbymchenry.github.io/codegraph/)
 
@@ -309,10 +311,26 @@ The reliable, universal payoff is **surgical context and speed**: CodeGraph coll
 
 ---
 
+## Built for speed — the Rust kernel
+
+<img align="right" src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/rust.svg?v=1" width="80" height="80" alt="Rust">
+
+CodeGraph's parsing engine is a **native Rust kernel**: 20 languages — TypeScript, JavaScript, Java, Python, Go, C, C++, Rust, C#, Ruby, PHP, Swift, Kotlin, Scala, Dart, R, Lua, Luau (Metal and CUDA ride the C++ path) — parse in compiled code with one boundary crossing per file. Every language shipped only after its graphs proved **byte-for-byte identical** to the reference engine on real repositories, from small libraries up to the Linux kernel; platforms without a prebuilt binary and files with syntax errors fall back per-file automatically, same graph either way.
+
+**And it scales itself to the machine it's on.** Worker pools, parallel resolution, and analysis caches are sized from what the system actually has — real core counts (container/cgroup-aware, so a VPS that grants 2 cores gets sized for 2, not the host's 64), honestly-measured available RAM on macOS and Linux, and the measured cost of *your* project's resolution work:
+
+- **On a workstation:** the full parallel pipeline — native parse workers, a multi-worker resolver pool that engages the moment it pays for itself, memory-gated analysis caches. The Swift compiler repository (27k files of Swift and C++) fresh-indexes in about 100 seconds; a one-file edit re-syncs in ~4.
+- **On a 2-core / 6GB VPS:** the same graph, from a pipeline tuned to *finish* — the Linux kernel (70k files, 2M symbols, 6.4M relationships) indexes to completion in under 12 minutes where RAM-first designs run out of memory before reaching 1%.
+- **Every day after day one:** saving a file updates the graph in well under a second — the watcher fires 300ms after a lone save and syncs exactly what changed (~0.3s of work on a 4,400-file project, ~0.4s on the 27,000-file Swift compiler repo), never re-scanning the tree. Measured against the fastest competing indexer's re-index-on-change: 2–7× faster on medium and larger repos across a 31-repo, 30-language benchmark — and the gap widens with repo size, because their cost grows with the repository and ours grows with the change.
+
+---
+
 ## Key Features
 
 | | |
 |---|---|
+| **Native Rust Kernel** | Parsing and extraction run in a compiled Rust engine for 20 languages — with graphs verified byte-for-byte identical to the reference engine, and automatic per-file fallback so nothing ever breaks |
+| **Adapts to Your Machine** | Sizes its worker pools and caches from what the system actually has — real core counts (container-aware), honest available RAM, measured per-project cost. A workstation gets the full parallel pipeline; a 2-core VPS gets one tuned to finish reliably |
 | **Surgical Context** | One tool call returns entry points, related symbols, and code snippets — no slow file-by-file exploration |
 | **Full-Text Search** | Find code by name instantly across your entire codebase, powered by FTS5 |
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
@@ -530,7 +548,7 @@ The exact text is `src/mcp/server-instructions.ts` — the single source of trut
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Extraction** — [tree-sitter](https://tree-sitter.github.io/) parses source code into ASTs. Language-specific queries extract nodes (functions, classes, methods) and edges (calls, imports, extends, implements).
+1. **Extraction** — a native **Rust kernel** parses source with [tree-sitter](https://tree-sitter.github.io/) grammars compiled into it, extracting nodes (functions, classes, methods) and edges (calls, imports, extends, implements) for 20 languages; remaining languages and per-file fallbacks use the same extraction logic on the portable engine, producing identical graphs.
 
 2. **Storage** — Everything goes into a local SQLite database (`.codegraph/codegraph.db`) with FTS5 full-text search.
 
