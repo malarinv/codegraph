@@ -2,8 +2,6 @@
 
 # CodeGraph
 
-## 🎉 1.0 Released!
-
 Already installed? Run `codegraph upgrade`
 
 Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
@@ -12,7 +10,10 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 
 **The fastest complete code graph · surgical context · built for how agents actually work · 100% local**
 
-<img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/rust.svg?v=1" height="18" alt="Rust" align="top"> <sub><b>Kernel powered by Rust</b> — 20 languages parsed natively, scaling itself to your machine's cores and memory</sub>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/rust-logo-dark.svg?v=1">
+  <img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/rust-logo.svg?v=1" height="30" alt="Rust" align="center">
+</picture>&nbsp; **Kernel powered by Rust**
 
 ### [Documentation & Website →](https://colbymchenry.github.io/codegraph/)
 
@@ -66,7 +67,6 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 - [Supported Languages](#supported-languages)
 - [Measured cross-file coverage](#measured-cross-file-coverage)
 - [Troubleshooting](#troubleshooting)
-- [Star History](#star-history)
 - [License](#license)
 
 ## Get Started
@@ -252,8 +252,6 @@ With the index available, the agent answers from a couple of `codegraph_explore`
 ---
 
 ## Built for speed — the Rust kernel
-
-<img align="right" src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/languages/rust.svg?v=1" width="80" height="80" alt="Rust">
 
 CodeGraph's parsing engine is a **native Rust kernel**: 20 languages — TypeScript, JavaScript, Java, Python, Go, C, C++, Rust, C#, Ruby, PHP, Swift, Kotlin, Scala, Dart, R, Lua, Luau (Metal and CUDA ride the C++ path) — parse in compiled code with one boundary crossing per file. Every language shipped only after its graphs proved **byte-for-byte identical** to the reference engine on real repositories, from small libraries up to the Linux kernel; platforms without a prebuilt binary and files with syntax errors fall back per-file automatically, same graph either way.
 
@@ -847,16 +845,6 @@ Framework routing is validated the same way, on a canonical app per framework: E
 **Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `codegraph sync` manually if needed. Check that the file's language is supported and isn't inside a `.gitignore`d or default-excluded directory (e.g. `node_modules`, `dist`).
 
 **Sharing one checkout between Windows and WSL** — Don't point both at the same `.codegraph/`: the background-server lock and the SQLite index are tied to the OS that wrote them, and SQLite locking across the WSL2/Windows filesystem boundary is unreliable. Give each side its own index in the same tree by setting `CODEGRAPH_DIR` to a distinct name on one of them — e.g. `CODEGRAPH_DIR=.codegraph-win` on Windows, leaving WSL on the default `.codegraph`. CodeGraph skips any sibling `.codegraph-*` directory when indexing and watching, so the two never trip over each other.
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=colbymchenry%2Fcodegraph&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&legend=top-left" />
- </picture>
-</a>
 
 ## License
 
