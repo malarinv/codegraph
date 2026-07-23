@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- GitHub Copilot is now a supported agent: `codegraph install` can configure Copilot Chat in VS Code (`copilot-vscode`), the GitHub Copilot CLI (`copilot-cli`), and the Copilot plugin in JetBrains IDEs (`copilot-jetbrains`). Installed Copilot surfaces are auto-detected like every other agent, existing MCP server entries in their config files are preserved, and `codegraph uninstall` reverses the setup cleanly. Restart VS Code or your JetBrains IDE after installing so Copilot picks up the server.
 
 ## [1.5.0] - 2026-07-21
 
