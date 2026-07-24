@@ -1945,11 +1945,18 @@ describe('Installer targets — Copilot family', () => {
     expect(cfg.mcpServers).toBeUndefined();
   });
 
-  it('copilot-vscode: global install pins --path to ${workspaceFolder}', () => {
+  it('copilot-vscode: global install writes a variable-free entry — no --path, no ${workspaceFolder}', () => {
+    // VS Code refuses to start a user-level server whose entry uses
+    // ${workspaceFolder} in any window with no folder open, toasting
+    // "Variable workspaceFolder can not be resolved" (hit live). VS Code
+    // documents cwd = workspace folder for stdio servers, and the
+    // codegraph server resolves the project from roots/cwd — so the
+    // global entry must carry no --path and no variables at all.
     const t = getTarget('copilot-vscode')!;
     const result = t.install('global', { autoAllow: true });
     const cfg = JSON.parse(fs.readFileSync(result.files[0].path, 'utf-8'));
-    expect(cfg.servers.codegraph.args).toEqual(['serve', '--mcp', '--path', '${workspaceFolder}']);
+    expect(cfg.servers.codegraph.args).toEqual(['serve', '--mcp']);
+    expect(JSON.stringify(cfg)).not.toContain('${');
   });
 
   it.runIf(process.platform === 'darwin')('copilot-vscode: global path is ~/Library/Application Support/Code/User/mcp.json on macOS', () => {
@@ -2095,15 +2102,6 @@ describe('Installer targets — Copilot family', () => {
     expect(result.notes?.join(' ')).toMatch(/[Rr]estart VS Code/);
   });
 
-  it('copilot-vscode: global install warns that ${workspaceFolder} needs an open folder; local does not', () => {
-    const t = getTarget('copilot-vscode')!;
-    // VS Code refuses to start a user-level server whose entry uses
-    // ${workspaceFolder} when no folder is open — surface that up front.
-    const globalNotes = t.install('global', { autoAllow: true }).notes?.join(' ');
-    expect(globalNotes).toMatch(/open a folder/i);
-    const localNotes = t.install('local', { autoAllow: true }).notes?.join(' ');
-    expect(localNotes).not.toMatch(/open a folder/i);
-  });
 
   // ---- copilot-cli ----
 

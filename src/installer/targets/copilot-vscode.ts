@@ -16,17 +16,24 @@
  *     instructions, the single source of truth (#529).
  *   - No permissions concept — `autoAllow` is silently ignored.
  *
- * ## Why we inject `--path` (mirrors Cursor)
+ * ## Why `--path` only for local installs (NOT the Cursor pattern)
  *
- * VS Code's docs don't specify the working directory stdio MCP servers
- * are launched with, and (like Cursor) we can't rely on it being the
- * workspace root. Rather than depend on undocumented cwd behavior we
- * pin the project explicitly:
+ * Unlike Cursor, VS Code DOCUMENTS the launch cwd for stdio MCP
+ * servers: "Working directory for the server command. Defaults to the
+ * workspace folder when run in a workspace" (mcp-configuration
+ * reference). The codegraph server resolves its project via the MCP
+ * roots/list dance with a cwd fallback, so cwd alone is sufficient:
  *
- *   - `local`  install: absolute path (known at install time).
- *   - `global` install: `${workspaceFolder}` — VS Code expands its
- *     standard variables inside mcp.json, giving per-workspace behavior
- *     from a single user-level config.
+ *   - `local`  install: absolute `--path` (known at install time) —
+ *     deterministic, and free of variables.
+ *   - `global` install: NO `--path`. Do not be tempted to pin it with
+ *     `${workspaceFolder}`: VS Code refuses to start a user-level
+ *     server whose entry uses that variable whenever a window has no
+ *     folder open (loose files, welcome tab), surfacing an error toast
+ *     "Variable workspaceFolder can not be resolved" in every such
+ *     window — exactly the error-noise that teaches users to disable
+ *     the server. With no `--path`, a folderless window still starts
+ *     the server fine and it serves the "no project" guidance.
  *
  * ## JSONC
  *
@@ -78,13 +85,16 @@ function mcpJsonPath(loc: Location): string {
 
 /**
  * Build the codegraph server entry for VS Code at the given location.
- * Shared `{type, command, args}` shape plus the `--path` pin — see
- * file header for why we don't trust VS Code's launch cwd.
+ * Local installs pin `--path`; global installs rely on VS Code's
+ * documented workspace-folder cwd — see file header for why the global
+ * entry must stay variable-free.
  */
 function buildVscodeServerEntry(loc: Location): { type: string; command: string; args: string[] } {
   const base = getMcpServerConfig();
-  const pathArg = loc === 'local' ? process.cwd() : '${workspaceFolder}';
-  return { ...base, args: [...base.args, '--path', pathArg] };
+  if (loc === 'local') {
+    return { ...base, args: [...base.args, '--path', process.cwd()] };
+  }
+  return { ...base, args: [...base.args] };
 }
 
 function readConfigText(file: string): string {
@@ -127,16 +137,9 @@ class CopilotVscodeTarget implements AgentTarget {
   }
 
   install(loc: Location, _opts: InstallOptions): WriteResult {
-    const notes = ['Restart VS Code for MCP changes to take effect.'];
-    if (loc === 'global') {
-      // The global entry pins --path via ${workspaceFolder}; VS Code
-      // refuses to start it in a window with no folder open, with a
-      // cryptic "Variable workspaceFolder can not be resolved" toast.
-      notes.push('VS Code: the server starts per-workspace — open a folder (File → Open Folder) before starting it; a no-folder window reports "Variable workspaceFolder can not be resolved".');
-    }
     return {
       files: [writeMcpEntry(loc)],
-      notes,
+      notes: ['Restart VS Code for MCP changes to take effect.'],
     };
   }
 
