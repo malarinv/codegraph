@@ -2162,13 +2162,26 @@ describe('Installer targets — Copilot family', () => {
     expect(after.banner).toBe('never');
   });
 
-  it('copilot-cli: uninstall drops an emptied mcpServers wrapper', () => {
+  it('copilot-cli: uninstall of a from-scratch install deletes the file — no `{}` husk to fool detect()', () => {
     const t = getTarget('copilot-cli')!;
     t.install('global', { autoAllow: true });
     t.uninstall('global');
     const file = path.join(tmpHome, '.copilot', 'mcp-config.json');
+    // A leftover empty mcp-config.json would count as a CLI footprint
+    // and keep the target showing as detected after uninstall.
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('copilot-cli: uninstall keeps the file when unrelated top-level keys remain', () => {
+    const t = getTarget('copilot-cli')!;
+    const file = path.join(tmpHome, '.copilot', 'mcp-config.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ banner: 'never' }, null, 2) + '\n');
+    t.install('global', { autoAllow: true });
+    t.uninstall('global');
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(after.mcpServers).toBeUndefined();
+    expect(after.banner).toBe('never');
   });
 
   it('copilot-cli: uninstall when never installed reports not-found, no throw', () => {
@@ -2184,13 +2197,39 @@ describe('Installer targets — Copilot family', () => {
     expect(t.uninstall('global').files[0].action).toBe('not-found');
   });
 
-  it('copilot-cli: detect() reports installed from the ~/.copilot dir alone', () => {
+  it('copilot-cli: detect() reports installed from CLI artifacts in ~/.copilot', () => {
     const t = getTarget('copilot-cli')!;
     // The tmp PATH may or may not carry a real `copilot` binary; only
-    // assert the positive signal we control.
+    // assert the positive signal we control. The CLI writes config.json
+    // on first run — that's the footprint.
     fs.mkdirSync(path.join(tmpHome, '.copilot'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.copilot', 'config.json'), '{}');
     expect(t.detect('global').installed).toBe(true);
     expect(t.detect('global').alreadyConfigured).toBe(false);
+  });
+
+  it('copilot-cli: detect() is NOT fooled by the VS Code extension\'s ~/.copilot/ide/ locks', () => {
+    // The VS Code Copilot Chat extension writes MCP socket-handoff lock
+    // files into ~/.copilot/ide/ on every launch — a machine with only
+    // the extension has ~/.copilot with a lone `ide` entry and no CLI.
+    const t = getTarget('copilot-cli')!;
+    const ideDir = path.join(tmpHome, '.copilot', 'ide');
+    fs.mkdirSync(ideDir, { recursive: true });
+    fs.writeFileSync(path.join(ideDir, 'some-uuid.lock'), '{"socketPath":"/tmp/mcp.sock"}');
+
+    // Pin PATH to an empty dir so a real `copilot` binary on the host
+    // can't turn this negative assertion into a false failure.
+    const prevPath = process.env.PATH;
+    process.env.PATH = ideDir;
+    try {
+      expect(t.detect('global').installed).toBe(false);
+
+      // An empty ~/.copilot (no CLI footprint at all) is also not enough.
+      fs.rmSync(ideDir, { recursive: true });
+      expect(t.detect('global').installed).toBe(false);
+    } finally {
+      process.env.PATH = prevPath;
+    }
   });
 
   it('copilot-cli: printConfig matches what install writes; local variant points at --location=global', () => {

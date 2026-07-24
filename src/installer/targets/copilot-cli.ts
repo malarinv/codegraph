@@ -56,6 +56,25 @@ function mcpConfigPath(): string {
 }
 
 /**
+ * `~/.copilot` existing is NOT proof the CLI is installed: the VS Code
+ * Copilot Chat extension drops MCP socket-handoff lock files into
+ * `~/.copilot/ide/` on launch, so a machine with only the VS Code
+ * extension still has the dir (with a lone `ide` entry). Count the dir
+ * as a CLI footprint only when it holds anything besides `ide` — the
+ * CLI writes `config.json` (and later `mcp-config.json`, history state)
+ * on first run.
+ */
+function cliConfigDirPresent(): boolean {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(configDir());
+  } catch {
+    return false;
+  }
+  return entries.some((e) => e !== 'ide');
+}
+
+/**
  * Best-effort check that the `copilot` binary is reachable on PATH.
  * A plain fs scan (no shell-out) — cheap enough to run inside
  * `detectAll()` for the multiselect prompt.
@@ -97,7 +116,7 @@ class CopilotCliTarget implements AgentTarget {
     const file = mcpConfigPath();
     const config = readJsonFile(file);
     const alreadyConfigured = !!config.mcpServers?.codegraph;
-    const installed = fs.existsSync(configDir()) || copilotOnPath();
+    const installed = cliConfigDirPresent() || copilotOnPath();
     return { installed, alreadyConfigured, configPath: file };
   }
 
@@ -129,7 +148,14 @@ class CopilotCliTarget implements AgentTarget {
     if (Object.keys(config.mcpServers).length === 0) {
       delete config.mcpServers;
     }
-    writeJsonFile(file, config);
+    if (Object.keys(config).length === 0) {
+      // Nothing left but the `{}` we'd write back — delete the file so
+      // uninstall fully reverses a from-scratch install. A leftover
+      // empty file would keep detect() reporting the CLI as installed.
+      fs.unlinkSync(file);
+    } else {
+      writeJsonFile(file, config);
+    }
     return { files: [{ path: file, action: 'removed' }] };
   }
 
