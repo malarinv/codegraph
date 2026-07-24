@@ -2095,6 +2095,16 @@ describe('Installer targets — Copilot family', () => {
     expect(result.notes?.join(' ')).toMatch(/[Rr]estart VS Code/);
   });
 
+  it('copilot-vscode: global install warns that ${workspaceFolder} needs an open folder; local does not', () => {
+    const t = getTarget('copilot-vscode')!;
+    // VS Code refuses to start a user-level server whose entry uses
+    // ${workspaceFolder} when no folder is open — surface that up front.
+    const globalNotes = t.install('global', { autoAllow: true }).notes?.join(' ');
+    expect(globalNotes).toMatch(/open a folder/i);
+    const localNotes = t.install('local', { autoAllow: true }).notes?.join(' ');
+    expect(localNotes).not.toMatch(/open a folder/i);
+  });
+
   // ---- copilot-cli ----
 
   it('copilot-cli: global install writes ~/.copilot/mcp-config.json with the documented entry shape (tools: ["*"])', () => {

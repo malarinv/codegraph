@@ -127,9 +127,16 @@ class CopilotVscodeTarget implements AgentTarget {
   }
 
   install(loc: Location, _opts: InstallOptions): WriteResult {
+    const notes = ['Restart VS Code for MCP changes to take effect.'];
+    if (loc === 'global') {
+      // The global entry pins --path via ${workspaceFolder}; VS Code
+      // refuses to start it in a window with no folder open, with a
+      // cryptic "Variable workspaceFolder can not be resolved" toast.
+      notes.push('VS Code: the server starts per-workspace — open a folder (File → Open Folder) before starting it; a no-folder window reports "Variable workspaceFolder can not be resolved".');
+    }
     return {
       files: [writeMcpEntry(loc)],
-      notes: ['Restart VS Code for MCP changes to take effect.'],
+      notes,
     };
   }
 
