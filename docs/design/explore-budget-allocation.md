@@ -640,6 +640,16 @@ each, express reproducer unchanged), so it did not invalidate the measurement be
 
 ### The agent A/B (CG-15's gate, re-run)
 
+> **The epic's gate is CG-22, not this section.** This run was measured by the task that wrote
+> the fix; CG-22 re-ran it at CG-15's exact setup (`RUNS=3`, fresh clones, baseline pinned to
+> `49c11fc` by SHA) and it **passes all four bars there too** — Read = 0 in all 12 new-arm runs
+> while the baseline reads in 3 of 3 express runs, and the deterministic reproducer holds with
+> both builds re-measured in one session (`lib/utils.js` 6,380 B whole on both, envelope
+> 13,849 → 14,913). See
+> [`../benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explore-allocation-ab-1500.md)
+> § CG-22. The two counter-points that section records — excalidraw's answer share running
+> below its baseline, and client-go's +1.5s median — are unresolved-but-attributed, not hidden.
+
 Full record: [`../benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explore-allocation-ab-1500.md)
 § "Re-run after CG-21". **All four bars pass**, at n=6 per arm on express and excalidraw:
 

@@ -1,5 +1,17 @@
 # Agent A/B — score-proportional explore allocation (#1500 / epic CG-1)
 
+Three measurements, in order. **The epic's gate is the last one** ([§CG-22](#cg-22--the-gate-re-run-at-cg-15s-exact-setup)):
+
+| § | Task | Build | Verdict |
+|---|---|---|---|
+| [CG-15](#method) | first run of the gate | `edce18f` | **FAILS** bars 1 + 4 on express — routed the defect to CG-21 |
+| [CG-21](#re-run-after-cg-21--the-gate-passes) | re-run while fixing | `fca7d87` | passes, n=6 on two repos, n=3 on client-go |
+| [CG-22](#cg-22--the-gate-re-run-at-cg-15s-exact-setup) | **the gate** | `abee46c` | **PASSES** all four bars, CG-15's exact setup |
+
+---
+
+## CG-15 — the run that failed
+
 **Date:** 2026-08-04 · **New:** `feature/CG-1` @ `edce18f` · **Baseline:** `main` @ `49c11fc`
 · **Harness:** `scripts/agent-eval/ab-new-vs-baseline.sh`, `RUNS=3`, `--model sonnet --effort high`
 on every arm · **Both arms codegraph-on.**
@@ -14,9 +26,9 @@ widened to compensate. Root cause and the smallest honest fix are in [§Root cau
 
 > **Superseded.** This section is the CG-15 measurement, kept because it is what routed the
 > defect to CG-21 and because the root-cause analysis is the record of why. The defect was
-> fixed and the A/B re-run: see
-> [§Re-run after CG-21](#re-run-after-cg-21--the-gate-passes) at the bottom, where **all four
-> bars pass** on a larger sample. Nothing below was re-baselined.
+> fixed and the A/B re-run twice: [§CG-21](#re-run-after-cg-21--the-gate-passes) alongside the
+> fix, and [§CG-22](#cg-22--the-gate-re-run-at-cg-15s-exact-setup) — the epic's gate — at this
+> section's exact setup. Nothing below was re-baselined.
 
 ---
 
@@ -290,3 +302,165 @@ allocation 12,398 reserved of 12,400 pool · nothing cliffed
 ```
 
 Design and coverage: [`../design/explore-budget-allocation.md`](../design/explore-budget-allocation.md) § CG-21.
+
+---
+
+# CG-22 — the gate, re-run at CG-15's exact setup
+
+**Date:** 2026-08-04 · **New:** `feature/CG-1` @ `abee46c` (`src/` identical to CG-21's
+`fca7d87`; the two commits since are docs) · **Baseline:** `main` @ `49c11fc`, passed to the
+harness as that SHA rather than as `main`, so the ref cannot drift · `RUNS=3`,
+`--model sonnet --effort high` on every arm, both arms codegraph-on,
+`CODEGRAPH_NO_PROMPT_HOOK=1` on both · same three repos, same three questions.
+
+**This is the epic's gate.** CG-21's re-run above was measured by the task that wrote the fix;
+this one re-measures it at the setup the failing run used, from a clean clone of each repo.
+
+**Verdict: all four bars pass.** **Read = 0 in all 12 new-arm runs**, including the express
+control where CG-15 failed — while the *baseline* reads in 3 of 3 express runs and in 1 of 6
+client-go runs.
+
+Repos re-cloned fresh at their current tips, so the file counts move slightly against the
+CG-15 table (express 147 — unchanged; excalidraw 677, was 672; client-go 2,454 — unchanged).
+Every repo stays in the same budget tier, so the allocator sees the same envelope.
+
+## Results
+
+`explore` / `Read` are per-run counts in run order; duration is the median with the range
+beneath; `answer%` is the share of the source envelope going to the files that answer the
+question, per run.
+
+### express — control — "how does res.send decide Content-Type and ETag?"
+
+Answer set `lib/**`.
+
+| arm | explore | **Read** | duration | answer% |
+|---|---|---|---|---|
+| **new** | 1, 2, 2 | **0, 0, 0** | **24s** (18–35) | 100, 100, 100 |
+| baseline | 2, 2, 2 | **1, 1, 1** | 26s (24–30) | 100, 100, 100 |
+
+The bar-1 failure is gone at its own site. In every new-arm run the agent received
+`lib/utils.js` **whole** — 6,643 / 7,673 / 6,455 chars, against the baseline's 6,396 / 6,380 /
+6,396 — and never opened it. The baseline reads `lib/utils.js` in all three runs.
+
+### excalidraw — "how does updating an element re-render the canvas on screen?"
+
+Answer set: `mutateElement.ts`, `App.tsx`, `renderer/**`, `scene/**`, `components/canvases/**`.
+
+| arm | explore | **Read** | duration | answer% |
+|---|---|---|---|---|
+| **new** | 2, 2, 2 | **0, 0, 0** | 26s (26–27) | 81.9, 69.3, 66.6 |
+| baseline | 4, 2, 2 | 0, 0, 0 | 26s (21–32) | 92.7, 75.5, 81.0 |
+
+Both arms clean, medians equal. Stated plainly because it is the one number that moves the
+wrong way: the new arm's answer share runs **below** its baseline here (66.6–81.9 vs
+75.5–92.7), the same direction CG-21 saw. Every run is far above the 50% bar, and this repo's
+"answer set" is five globs over a god-file codebase where the baseline's extra breadth lands
+inside them by luck of size, not by relevance — but it is not an improvement on this repo and
+is not reported as one.
+
+### client-go — the #1500 shape — "how does a shared informer keep its cache in sync and deliver events?"
+
+Answer set `tools/cache/**`. **n=6 per arm** — two pooled batches of 3 (same build, same
+prompt, same baseline SHA), run to tighten the wall-clock bound after batch 1 came out 4s
+apart at the median.
+
+| arm | explore | **Read** | duration | answer% |
+|---|---|---|---|---|
+| **new** | 3, 3, 2, 4, 2, 2 | **0 ×6** | 36.5s (30–46) | 95.2, 97.8, 92.3, 96.8, 96.8, 89.8 |
+| baseline | 2 ×6 | **2 Reads in 1 of 6** | 35s (31–42) | 95.4, 100, 100, 85.6, 97.0, 97.0 |
+
+The new arm never drops below 89.8% and never reads; the baseline has an 85.6% run and one run
+that reads twice. **The generated layers stay out of both arms this session** — no
+`kubernetes/**`, `listers/**`, `applyconfigurations/**` or `**/fake/**` file takes envelope in
+any of the 12 runs, where CG-15's baseline gave them 10.5% of one run. That is the #1500 signal,
+and it is *smaller here than in the earlier sessions* because this session's baseline sampled
+well (85.6–100% answer share, against 53.8–86.7% in CG-21's). Reported as measured.
+
+The new arm spends one extra explore call in 3 of 6 runs. Inspecting the sequences, the extra
+call is a **deeper drill-down** (`processDeltas sharedProcessor run distribute …`) after a
+complete answer, not a recovery from an insufficient one — every one of those runs still ends
+at Read 0.
+
+## Wall-clock, attributed
+
+client-go is the only repo where the new arm's median is higher (36.5s vs 35s at n=6). Two
+deterministic measurements say it is not the build:
+
+1. **Explore's own latency is identical.** Same query, same repo, 5 reps per build:
+   client-go **669 ms new vs 668 ms baseline** (new 666–671, baseline 663–673); express
+   **204 ms vs 203 ms** (new 203–207, baseline 201–206). A 1 ms tool cannot cost 1.5s of agent
+   wall-clock.
+2. **The new build's response is not bigger.** Deterministic replay of the client-go drill-down
+   query: source envelope **15,813 new vs 18,898 baseline**, with `shared_informer.go` taking
+   50.2% instead of 35.7% — more concentrated *and* smaller.
+
+The ranges overlap almost completely (new 30–46, baseline 31–42), which is the known shape:
+agent wall-clock is dominated by host-model thinking, not tool latency.
+
+## Deterministic core — the reservation defect is gone
+
+The reproducer named in CG-22's acceptance, run on both builds in this session, same query,
+each build indexing its own copy:
+
+```
+CODEGRAPH_EXPLORE_DEBUG=1 codegraph explore \
+  "res.send Content-Type ETag generateETag setETag" --path <express>
+```
+
+| `lib/utils.js` (5,293 B, 272 lines) | baseline `49c11fc` | CG-12 | **HEAD** |
+|---|---|---|---|
+| delivered | 6,380 (46.1%) whole | **583 (7.7%) stub** | **6,380 (42.8%) whole** |
+| source envelope (13,000 budget) | 13,849 | **9,241** | **14,913** |
+
+Both conditions hold: the reservation is **spent** (reserved 3,870, whole-file render), and the
+envelope does not shrink against an unchanged budget — 14,913 against the baseline's 13,849.
+The baseline column was re-measured here, not quoted from CG-15, so the comparison is
+within-session. The CG-4 diagnostic on HEAD:
+
+```
+envelope 15,967 chars delivered · 15,964 allocated of 13,000 budget (hard ceiling 19,500)
+allocation 12,398 reserved of 12,400 pool · cliff at weight 10.00 · nothing cliffed
+ #  deliv%   bytes  reserved  score   flags                render     file
+ 1   39.3%   6,268    3,870   56.0   named entry central  whole      lib/utils.js
+ 2   36.8%   5,868    5,875   91.4   entry                clusters*  lib/response.js
+ 3   14.8%   2,369    2,653   34.5   entry central        clusters*  lib/application.js
+```
+
+(6,268 is the diagnostic's source-only count; 6,380 is the rendered section including its
+header, which is what the envelope parser and the baseline column measure. Same render.)
+
+## Bars
+
+| # | Bar | Verdict |
+|---|---|---|
+| 1 | **Read stays at 0** | **PASS** — 0 in all 12 new-arm runs (express 3, excalidraw 3, client-go 6). The express run that failed CG-15 with 4 Reads of `lib/utils.js` reads nothing, and the baseline reads in 3 of 3 express runs |
+| 2 | Correct-file share > 50% | **PASS** — every new run ≥ 66.6%; express 100% ×3, client-go 89.8–97.8% |
+| 3 | No wall-clock regression at the median | **PASS** — express 26s → 24s, excalidraw 26s → 26s, client-go 35s → 36.5s at n=6 with fully overlapping ranges and identical explore latency (669 vs 668 ms) |
+| 4 | No regression on the control | **PASS** — express improves on both axes: Read 3 of 3 → 0 of 3, median 26s → 24s, envelope 100% answer-set in both arms |
+
+Bars were **not** re-baselined; they are CG-15's four, unchanged.
+
+## Honest notes on the setup
+
+- **The prompt wrapper is reconstructed.** The record preserved the three questions verbatim
+  but not the sentence that names codegraph as the lookup tool. Every arm and every repo here
+  used the identical wrapper `Use codegraph to answer: <question>`, so the comparison is
+  internally exact; it may differ by a few words from CG-15's.
+- **Excalidraw is at a newer tip** (677 files, was 672) — same tier, same budget.
+- Full suite green on the measured build: 171 files, **2,868 passed**, 6 skipped, 0 failures.
+
+## Reproduce
+
+```bash
+# clone fresh (never eval on a private repo), index with the build under test, then per repo:
+RUNS=3 MODEL=sonnet EFFORT=high AGENT_EVAL_OUT=/tmp/ab-express \
+  scripts/agent-eval/ab-new-vs-baseline.sh <express> \
+  "Use codegraph to answer: how does res.send decide Content-Type and ETag?" 49c11fc
+
+node scripts/agent-eval/parse-run.mjs /tmp/ab-express/run-new-2.jsonl --answer 'lib/**'
+
+# the deterministic core, no agent needed:
+CODEGRAPH_EXPLORE_DEBUG=1 node dist/bin/codegraph.js \
+  explore "res.send Content-Type ETag generateETag setETag" --path <express>
+```
