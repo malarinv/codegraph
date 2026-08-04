@@ -42,6 +42,7 @@ function parse(dir, label) {
   const o = s.occupancy;
   return {
     dur: s.dur, tools: s.tools, reads: s.reads, grep: s.grep, cg: s.cg,
+    bash: s.counts.Bash || 0,
     tokens: s.processed, cost: s.cost, raced: s.raced, turns: s.turns,
     segments: files.length,
     ctx: o.ctxFinal,
@@ -127,6 +128,22 @@ for (const { repo, W, WO } of rows) {
   );
 }
 console.log(`\nAVERAGE: retrieval residual ${avg(occ.resid)}% lower with codegraph  ·  share-of-context ${avg(occ.shareCtx)}% lower`);
+
+console.log(
+  `FIXED overhead: codegraph's tool schema + MCP instructions cost ${avg(occ.fixed) >= 0 ? '+' : ''}${avg(occ.fixed)} tok\n` +
+  `  of context before any tool is called (median WITH ctxBase - median WITHOUT ctxBase, averaged\n` +
+  `  over repos). It is paid whether or not the agent ever calls codegraph.`
+);
+
+// Per-run detail. Medians over 2-3 runs hide swings big enough to flip a repo's
+// sign — the agent's tool mix is the variable, and a with-arm run that reads
+// files ON TOP of calling explore pays for both. Show every run.
+console.log('\nper run (retrieval residual · tool mix — cg=explore rd=Read gr=Grep bs=Bash):');
+for (const { repo, W, WO } of rows) {
+  if (!W.length && !WO.length) continue;
+  const one = (r) => `${fmtTok(r.occSelf)}${r.cg ? ` cg${r.cg}` : ''}${r.reads ? ` rd${r.reads}` : ''}${r.grep ? ` gr${r.grep}` : ''}${r.bash ? ` bs${r.bash}` : ''}`;
+  console.log(`  ${repo.padEnd(11)} W: ${W.map(one).join(' | ').padEnd(46)} WO: ${WO.map(one).join(' | ')}`);
+}
 console.log(
   `FIXED overhead: codegraph's tool schema + MCP instructions cost ${avg(occ.fixed) >= 0 ? '+' : ''}${avg(occ.fixed)} tok\n` +
   `  of context before any tool is called (median WITH ctxBase - median WITHOUT ctxBase, averaged\n` +
@@ -134,7 +151,7 @@ console.log(
 );
 if (!anyMulti) {
   console.log(
-    `\nCAVEAT: every row above is a SINGLE-turn session, so the residual is measured at the\n` +
+    `\nCAVEAT: every row is a SINGLE-turn session, so the residual is measured at the\n` +
     `moment the one question is answered. Occupancy is a cost that compounds over the turns\n` +
     `that FOLLOW; a single-turn number does not settle it. Re-run with "||"-separated\n` +
     `follow-ups (see run-all.sh) to measure the regime this metric is actually about.`
