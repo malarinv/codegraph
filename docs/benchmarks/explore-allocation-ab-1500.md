@@ -12,6 +12,12 @@ only an agent A/B proves the agent stopped reading.
 the CG-15 acceptance rule the allocation design goes back to CG-12 — the budget is *not* to be
 widened to compensate. Root cause and the smallest honest fix are in [§Root cause](#root-cause).
 
+> **Superseded.** This section is the CG-15 measurement, kept because it is what routed the
+> defect to CG-21 and because the root-cause analysis is the record of why. The defect was
+> fixed and the A/B re-run: see
+> [§Re-run after CG-21](#re-run-after-cg-21--the-gate-passes) at the bottom, where **all four
+> bars pass** on a larger sample. Nothing below was re-baselined.
+
 ---
 
 ## Method
@@ -190,3 +196,97 @@ node scripts/agent-eval/parse-run.mjs /tmp/ab-express/run-new-2.jsonl --answer '
 CODEGRAPH_EXPLORE_DEBUG=1 node dist/bin/codegraph.js \
   explore "res.send Content-Type ETag generateETag setETag" --path <express>
 ```
+
+---
+
+# Re-run after CG-21 — the gate passes
+
+**Date:** 2026-08-04 · **New:** `feature/CG-1` @ `fca7d87` (CG-21) · **Baseline:** `main`
+(unchanged) · same harness, same three prompts, same repos, `--model sonnet --effort high`,
+both arms codegraph-on. **n=6 per arm** on express and excalidraw (two pooled batches of 3 —
+same build, same prompts, same baseline ref), n=3 on client-go.
+
+**Verdict: all four bars pass.** Bar 1 — the hard gate that failed above — is clean:
+**Read = 0 in all 15 new-arm runs**, including the express control where the defect bit.
+
+### Read and wall-clock
+
+`explore` / `Read` are per-run counts; duration is the median with the range beneath.
+
+| repo | arm | n | explore | **Read** | duration |
+|---|---|---|---|---|---|
+| **express** (control) | **new** | 6 | 2,2,2,2,1,1 | **0 ×6** | **21.5s** (18–30) |
+| | baseline | 6 | 2,1,2,2,2,2 | **1 in 4 of 6** | 24.5s (19–29) |
+| **excalidraw** | **new** | 6 | 3,2,2,3,4,2 | **0 ×6** | 34.5s (28–43) |
+| | baseline | 6 | 2,4,2,2,2,2 | 0 ×6 | 26.5s (24–45) |
+| **client-go** | **new** | 3 | 2,4,4 | **0 ×3** | 45s (44–52) |
+| | baseline | 3 | 4,2,4 | 0 ×3 | 43s (40–49) |
+
+The express row is the fix, measured end to end: the CG-12 arm made **4 Reads of
+`lib/utils.js`** in 1 run of 3; the CG-21 arm makes **none in 6**, while the *baseline* reads
+in 4 of 6 — so the control now beats the baseline it previously lost to, on both Read and
+median wall-clock.
+
+### Envelope share (bar 2)
+
+| repo | new | baseline |
+|---|---|---|
+| express | 100% ×6 | 100% ×6 |
+| excalidraw | 65.8 / 79.6 / 78.9% | 82.8 / 78.9 / 85.1% |
+| client-go | **96.0 / 96.2 / 92.7%** | 86.7 / **53.8** / 80.2% |
+
+client-go — the #1500 shape — is where the change is supposed to show, and does: the new arm
+never drops below 92.7% while the baseline has a 53.8% run. Excalidraw's new arm runs a few
+points lower than its baseline; every run is far above the 50% bar and the ranges are within
+this harness's run-to-run spread.
+
+### The excalidraw wall-clock gap is not the build
+
+Excalidraw's new arm is ~8s slower at the median, which reads like a bar-3 failure until it is
+attributed. Three measurements say it is session variance, not the change:
+
+1. **Explore's own latency is unchanged.** Same query, same index, 5 reps per build:
+   **median 374 ms new vs 372 ms baseline** (new 371–524, baseline 365–395). The change cannot
+   cost 8s of wall-clock through a tool that costs the same 0.37s.
+2. **The responses are the same size.** Deterministic replay of three excalidraw queries on
+   both builds: 23,993 vs 20,388, 23,038 vs 25,277, and one **byte-identical** — +2% overall,
+   in both directions. No truncation in any of the 12 runs, either arm.
+3. **The identical baseline build moved 34s → 26.5s between sessions.** `main` did not change
+   between the CG-15 measurement above and this one, yet its excalidraw median dropped ~8s —
+   the same magnitude, and in the opposite direction to the CG-15 result (where *new* was 24s
+   and *baseline* 34s). Between-session variance on this repo is as large as the effect.
+
+So the honest statement is that excalidraw's wall-clock is **noise-dominated at n=6** and
+cannot be attributed either way; express (n=6, the control) and client-go (n=3) show no
+regression, and express improves. This is the known shape — agent wall-clock is dominated by
+host-model thinking, not by tool latency.
+
+### Bars
+
+| # | Bar | Verdict |
+|---|---|---|
+| 1 | **Read stays at 0** | **PASS** — 0 in all 15 new-arm runs across 3 repos. The CG-15 failure (4 Reads of `lib/utils.js`) does not reproduce in 6 attempts |
+| 2 | Correct-file share > 50% | **PASS** — every new run ≥ 65.8%; client-go 92.7–96.2% vs a baseline run at 53.8% |
+| 3 | No wall-clock regression | **PASS** — express 24.5s → 21.5s, client-go 43s → 45s (overlapping). Excalidraw's +8s is not attributable to the build (see above) |
+| 4 | No regression on the control | **PASS** — express is the control and improves on both axes |
+
+Bars were **not** re-baselined: they are the same four from CG-15, applied to a larger sample.
+
+### Deterministic core
+
+The reproducer that routed the defect to CG-21, on the shipped build:
+
+| `lib/utils.js` (5,293 B, 272 lines) | baseline | CG-12 | **CG-21** |
+|---|---|---|---|
+| delivered | 6,380 (46.1%) whole | **583 (7.7%) stub** | **6,268 (39.3%) whole** |
+| source envelope (13,000 budget) | 13,849 | **9,241** | **14,505** |
+
+```
+allocation 12,398 reserved of 12,400 pool · nothing cliffed
+ #  deliv%   bytes  reserved  score   flags                render   file
+ 1   39.3%   6,268    3,870   56.0   named entry central  whole    lib/utils.js
+ 2   36.8%   5,868    5,875   91.4   entry                clusters lib/response.js
+ 3   14.8%   2,369    2,653   34.5   entry central        clusters lib/application.js
+```
+
+Design and coverage: [`../design/explore-budget-allocation.md`](../design/explore-budget-allocation.md) § CG-21.

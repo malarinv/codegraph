@@ -616,3 +616,41 @@ Two traps the first drafts fell into, both of which made a test pass on the defe
   legitimately under-spends it (the fixture's `response.ts`: 1,635 delivered of 5,292 reserved).
   The assertion is per-file — *delivered >= min(reservation, file size)* — which is what express's
   `utils.js` violated and a pool-sum assertion does not express.
+
+### A third condition, found by review rather than by a test
+
+A buy must also **fit the render ceiling**. The whole-file branch refuses to slice a file
+mid-method, so a whole render that overruns `renderCeiling` is skipped *entirely* — meaning a
+buy approved by the funding pool but refused by the ceiling trades a clustered section for **no
+section**. That is the same trade the funding pool exists to refuse, arriving by another route.
+
+It is reachable only on the 24K tiers, which is why neither new fixture can see it:
+
+| tier | envelope | `renderCeiling` = `min(1.5x, 25000) - 600` | funding line = `reservedTotal + 0.15x` |
+|---|---|---|---|
+| small | 13,000 | 18,900 | ~14,350 — cannot cross |
+| medium/large | 24,000 | **24,400** | ~27,200 when saturated — **crosses by ~2.8K** |
+
+So `buysWhole` carries `totalChars + size + FILE_OVERHEAD <= renderCeiling` as well; failing it
+drops through to the cluster path, which is bounded by `headroom` and always renders something.
+The grace arm is deliberately untouched — a file within a sliver of its reservation that still
+does not fit is genuinely at the end of a full response, and that behaviour predates the epic.
+Verified inert on all three A/B repos (excalidraw and client-go byte-identical across 3 queries
+each, express reproducer unchanged), so it did not invalidate the measurement below.
+
+### The agent A/B (CG-15's gate, re-run)
+
+Full record: [`../benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explore-allocation-ab-1500.md)
+§ "Re-run after CG-21". **All four bars pass**, at n=6 per arm on express and excalidraw:
+
+- **Read = 0 in all 15 new-arm runs.** The express regression that routed the defect here (4
+  Reads of `lib/utils.js`) does not reproduce in 6 attempts — and the *baseline* reads in 4 of
+  6, so the control now beats the arm it previously lost to. Median 24.5s → 21.5s.
+- **client-go** — the reporter's shape — holds 92.7–96.2% answer share against a baseline run
+  at 53.8%.
+- **Excalidraw's ~8s median gap is not attributable to the change.** Explore's own latency is
+  374 ms vs 372 ms (n=5, same query and index); deterministic responses differ by +2% with one
+  byte-identical; and the *unchanged* `main` build's own median moved 34s → 26.5s between the
+  CG-15 session and this one — the same magnitude as the gap. Agent wall-clock on this repo is
+  noise-dominated at this sample size, which is the known shape (host-model thinking dominates,
+  not tool latency).
