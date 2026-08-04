@@ -367,3 +367,82 @@ tree reported tools.ts at 13–19% depending on the sync state). Measure against
 tree: restore `src/mcp/tools.ts` from `main`, remove `src/mcp/explore-diagnostics.ts`,
 `codegraph sync`, then run the built `dist/` binary (which still carries the instrument).
 Restore afterwards.
+
+---
+
+## CG-14 — locking the allocation down
+
+The allocation change is one function plus three render-loop bounds, and every way it can
+regress is silent: nothing throws, the response just gets less useful and the agent falls
+back to Read. So the coverage is built around the question "would this test go red if the
+lever were removed?" rather than around line coverage.
+
+### Where the coverage lives
+
+| File | Owns |
+|---|---|
+| `__tests__/explore-proportional-allocation.test.ts` | `allocateExploreBudget` in isolation — the split, the cliff, the tier invariant, envelope safety, spine weighting, degenerate inputs |
+| `__tests__/explore-allocation-e2e.test.ts` | The same behaviours through the real render loop on real indexed projects — the self-query fixture's shape, degenerate result sets, the diffuse-query control |
+| `__tests__/explore-allocation-1500.test.ts` | The reporter's Go shape (CG-6 fixture 1), plus the hard-ceiling stress case |
+| `scripts/agent-eval/probe-allocation.mjs` | Both CG-6 fixtures against the built `dist/`, including the **live** self-query arm that reads this repo's own index |
+
+The split between the last two is deliberate. The self-query fixture reads a moving target
+(this repo), so its exact numbers drift with the tree and it belongs out of band, where a
+drift is a number to re-baseline rather than a red suite. `npm test` owns a synthetic
+**mirror** of it instead: same three roles, same size asymmetry, fixed.
+
+### The two bounds are not the same bound
+
+Worth stating once, because a test that conflates them looks right and passes for the wrong
+reason:
+
+- **`maxOutputChars` bounds the RESERVATIONS.** `sum(allowances) <= pool <= maxOutputChars`,
+  exactly, at every tier and every candidate shape.
+- **`hardCeiling` — `min(maxOutputChars * 1.5, 25000)` — bounds the RESPONSE.** The render
+  loop is allowed a bounded overshoot (the whole-file grace, an oversize first cluster), so
+  a response legitimately exceeds the envelope. `payroll-go` does exactly that: 19.3K
+  delivered against a 13,000 envelope and a 19,500 ceiling.
+
+Only the 25K is absolute. Above it the host writes the result to a file the agent Reads
+back, which is the failure the tool exists to prevent.
+
+### Mutation-tested, not just green
+
+Each lever was removed from `src/mcp/tools.ts` in turn and the suite re-run. Every one is
+covered by at least one failing test — a lever with no red test is a lever that can be
+deleted by accident:
+
+| Mutation | Tests that go red |
+|---|---|
+| Render loop reverted to pre-CG-12 (`fileBudget = maxCharsPerFile`, whole-file bound `maxCharsPerFile * 3`) | 5 e2e + 2 payroll |
+| Proportional split replaced with an equal one | 4 unit |
+| Cliff disabled (`cliffAt = 0`) | 7 unit + 3 payroll |
+| Spine boost and cliff exemption removed | 3 unit |
+| `MIN_CHARS` floor removed | 2 unit |
+| `MAX_SHARE` ceiling removed | 4 unit |
+
+The first row is the one that matters most: it reproduces #1500 on the synthetic fixture
+verbatim, with the half-as-relevant file taking the larger share purely on size.
+
+| file | score | pre-CG-12 | CG-12 |
+|---|---|---|---|
+| `src/mcp/allocator.ts` | 77.5 | 4,843 (39.7%) | 9,335 (80.1%) |
+| `src/util/budget-math.ts` | 36.0 | 6,079 (49.8%) | 1,037 (8.9%) |
+
+### Two defects the coverage surfaced
+
+Both were found by writing the invariant rather than by reading the code:
+
+1. **Rounded shares could exceed the pool.** `Math.round` on each file's proportional slice
+   let the reservations sum past `pool` by up to half a char per file — small, but it made
+   "reservations fit the envelope" false rather than exact. Both terms now floor.
+2. **A non-finite score produced a NaN allowance.** An `Infinity` weight makes every share
+   `Infinity / Infinity`. Scores are finite sums in the pipeline so it was unreachable, but
+   the failure mode is a NaN handed to the render loop. `weightOf` now fails safe to 0.
+
+### Calibration vs. invariant
+
+`EXPLORE_ALLOCATION` is exported so the tests can read it. Invariant tests (envelope safety,
+tier monotonicity, the floor) reference the constants and hold at any value; one test pins
+the literals, so re-tuning a constant is a visible decision that says *re-run the probe*
+rather than a silent re-calibration of the fixtures.

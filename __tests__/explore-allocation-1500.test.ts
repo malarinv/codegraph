@@ -36,7 +36,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import CodeGraph from '../src/index';
-import { ToolHandler } from '../src/mcp/tools';
+import { ToolHandler, getExploreOutputBudget } from '../src/mcp/tools';
 import { attributeSourceBytes } from '../src/mcp/explore-diagnostics';
 import { isGeneratedFile, hasGeneratedHeader } from '../src/extraction/generated-detection';
 
@@ -265,6 +265,21 @@ describe('#1500 — generated Go CRUD beside a hand-written payroll workflow', (
       expect(bytes.get('internal/gen/fkit/payroll/payslip.go') ?? 0).toBe(0);
       expect(response).toContain('**Not shown above — explore these names for their source**');
       expect(response).toMatch(/internal\/gen\/fkit\/payroll\/payslip\.go: \w+:\d+/);
+    });
+
+    it('CG-14 GATE: holds the response inside the hard ceiling under real pressure', () => {
+      // This fixture is the stress case for the ceiling, not just for the split:
+      // 19 files put it in the very-tiny tier (13,000-char envelope) while the
+      // answer genuinely needs more, so the render loop spends its full allowed
+      // overshoot — ~19.3K against a 19.5K ceiling. That leaves ~1% of headroom,
+      // which is exactly why this is worth pinning: the bound that matters is the
+      // host's ~25K inline cap, and above it the response is written to a file
+      // the agent Reads back, undoing the point of the tool.
+      const budget = getExploreOutputBudget(cg.getFiles().length);
+      const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
+      expect(response.length).toBeGreaterThan(budget.maxOutputChars);
+      expect(response.length).toBeLessThanOrEqual(hardCeiling);
+      expect(response.length).toBeLessThan(25000);
     });
 
     it('records the shape of the allocation so a regression is legible', () => {

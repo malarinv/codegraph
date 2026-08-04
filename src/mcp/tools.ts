@@ -454,7 +454,7 @@ const SCORE_FLOOR_KEEP_MIN = 3;
 //      `ALLOC_MAX_SHARE`, a safety valve against a single god-file — which the
 //      proportional split already bounds, since a file's share can't exceed its
 //      weight share.
-const EXPLORE_ALLOCATION = {
+export const EXPLORE_ALLOCATION = {
   /**
    * A file whose weight is under this fraction of the top file's gets no source.
    *
@@ -578,8 +578,14 @@ export function allocateExploreBudget(
   const empty: ExploreAllocation = { allowances: new Map(), cliffed: [], cliffAt: 0, pool: 0 };
   if (candidates.length === 0) return empty;
 
-  const weightOf = (c: ExploreAllocationCandidate) =>
-    Math.max(0, c.score) * Math.max(0, Math.min(1, c.worth)) * (c.spine ? A.SPINE_WEIGHT_BOOST : 1);
+  // A non-finite weight is treated as no evidence rather than propagated: an
+  // Infinity score would otherwise make every share `Infinity/Infinity` = NaN and
+  // hand the render loop a NaN allowance. Scores are finite sums in the real
+  // pipeline, so this only has to fail safe.
+  const weightOf = (c: ExploreAllocationCandidate) => {
+    const w = Math.max(0, c.score) * Math.max(0, Math.min(1, c.worth)) * (c.spine ? A.SPINE_WEIGHT_BOOST : 1);
+    return Number.isFinite(w) ? w : 0;
+  };
 
   const weights = new Map(candidates.map((c) => [c.path, weightOf(c)]));
   const topWeight = Math.max(...weights.values());
@@ -626,9 +632,14 @@ export function allocateExploreBudget(
   const ceiling = Math.round(budget.maxOutputChars * A.MAX_SHARE);
   const floors = Math.min(pool, A.MIN_CHARS * admitted.length);
   const remainder = Math.max(0, pool - floors);
+  // Both parts FLOOR: a sum of rounded shares can exceed the remainder that fed
+  // it (by up to half a char per file), and the reservations must fit the pool
+  // exactly — the render loop spends them, so an over-allocation is an over-long
+  // response the hard ceiling then has to truncate. Flooring costs at most one
+  // char per file.
   for (const c of admitted) {
     const share = Math.floor(floors / admitted.length)
-      + Math.round((remainder * (weights.get(c.path) ?? 0)) / total);
+      + Math.floor((remainder * (weights.get(c.path) ?? 0)) / total);
     allowances.set(c.path, Math.min(share, ceiling));
   }
   return { allowances, cliffed, cliffAt, pool };
