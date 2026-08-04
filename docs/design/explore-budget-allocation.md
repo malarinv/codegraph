@@ -502,3 +502,117 @@ doesn't work, and the bytes here were reserved for this file already.
 They compose; (1) alone would have carried this case. Whichever lands needs the express shape as
 a hermetic fixture — a mid-sized top-ranked file with few matched symbols, sized just above its
 reservation — because nothing in the current suite has that shape, which is how it shipped.
+
+## CG-21 — spending the reservation
+
+Both fixes landed, because they cover different halves of the same failure and neither is
+sufficient alone. The unifying rule: **a reservation is a promise the render loop has to keep,
+not a cap it may quietly under-use.**
+
+### 1. A reservation that has already bought most of the file buys the rest
+
+`WHOLE_FILE_BUY_FRACTION` (0.6). The pre-existing grace is calibrated as a *sliver* — it rescues
+a file that essentially fits. Between "fits" and "several times its reservation" there was a
+hole, and `lib/utils.js` (reserved/size = 0.73) sat squarely in it. So the test is not *does the
+file fit the reservation* but *has the reservation already bought most of the file*: above 0.6
+the loop pays at most two-thirds of a reservation extra rather than lose the whole thing, on a
+file that already earned those bytes.
+
+**Funding is the part that is easy to get wrong.** The merit test is a *ratio*, so wherever
+several files sit near it they all qualify — and N independent overshoots inflate the response
+until the render ceiling drops whatever is last. Funding each buy from the file's own
+headroom was tried and measured on the payroll fixture: three files bought whole and
+`payslip_builder.go` — the file that computes the payslip the question asks about — was
+**dropped entirely** so three higher-ranked files could each ship their final sliver. A dropped
+section is strictly worse than a clustered one.
+
+So the buy rule is **two independent tests**, and keeping them apart is the whole design:
+
+| | reads | answers |
+|---|---|---|
+| **merit** | the file's own `reserved` | did this file's relevance earn most of itself? |
+| **funding** | one shared overshoot pool (`WHOLE_FILE_BUY_OVERSHOOT_FRACTION`, 15% of the envelope) | do the bytes exist, *with every reservation below it still payable*? |
+
+Merit reads `reserved` rather than the post-carry allowance, so borrowed slack can never promote
+a weak file to whole. Funding is measured against what the allocator **promised** rather than
+against `renderCeiling` — the ceiling sits 50% above the envelope and says nothing about who is
+owed what, so funding a buy out of it just moves the shortfall onto whichever file the loop
+reaches last. The `owedBelow` term is what makes it a *displacement* guard rather than a size
+cap, and it is self-limiting: each buy grows `sourceSpent`, so the pool cannot be spent twice.
+
+### 2. What a file cannot spend goes to the file below it
+
+Below the buy fraction the shortfall is real — the file is several times its reservation and
+clustering is the right render — but the bytes still must not evaporate. The render loop carries
+two running totals, everything **promised** so far and everything **emitted** so far, and their
+gap is slack the next file may add to its own reservation.
+
+Two totals rather than a `spent` variable threaded through the loop's dozen `continue`s, so no
+exit path can forget to account — unreadable, drifted off disk, skipped for the ceiling, thin
+matched set. It is symmetric: a buy that overshoots makes `sourceSpent` outrun `reservedSoFar`,
+which suppresses slack until a later under-spend covers the debt, so the pool is conserved in
+both directions and no file is ever cut *below* what it was promised. Slack flows in **rank**
+order (the only file a single-pass loop can still pay), clamped by `MAX_SHARE` so an
+under-spending leader cannot hand a weak tail file the whole response.
+
+### Measured effect (CG-21)
+
+Express, the reproducer, same index and same 13,000 budget:
+
+| `lib/utils.js` (5,293 B, 272 lines) | baseline | CG-12 | **CG-21** |
+|---|---|---|---|
+| delivered | 6,380 (46.1%) whole | 583 (7.7%) stub | **6,268 (39.3%) whole** |
+| source envelope | 13,849 | 9,241 | **14,505** |
+
+And the self-query, where the epic's own acceptance criterion was outstanding:
+
+| file | pre-CG-12 | CG-12 | **CG-21** |
+|---|---|---|---|
+| `src/mcp/tools.ts` (score 58) | 32.9% | 60.6% | **52.6%** (10,945, clusters) |
+| `src/resolution/memory-budget.ts` (score 18) | 51.2% **whole** | 17.2% clustered | **27.3% whole** (5,672) |
+
+**The `memory-budget.ts` exception is resolved, not re-justified.** CG-14 recorded it as a
+documented exception to *"no file that was previously unclipped becomes clipped"*; its
+reserved/size ratio is 0.73 — the same window as express's `utils.js` — so the buy rule covers
+it. The answer file still wins the envelope **and** nothing that used to ship whole is clipped,
+which is the first time both halves of CG-12's acceptance criterion hold at once.
+
+The synthetic mirror in `explore-allocation-e2e.test.ts` deliberately does **not** move: its
+helper sits at ratio ~0.17, far below the buy fraction, so it still clusters — correctly. That
+divergence is the point of the fraction: `memory-budget.ts` was over-served by a *sliver*, the
+synthetic helper by a *multiple*.
+
+### Coverage
+
+Two new hermetic fixtures, one per lever, because the existing suite could not see either. The
+payroll and self-query fixtures both **saturate** (`[over budget] [TRUNCATED]`, 23,599 of a
+23,600 pool reserved), and a saturated response has no unspent reservation to lose.
+
+| Fixture | Shape | Guards |
+|---|---|---|
+| `CG-21 — a reservation under the file size still buys the file` | mid-sized rank-1 file, thin matched set, sized just above its reservation and *outside* the grace bound | the buy rule |
+| `CG-21 — an unspendable reservation flows to the next file down` | rank-1 file far too big to buy (ratio 0.24) under-spends; a dense rank-2 file absorbs it | the carry-forward |
+
+Each carries a `fixture shape` block that asserts the window it depends on
+(`0.6 × size <= reserved < size`, outside the grace bound, inside the 220-line whole-file cap).
+Those are load-bearing, not scaffolding: every gate passes **vacuously** if a target ever drifts
+small enough for grace to cover it, which is precisely the way this defect hid.
+
+Mutation-tested, same method as CG-14:
+
+| Mutation | Tests that go red |
+|---|---|
+| Buy arm removed (`buysWhole = fileContent.length <= graceBound`) | 3 (new buy fixture) |
+| Carry-forward removed (`allowance = reserved`) | 2 (new carry-forward fixture) |
+| Funding guard removed (`… && true`) | 4 — including payroll's `payslip_builder.go` dropped |
+
+Two traps the first drafts fell into, both of which made a test pass on the defect:
+
+- **The spine ceiling hides a per-file assertion.** `SPINE_CEILING` already lets a flow-path
+  cluster reach 1.5× its allowance, so "delivered > reserved" is true without any carry-forward.
+  The carry-forward fixture is built spine-free and asserts a 1.1× margin — measured 9,297 vs
+  7,479 across the mutation.
+- **"Spend the whole pool" is not the invariant.** A file smaller than its reservation
+  legitimately under-spends it (the fixture's `response.ts`: 1,635 delivered of 5,292 reserved).
+  The assertion is per-file — *delivered >= min(reservation, file size)* — which is what express's
+  `utils.js` violated and a pool-sum assertion does not express.
