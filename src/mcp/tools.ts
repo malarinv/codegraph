@@ -189,15 +189,6 @@ export interface ExploreOutputBudget {
   includeCompletenessSignal: boolean;
   /** Include the explore-budget reminder at the end. */
   includeBudgetNote: boolean;
-  /**
-   * Hard-drop test/spec/icon/i18n files from the relevant-file set unless
-   * the query itself mentions tests. Today they're only deprioritized in
-   * the sort, which on tiny repos still lets one slip into the top N (e.g.
-   * cobra's `command_test.go` displaced `args.go` and contributed ~10KB of
-   * pure noise to "How does cobra parse commands?"). Off by default; on
-   * for the very-tiny tier where one slip dominates the budget.
-   */
-  excludeLowValueFiles: boolean;
 }
 
 export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
@@ -229,7 +220,6 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
       includeAdditionalFiles: false,
       includeCompletenessSignal: false,
       includeBudgetNote: false,
-      excludeLowValueFiles: true,
     };
   }
   if (fileCount < 500) {
@@ -245,7 +235,6 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
       includeAdditionalFiles: false,
       includeCompletenessSignal: false,
       includeBudgetNote: false,
-      excludeLowValueFiles: true,
     };
   }
   if (fileCount < 5000) {
@@ -263,7 +252,6 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
       includeAdditionalFiles: true,
       includeCompletenessSignal: true,
       includeBudgetNote: true,
-      excludeLowValueFiles: false,
     };
   }
   // Large + very-large repos: SAME ~24K inline ceiling (a bigger response just
@@ -282,7 +270,6 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
       includeAdditionalFiles: true,
       includeCompletenessSignal: true,
       includeBudgetNote: true,
-      excludeLowValueFiles: false,
     };
   }
   return {
@@ -296,9 +283,147 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
     includeAdditionalFiles: true,
     includeCompletenessSignal: true,
     includeBudgetNote: true,
-    excludeLowValueFiles: false,
   };
 }
+
+// ── Explore relevance scoring (CG-10 / #1500) ──────────────────────────────
+//
+// A file earns its slice of the explore envelope from the symbols in it that the
+// query matched. Before this weighting every match counted the same per tier, so
+// a file that merely declares a local `const explore` scored what a file that
+// DEFINES the explore pipeline scored — which is how three
+// `scripts/agent-eval/*.mjs` harnesses took 63% of this repo's own "how does
+// explore allocate its output budget across files" response on nothing but a
+// local `explore` and a `BUDGET` constant. Four levers — the first three are
+// multiplicative, so they compose without ordering surprises; the fourth decides
+// admission from the result:
+//
+//   1. KIND      — what a match on this NodeKind actually tells you (below).
+//   2. ISOLATION — a weak-kind symbol nothing calls or references is a pure name
+//                  collision; participation in the graph is the corroboration.
+//   3. PENALTY   — generated / test / i18n files are weaker answers to an
+//                  architecture question at EVERY signal, not just as the
+//                  tiebreak-at-equal-score they used to be.
+//   4. FLOOR     — admission scales with the best file's score, replacing an
+//                  absolute bar that admitted noise wherever the top score was
+//                  high.
+
+/**
+ * How strongly a match on a symbol of this kind corroborates that its FILE is
+ * what the query is about.
+ *
+ *   1.0   a callable or a type — the unit an architecture question is about
+ *   ~0.5  a member of a type, or the file node itself (a path match, not a
+ *         symbol match)
+ *   ~0.3  a variable / constant — as often a name collision as a definition
+ *   0.15  a parameter — essentially never the subject of a question
+ *
+ * Unlisted kinds fall back to `DEFAULT_RELEVANCE_KIND_WEIGHT`, so a NodeKind
+ * added later is neither free nor fatal.
+ */
+export const RELEVANCE_KIND_WEIGHT: Readonly<Record<string, number>> = {
+  // Callables and types: the answer lives in one of these.
+  function: 1, method: 1, class: 1, struct: 1, interface: 1, trait: 1,
+  protocol: 1, component: 1, route: 1, enum: 1, type_alias: 1, constructor: 1,
+  // Containers: real structure, but a whole namespace/module matching a term is
+  // a coarser signal than a callable matching it.
+  namespace: 0.8, module: 0.8,
+  // Members of a type: real, weaker on their own.
+  property: 0.5, field: 0.5, enum_member: 0.35,
+  // The file node itself — the path matched, no symbol did.
+  file: 0.5,
+  // Incidental until the graph corroborates them (see ISOLATED_ below).
+  constant: 0.35, variable: 0.3, parameter: 0.15,
+};
+const DEFAULT_RELEVANCE_KIND_WEIGHT = 0.5;
+
+/**
+ * Kinds whose evidentiary value depends on whether anything USES them. An
+ * exported `const DEFAULTS` that half the codebase references is a real
+ * definition; a `const explore` living inside one function of an eval script is
+ * a name collision. Only these kinds pay for the isolation probe.
+ */
+const WEAK_RELEVANCE_KINDS: ReadonlySet<string> = new Set([
+  'constant', 'variable', 'parameter', 'field', 'property', 'enum_member',
+]);
+
+/** Weight for a weak-kind symbol with no incoming/outgoing usage edge at all. */
+const ISOLATED_WEAK_KIND_WEIGHT = 0.08;
+
+/**
+ * Edges that mean "this symbol is used". `contains` is lexical nesting, not
+ * usage — counting it would make every file-scope constant look corroborated,
+ * which is exactly the case this guards against.
+ */
+const RELEVANCE_USAGE_EDGES: ReadonlySet<string> = new Set([
+  'calls', 'references', 'extends', 'implements', 'overrides',
+  'instantiates', 'returns', 'type_of', 'decorates',
+]);
+
+/**
+ * Cap on what PERIPHERAL nodes (in the subgraph, but neither a query match nor
+ * adjacent to one) can contribute to a file's score. Uncapped, each such node
+ * added a flat +1, so a file grew more "relevant" simply by being bigger —
+ * `parse-session.mjs` reached score 22 off ONE incidental constant plus twelve
+ * unrelated symbols. Size is not evidence; cap its contribution.
+ */
+const PERIPHERAL_SCORE_CAP = 5;
+
+/**
+ * Rank penalties, applied to BOTH the relevance score and the graph mass.
+ *
+ * Generated source used to be a tiebreak at equal score only, so a generated
+ * file that outscored the hand-written one still won — the #1500 report exactly:
+ * the FKIT CRUD layer carries every query term AND more graph mass than the
+ * use-case that implements the business rule. A multiplier demotes it on the
+ * PRIMARY sort key instead, without ever hard-excluding it (ask about the
+ * generated API by name and the named-seed tier still puts it first). It is
+ * self-normalizing: in an all-generated repo everything scales together and
+ * relative ranking is untouched.
+ */
+const GENERATED_RANK_PENALTY = 0.3;
+/**
+ * Test/spec/icon/i18n files. These are normally hard-excluded outright, but that
+ * filter stands down when fewer than 2 non-low-value candidates remain (else
+ * tests would be the only signal for the area). This is the softened form for
+ * that case: down-weighted rather than removed.
+ */
+const LOW_VALUE_RANK_PENALTY = 0.5;
+
+/**
+ * Score floor: `clamp(topScore * FRACTION, ABSOLUTE, MAX)`.
+ *
+ * An absolute floor alone (`>= 3`) admits noise on any repo where the top file
+ * scores 50+, so the bar is now a FRACTION of the best file's score and scales
+ * with how strong the best match is. On a diffuse survey question no file
+ * dominates, every candidate sits near the top score, and the whole spread gets
+ * through; on a precise question it cuts the long tail of incidental matches.
+ *
+ * ABSOLUTE is recalibrated for kind-weighted scores: the old `>= 3` assumed an
+ * unweighted tier sum where any query match was worth 10. A file whose sole
+ * match is an unused local constant now scores 0.8, so 3 had quietly become a
+ * much harsher admission bar than it was written to be — and the relative floor
+ * is what this change means to prune with anyway.
+ */
+const SCORE_FLOOR_ABSOLUTE = 1;
+const SCORE_FLOOR_FRACTION_OF_TOP = 0.2;
+/**
+ * Ceiling on the relative floor, in units of one direct query match on a
+ * callable (the `entryNodeIds` tier, weight 1.0). A single full-strength match
+ * is never incidental, so no amount of concentration elsewhere may exclude it:
+ * one named-seed-heavy file (`+50` per seed) otherwise pushed the floor to 21
+ * and dropped `BridgeInterceptor`'s file, which the agent had named — a class,
+ * so it entered at the +10 tier rather than +50. The #1500 noise this change
+ * targets scores 0.8–6, well under this ceiling.
+ */
+const SCORE_FLOOR_MAX = 10;
+/**
+ * The relative floor must never starve a question of candidates: if it would
+ * leave fewer than this, backfill with the best-scoring ones it cut. The cost of
+ * under-serving is the agent calling explore again — a whole round-trip. See the
+ * backfill itself for the two strengths it runs at (thin vs. empty).
+ */
+const SCORE_FLOOR_KEEP_MIN = 3;
 
 /**
  * Whether `codegraph_explore` should prefix source lines with their line
@@ -2850,7 +2975,9 @@ export class ToolHandler {
     }
 
     // Step 2: Group nodes by file, score by relevance
-    const fileGroups = new Map<string, { nodes: Node[]; score: number }>();
+    // `peripheral` accumulates separately so it can be capped — see
+    // PERIPHERAL_SCORE_CAP; it is folded into `score` once the loop is done.
+    const fileGroups = new Map<string, { nodes: Node[]; score: number; peripheral: number }>();
     const entryNodeIds = new Set([...subgraph.roots, ...namedSeedIds]);
 
     // Build a set of nodes directly connected to entry points (depth 1)
@@ -2859,6 +2986,46 @@ export class ToolHandler {
       if (entryNodeIds.has(edge.source)) connectedToEntry.add(edge.target);
       if (entryNodeIds.has(edge.target)) connectedToEntry.add(edge.source);
     }
+
+    // Usage degree within the subgraph, for the weak-kind isolation test below.
+    // Free (the edges are already in hand) and it answers most cases; only a
+    // weak-kind node that looks isolated HERE pays for a DB probe.
+    const subgraphUsageDegree = new Map<string, number>();
+    for (const edge of subgraph.edges) {
+      if (!RELEVANCE_USAGE_EDGES.has(edge.kind) || edge.source === edge.target) continue;
+      subgraphUsageDegree.set(edge.source, (subgraphUsageDegree.get(edge.source) ?? 0) + 1);
+      subgraphUsageDegree.set(edge.target, (subgraphUsageDegree.get(edge.target) ?? 0) + 1);
+    }
+
+    /**
+     * Relevance weight for one matched symbol: its NodeKind, further discounted
+     * when it is a weak kind that NOTHING uses. The DB probe (full-graph, since
+     * a usage can sit outside the traversal) is paid for only by weak-kind
+     * symbols in the top two tiers — the ones whose weight can carry a whole
+     * file. A `connectedToEntry` or peripheral node is worth <= 3 either way, so
+     * probing it would buy nothing.
+     */
+    const isolationCache = new Map<string, boolean>();
+    const isUsageIsolated = (node: Node): boolean => {
+      if ((subgraphUsageDegree.get(node.id) ?? 0) > 0) return false;
+      const cached = isolationCache.get(node.id);
+      if (cached !== undefined) return cached;
+      let isolated = true;
+      try {
+        const used = (e: Edge) => RELEVANCE_USAGE_EDGES.has(e.kind);
+        isolated = !cg.getIncomingEdges(node.id).some(used)
+          && !cg.getOutgoingEdges(node.id).some(used);
+      } catch {
+        isolated = false; // a probe failure must not manufacture a penalty
+      }
+      isolationCache.set(node.id, isolated);
+      return isolated;
+    };
+    const relevanceWeight = (node: Node, probeIsolation: boolean): number => {
+      const weight = RELEVANCE_KIND_WEIGHT[node.kind] ?? DEFAULT_RELEVANCE_KIND_WEIGHT;
+      if (!probeIsolation || !WEAK_RELEVANCE_KINDS.has(node.kind)) return weight;
+      return isUsageIsolated(node) ? ISOLATED_WEAK_KIND_WEIGHT : weight;
+    };
 
     // CHANGE SURFACE (#1064): a named method's signature types — its parameter
     // and return types — are part of what you'd edit to "add a parameter to X",
@@ -2901,7 +3068,7 @@ export class ToolHandler {
       // unbidden. The key still appears in the flow/symbol listing above.
       if (isConfigLeafNode(node)) continue;
 
-      const group = fileGroups.get(node.filePath) || { nodes: [], score: 0 };
+      const group = fileGroups.get(node.filePath) || { nodes: [], score: 0, peripheral: 0 };
       group.nodes.push(node);
       // Score: a NAMED-SEED node (a symbol the agent named that FTS missed, now
       // injected) is worth far more than a mere reference — its file is where the
@@ -2909,32 +3076,41 @@ export class ToolHandler {
       // (Combine.swift references request/task → score 23 from connected nodes)
       // outranks the file that DEFINES a named symbol (Validation.swift's
       // `validate` → 10) and steals its render slot. Definition ≫ reference.
+      //
+      // Each tier is then scaled by WHAT was matched (RELEVANCE_KIND_WEIGHT): the
+      // tier says how the symbol reached us, the kind weight says whether the
+      // match is evidence. A file whose only claim is an unused local `explore`
+      // constant is a name collision, not an answer (#1500).
       if (namedSeedIds.has(node.id)) {
-        group.score += 50;
+        group.score += 50 * relevanceWeight(node, true);
       } else if (entryNodeIds.has(node.id)) {
-        group.score += 10;
+        group.score += 10 * relevanceWeight(node, true);
       } else if (connectedToEntry.has(node.id)) {
-        group.score += 3;
+        group.score += 3 * relevanceWeight(node, false);
       } else {
-        group.score += 1;
+        // Peripheral: in the subgraph but ≥2 hops from anything the query
+        // matched. Accumulated separately and capped below, so a file cannot
+        // buy relevance with size alone.
+        group.peripheral += relevanceWeight(node, false);
       }
       fileGroups.set(node.filePath, group);
     }
 
-    // Only include files that have entry points or nodes directly connected to entry points
-    const SCORE_FLOOR = 3;
-    let relevantFiles = [...fileGroups.entries()].filter(([, group]) => group.score >= SCORE_FLOOR);
-    diag?.setScoreFloor(SCORE_FLOOR, fileGroups.size, relevantFiles.length);
-
     // Extract query terms for relevance checking
     const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
 
-    // Test/spec/icon/i18n file detector — used both for the pre-sort hard
-    // filter (tiny tier) and the comparator deprioritization (all tiers).
+    // Test/spec/icon/i18n file detector — used by the pre-floor hard filter, the
+    // rank penalty, and the comparator deprioritization.
+    //
+    // The directory pattern is anchored at `^` as well as `/`: a repo-ROOT
+    // `test/` or `spec/` directory (express, cobra, and most of npm/Go) produced
+    // paths like `test/express.raw.js`, which the old leading-`/` form could
+    // never match — so express's routing question spent 59% of its envelope on
+    // three test files while `lib/router/index.js` never rendered.
     const isLowValue = (p: string) => {
       const lp = p.toLowerCase();
       return (
-        /\/(tests?|__tests?__|spec)\//.test(lp) ||
+        /(?:^|\/)(tests?|__tests?__|specs?)\//.test(lp) ||
         /_test\.go$/.test(lp) ||
         /(?:^|\/)test_[^/]+\.py$/.test(lp) ||
         /_test\.py$/.test(lp) ||
@@ -2950,7 +3126,35 @@ export class ToolHandler {
       );
     };
 
-    // Hard-exclude test/spec files (ALL tiers, not just tiny). One slipped test
+    // One DB probe over every file the query touched, then O(1) per lookup.
+    // Unions the index-time content-banner flag (CG-5) with the filename
+    // convention, so a Go monorepo's generated CRUD (`payroll.go` carrying a
+    // DO-NOT-EDIT banner and nothing in its name) down-ranks the same way
+    // `.pb.go` always has (#1500). Covers the whole subgraph, not just the
+    // grouped files, because the graph-mass penalty below is keyed on it too.
+    const isGeneratedCandidate = cg.generatedFilePredicate(new Set([
+      ...fileGroups.keys(),
+      ...[...subgraph.nodes.values()].map((n) => n.filePath),
+    ]));
+
+    /**
+     * Rank penalty for a file, applied to its relevance score AND (below) to its
+     * graph mass — the two signals the sort actually keys on. Applying it to the
+     * score alone would leave the #1500 case unfixed: the generated CRUD carries
+     * MORE graph mass than the hand-written use-case, and graph mass outranks
+     * score in the comparator.
+     */
+    const rankPenalty = (filePath: string): number =>
+      (isGeneratedCandidate(filePath) ? GENERATED_RANK_PENALTY : 1)
+      * (isLowValue(filePath) ? LOW_VALUE_RANK_PENALTY : 1);
+
+    for (const [filePath, group] of fileGroups) {
+      group.score = (group.score + Math.min(PERIPHERAL_SCORE_CAP, group.peripheral))
+        * rankPenalty(filePath);
+    }
+
+    // Hard-exclude test/spec files (ALL tiers — the per-tier `excludeLowValueFiles`
+    // flag this used to be gated on was dead config and is gone). One slipped test
     // file dominates the per-file budget on small repos (cobra's `command_test.go`
     // displaced `args.go`) AND wastes budget on large ones (Django's
     // `custom_lookups/tests.py` ate ~2.3 KB of the 28 KB cap, crowding out the
@@ -2958,16 +3162,50 @@ export class ToolHandler {
     // an architecture question. Skip when the query itself is about tests — the
     // legitimate "explore the tests" case — and only cut if ≥2 non-test candidates
     // remain (else tests are the only signal for this area).
+    //
+    // Runs BEFORE the score floor, on the whole gather. Judging "are there other
+    // candidates?" on the post-floor set was too late: express's routing question
+    // left one non-test file past the floor, the guard stood down, and the floor's
+    // keep-minimum then pulled two test files back in as the "spread".
+    let candidateFiles = [...fileGroups.entries()];
     {
       const queryMentionsTests = /\b(test|tests|testing|spec|verify|verifies)\b/i.test(query);
       if (!queryMentionsTests) {
-        const nonLow = relevantFiles.filter(([p]) => !isLowValue(p));
+        const nonLow = candidateFiles.filter(([p]) => !isLowValue(p));
         if (nonLow.length >= 2) {
-          relevantFiles = nonLow;
+          candidateFiles = nonLow;
         }
       }
-      diag?.setLowValueFiltered(relevantFiles.length);
+      diag?.setLowValueFiltered(fileGroups.size, candidateFiles.length);
     }
+
+    // Relative score floor — see SCORE_FLOOR_* for why it is a fraction of the
+    // best file's score and why that fraction is clamped at both ends.
+    const topScore = Math.max(0, ...candidateFiles.map(([, g]) => g.score));
+    const scoreFloor = Math.max(
+      SCORE_FLOOR_ABSOLUTE,
+      Math.min(SCORE_FLOOR_MAX, topScore * SCORE_FLOOR_FRACTION_OF_TOP),
+    );
+    let relevantFiles = candidateFiles.filter(([, group]) => group.score >= scoreFloor);
+    if (relevantFiles.length < SCORE_FLOOR_KEEP_MIN) {
+      // Backfill from what the RELATIVE floor cut, best first, at two strengths:
+      //
+      //  - THIN (1-2 files survived): only files with real evidence. A file whose
+      //    entire claim is one isolated variable scores 0.8 and stays out —
+      //    express's `examples/route-middleware` matched nothing but a local
+      //    `app` and would otherwise have taken 48% of that envelope. Padding a
+      //    precise answer with a wrong file doesn't save the agent the follow-up
+      //    call it would pad against.
+      //  - EMPTY (nothing survived): take the best of whatever matched. Returning
+      //    "no relevant code found" when the gather DID find candidates is the
+      //    worst outcome on the board — the agent falls straight back to grep.
+      const minEvidence = relevantFiles.length === 0 ? Number.EPSILON : SCORE_FLOOR_ABSOLUTE;
+      relevantFiles = candidateFiles
+        .filter(([, group]) => group.score >= minEvidence)
+        .sort((a, b) => b[1].score - a[1].score || b[1].nodes.length - a[1].nodes.length)
+        .slice(0, Math.max(SCORE_FLOOR_KEEP_MIN, relevantFiles.length));
+    }
+    diag?.setScoreFloor(scoreFloor, relevantFiles.length);
 
     // Secondary signal: how many DISTINCT query terms each file matches (path +
     // symbol names). Kept only as a tiebreak — the PRIMARY relevance is graph
@@ -2991,6 +3229,11 @@ export class ToolHandler {
     const nodeRwr = this.computeGraphRelevance(
       [...subgraph.nodes.keys()], subgraph.edges, entryNodeIds,
     );
+    //
+    // Carries `rankPenalty` too, so generated/low-value files are demoted on the
+    // sort's PRIMARY key rather than only at the tiebreak. Everything downstream
+    // (centrality, the relevance gate, the buried-rescue test, the comparator)
+    // reads this map, so the penalty applies once and applies everywhere.
     const fileGraphScore = new Map<string, number>();
     for (const node of subgraph.nodes.values()) {
       fileGraphScore.set(
@@ -2998,6 +3241,7 @@ export class ToolHandler {
         (fileGraphScore.get(node.filePath) ?? 0) + (nodeRwr.get(node.id) ?? 0),
       );
     }
+    for (const [fp, mass] of fileGraphScore) fileGraphScore.set(fp, mass * rankPenalty(fp));
     const maxGraph = Math.max(0, ...fileGraphScore.values());
 
     // Central file(s): the 1-2 most graph-central files that also match the
@@ -3042,7 +3286,7 @@ export class ToolHandler {
       changeSurfaceFiles.add(fp);
       if (!subgraph.nodes.has(t.id)) subgraph.nodes.set(t.id, t);
       let group = fileGroups.get(fp);
-      if (!group) { group = { nodes: [], score: 0 }; fileGroups.set(fp, group); }
+      if (!group) { group = { nodes: [], score: 0, peripheral: 0 }; fileGroups.set(fp, group); }
       if (!group.nodes.some((n) => n.id === t.id)) group.nodes.push(t);
       group.score = Math.max(group.score, 45);
       if (!relevantFiles.some(([f]) => f === fp)) relevantFiles.push([fp, group]);
@@ -3114,12 +3358,6 @@ export class ToolHandler {
       (fileTermHits.get(fp) ?? 0) >= 2 &&
       (entryFiles.has(fp) || centralFiles.has(fp));
 
-    // One DB probe over the ranked candidates, then O(1) per comparison. Unions
-    // the index-time content-banner flag with the filename convention, so a Go
-    // monorepo's generated CRUD (`payroll.go` carrying a DO-NOT-EDIT banner and
-    // nothing in its name) down-ranks the same way `.pb.go` always has (#1500).
-    const isGeneratedCandidate = cg.generatedFilePredicate(relevantFiles.map(([fp]) => fp));
-
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
@@ -3153,7 +3391,11 @@ export class ToolHandler {
       // when asking about the actual flow, and dumping their bodies inflates
       // the response (the cosmos Q3 explore otherwise leads with
       // `expected_keepers_mocks.go`, displacing the real `tally.go` content
-      // and forcing the agent to Read tally.go anyway).
+      // and forcing the agent to Read tally.go anyway). Both this and the
+      // low-value key above are now BACKSTOPS: `rankPenalty` has already scaled
+      // the score and the graph mass these files reach this comparison with, so
+      // a generated file no longer outranks a hand-written one just by scoring
+      // higher (#1500). This still settles the exact ties the penalty leaves.
       const aGen = isGeneratedCandidate(a[0]);
       const bGen = isGeneratedCandidate(b[0]);
       if (aGen !== bGen) return aGen ? 1 : -1;
@@ -3228,6 +3470,14 @@ export class ToolHandler {
     // the diagnostic can show what each file's share of the envelope was BOUGHT
     // with (score, graph mass, term hits, flags) — not just what it cost.
     if (diag) {
+      const kindMix = (nodes: Node[]): string => {
+        const counts = new Map<string, number>();
+        for (const n of nodes) counts.set(n.kind, (counts.get(n.kind) ?? 0) + 1);
+        return [...counts.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([k, c]) => `${k}:${c}`)
+          .join(' ');
+      };
       sortedFiles.forEach(([fp, group], i) => {
         diag.noteCandidate(fp, {
           rank: i + 1,
@@ -3241,6 +3491,8 @@ export class ToolHandler {
           spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id)),
           lowValue: isLowValue(fp),
           generated: isGeneratedCandidate(fp),
+          penalty: rankPenalty(fp),
+          kinds: kindMix(group.nodes),
         });
       });
     }
@@ -3869,8 +4121,13 @@ export class ToolHandler {
     // in the source section, and a trailing pointer list is pure overhead.
     if (budget.includeAdditionalFiles) {
       const remainingRelevant = sortedFiles.slice(filesIncluded);
+      // Ranked files are already covered by `remainingRelevant`; the rest of the
+      // gather (below the floor) becomes the pointer list. The Set guards the
+      // one overlap case — a file the SCORE_FLOOR_KEEP_MIN fallback pulled in
+      // despite scoring under the relative floor.
+      const rankedPaths = new Set(sortedFiles.map(([fp]) => fp));
       const peripheralFiles = [...fileGroups.entries()]
-        .filter(([, group]) => group.score < 3)
+        .filter(([fp, group]) => group.score < scoreFloor && !rankedPaths.has(fp))
         .sort((a, b) => b[1].score - a[1].score);
       const remainingFiles = [...remainingRelevant, ...peripheralFiles];
       if (remainingFiles.length > 0) {

@@ -19,10 +19,12 @@
  *     runPayrollCycleAll → BuildPayslip → Upsert chain resolving end-to-end. If
  *     the fixture rots, these fail first and say so.
  *
- *  2. **Budget allocation** — the gate, written with `it.fails` because it
- *     DOCUMENTS A BUG THAT IS STILL OPEN. Vitest passes an `it.fails` test only
- *     while its body throws, so the suite is green today and goes RED the moment
- *     allocation is fixed (CG-10 scoring + CG-12 proportional bytes).
+ *  2. **Budget allocation** — the gate. CG-10 (relevance scoring) closed most of
+ *     it: the generated CRUD now ranks and delivers BELOW the hand-written
+ *     workflow, and those assertions are live regressions. What remains is
+ *     `it.fails`, which DOCUMENTS THE PART STILL OPEN — vitest passes an
+ *     `it.fails` test only while its body throws, so it goes RED the moment
+ *     CG-12's proportional byte allocation lands.
  *     **When it goes red, delete the `.fails` — do not delete the test.**
  *
  * The same assertions run outside vitest, against the built dist and with the
@@ -202,54 +204,72 @@ describe('#1500 — generated Go CRUD beside a hand-written payroll workflow', (
     const generatedShare = () => share((p) => p.startsWith(GENERATED_PREFIX));
 
     /**
-     * BASELINE 2026-08-03 (very-tiny tier, 13,000-char budget): 23,020 chars
-     * allocated against it, cut to 16,011 by the 19,500 hard ceiling. The
-     * generated CRUD delivers 57.4%; the hand-written layer delivers 25.6%, all
-     * of it domain types. `cycle.go` is allocated the single largest slice
-     * (7,052 chars, 30.6%) and delivers ZERO — the ceiling drops its whole
-     * section — so runPayrollCycleAll, the hand-written BuildPayslip and the
-     * real Upsert never reach the agent at all.
+     * BASELINE 2026-08-03, BEFORE CG-10 (very-tiny tier, 13,000-char budget):
+     * 23,020 chars allocated, cut to 16,011 by the 19,500 hard ceiling. The
+     * generated CRUD delivered 57.4%; the hand-written layer 25.6%, all of it
+     * domain types. `cycle.go` was allocated the single largest slice (7,052
+     * chars, 30.6%) and delivered ZERO — the ceiling dropped its whole section —
+     * so runPayrollCycleAll, the hand-written BuildPayslip and the real Upsert
+     * never reached the agent.
      *
-     * Each `it.fails` below passes ONLY while that is still true.
-     * ⚠ When one goes red, the bug is fixed: remove `.fails`, keep the test.
+     * AFTER CG-10 (relevance scoring): the generated files rank #3/#4 instead of
+     * #1/#2 — kind-weighted scoring plus a generated rank PENALTY on both the
+     * score and the graph mass, rather than the old tiebreak-at-equal-score.
+     * `cycle.go` now delivers 38.9% and the generated layer 23.5%. Four of the
+     * five gates below are green and are now live regressions.
+     *
+     * STILL OPEN, for CG-12 (proportional byte allocation): the render loop
+     * still allocates by FILE SIZE within the ranked set, and `maxFiles` is 4 at
+     * this tier — so `payslip_builder.go` ranks #6 and never renders, and
+     * `func (s *Service) BuildPayslip` is absent. Its `it.fails` passes ONLY
+     * while that is still true. ⚠ When it goes red, remove `.fails`, keep it.
      */
-    it.fails('CG-12 GATE: concentrates the envelope on the hand-written workflow', () => {
+    it('CG-10 GATE: concentrates the envelope on the hand-written workflow', () => {
       expect(answerShare()).toBeGreaterThanOrEqual(0.55);
     });
 
-    it.fails('CG-12 GATE: does not spend the envelope on the generated CRUD', () => {
+    it('CG-10 GATE: does not spend the envelope on the generated CRUD', () => {
       expect(generatedShare()).toBeLessThanOrEqual(0.25);
     });
 
-    it.fails('CG-12 GATE: delivers the workflow file it allocated the most bytes to', () => {
+    it('CG-10 GATE: ranks the generated CRUD below the hand-written workflow', () => {
+      // The #1500 report in one assertion: before CG-10 the generated layer both
+      // outscored AND out-delivered the use-case that implements the business rule.
+      expect(answerShare()).toBeGreaterThan(generatedShare());
+    });
+
+    it('CG-10 GATE: delivers the workflow file it allocated the most bytes to', () => {
       expect(bytes.get('internal/usecase/payroll/cycle.go') ?? 0).toBeGreaterThan(0);
     });
 
-    it.fails('CG-12 GATE: delivers the calculation the question asks about', () => {
-      expect(bytes.get('internal/usecase/payroll/payslip_builder.go') ?? 0).toBeGreaterThan(0);
-    });
-
-    it.fails('CG-12 GATE: puts the hand-written chain in the response, not its generated twin', () => {
-      // Bare `BuildPayslip`/`Upsert` also match the generated collisions — these
-      // needles are unique to the hand-written chain.
+    it('CG-10 GATE: puts the hand-written chain in the response, not its generated twin', () => {
+      // Bare `Upsert` also matches the generated collision — these needles are
+      // unique to the hand-written chain.
       expect(response).toContain('runPayrollCycleAll');
-      expect(response).toContain('func (s *Service) BuildPayslip');
       expect(response).toContain('s.store.Upsert(ctx, slip)');
     });
 
-    it('records the shape of the failure so a regression is legible', () => {
-      // Not a gate — an assertion-free-ish snapshot of WHY the gates above fail,
-      // so a future change that shifts the numbers shows up in the diff rather
-      // than silently flipping an it.fails.
+    it.fails('CG-12 GATE: delivers the calculation the question asks about', () => {
+      // `payslip_builder.go` ranks #6; the tier's maxFiles is 4 and the render
+      // loop spends by file size, so it never gets bytes. Score-proportional
+      // allocation (CG-12) is what closes this.
+      expect(bytes.get('internal/usecase/payroll/payslip_builder.go') ?? 0).toBeGreaterThan(0);
+      expect(response).toContain('func (s *Service) BuildPayslip');
+    });
+
+    it('records the shape of the allocation so a regression is legible', () => {
+      // Not a gate — a snapshot of the split, so a future change that shifts the
+      // numbers shows up in the diff rather than silently flipping a gate.
       const generated = generatedShare();
       const answer = answerShare();
-      const workflow = bytes.get('internal/usecase/payroll/cycle.go') ?? 0;
       expect({
         generatedWinsEnvelope: generated > answer,
-        workflowFileDeliversNothing: workflow === 0,
+        workflowFileDelivers: (bytes.get('internal/usecase/payroll/cycle.go') ?? 0) > 0,
+        builderFileDelivers: (bytes.get('internal/usecase/payroll/payslip_builder.go') ?? 0) > 0,
       }).toEqual({
-        generatedWinsEnvelope: true,
-        workflowFileDeliversNothing: true,
+        generatedWinsEnvelope: false,
+        workflowFileDelivers: true,
+        builderFileDelivers: false,
       });
     });
   });

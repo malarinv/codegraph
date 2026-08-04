@@ -2,8 +2,14 @@
   "$comment": [
     "Regression fixtures for GitHub issue #1500 / epic CG-1 — relevance-proportional",
     "explore budget allocation. Run them with `node scripts/agent-eval/probe-allocation.mjs`",
-    "against a built dist/. BOTH FIXTURES FAIL TODAY: that is the point — they document",
-    "the bug and become the pass gate for the allocation change (CG-10 + CG-12).",
+    "against a built dist/.",
+    "",
+    "STATUS: CG-10 (relevance scoring) closed the RANKING half of both fixtures — nothing",
+    "incidental reaches the envelope any more. What still fails is the BYTE SPLIT among the",
+    "files that correctly ranked in, because the render loop spends by file size: a small",
+    "weakly-relevant file ships whole while the strongly-relevant one is clipped at",
+    "maxCharsPerFile. That is CG-12's gate. Each fixture's `baseline` records the pre-CG-10",
+    "numbers; `afterCG10` records where it stands now.",
     "",
     "`groups` partitions the files explore rendered into `answer` (what the query is",
     "actually about) and `incidental` (what wins the envelope today on name collisions).",
@@ -65,6 +71,16 @@
           "internal/usecase/payroll/cycle.go": 0.0
         },
         "verdict": "The workflow file is allocated the single largest slice (30.6%) and delivers ZERO — the hard ceiling drops its whole section. Generated CRUD takes 57.4% of what the agent actually receives; runPayrollCycleAll, BuildPayslip and the real Upsert never reach the response."
+      },
+      "afterCG10": {
+        "measuredOn": "2026-08-04",
+        "delivered": {
+          "internal/usecase/payroll/cycle.go": 0.389,
+          "internal/gen/fkit/payroll/payroll_cycle.go": 0.235,
+          "internal/domain/payroll/payslip.go": 0.226,
+          "internal/gen/fkit/payroll/payslip.go": 0.0
+        },
+        "verdict": "PASSES answerShareAtLeast (61.5%), incidentalShareAtMost (23.5%), topFileGroup, and the cycle.go + runPayrollCycleAll + real-Upsert needles. The generated files now rank #3/#4 instead of #1/#2 — kind weighting plus a 0.3x generated penalty on BOTH the score and the graph mass, which is the key the comparator sorts on. STILL FAILING for CG-12: payslip_builder.go ranks #6 against the tier's maxFiles of 4, so `func (s *Service) BuildPayslip` never renders."
       }
     },
     {
@@ -106,6 +122,14 @@
           "scripts/agent-eval/offload-eval-cost.mjs": 0.0
         },
         "verdict": "The script corpus takes 71.8% of the delivered envelope (79.4% of what was allocated) against tools.ts's 18.5%, despite tools.ts scoring 46 vs 10, carrying 2.3x the graph mass and 3x the distinct term hits."
+      },
+      "afterCG10": {
+        "measuredOn": "2026-08-04",
+        "delivered": {
+          "src/resolution/memory-budget.ts": 0.512,
+          "src/mcp/tools.ts": 0.329
+        },
+        "verdict": "PASSES incidentalShareAtMost: every scripts/agent-eval/*.mjs file is gone (0.0%), which is CG-10's acceptance bar — their sole match was an unused file-scope `explore`/`BUDGET` constant, worth 0.08x weight, and the relative floor (8.2) then cut them. tools.ts ranks #1. STILL FAILING for CG-12: memory-budget.ts scores 18 to tools.ts's 41 yet takes 51.2% of the envelope to tools.ts's 32.9%, purely because it is small enough to ship whole while tools.ts is clipped at maxCharsPerFile. Allocation still follows file size, not relevance."
       }
     }
   ]

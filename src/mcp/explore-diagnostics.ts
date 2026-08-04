@@ -64,6 +64,20 @@ export interface ExploreCandidateMeta {
   spine: boolean;
   lowValue: boolean;
   generated: boolean;
+  /**
+   * Multiplier `rankPenalty` applied to BOTH `score` and `graphScore` (1 = no
+   * penalty). Generated and test/i18n files rank on discounted signals, so the
+   * raw values are `score / penalty` — worth reporting, since "why did this
+   * generated file lose?" is otherwise invisible in the numbers (CG-10).
+   */
+  penalty: number;
+  /**
+   * Which NodeKinds the file's matched symbols were, most-numerous first
+   * (`function:4 constant:1`). The scoring is kind-weighted, so this is the
+   * breakdown that explains a score — a file carried by one isolated `constant`
+   * is the #1500 failure, and it is legible here at a glance.
+   */
+  kinds: string;
 }
 
 interface FileRecord extends ExploreCandidateMeta {
@@ -81,13 +95,14 @@ interface FileRecord extends ExploreCandidateMeta {
   skipped?: ExploreSkipReason;
 }
 
+/** Candidate counts down the selection pipeline, in the order it runs. */
 interface StageCounts {
   /** Files with at least one gathered node. */
   grouped: number;
-  /** Survived the `group.score >= scoreFloor` filter. */
-  pastScoreFloor: number;
   /** Survived the test/spec/icon/i18n hard-exclude. */
   pastLowValueFilter: number;
+  /** Survived the `group.score >= scoreFloor` filter. */
+  pastScoreFloor: number;
   /** Survived the graph-relevance gate. */
   pastRelevanceGate: number;
 }
@@ -142,8 +157,8 @@ export interface ExploreDiagnosticReport {
     graphGateThreshold: number;
     graphGateApplied: boolean;
     filesGrouped: number;
-    filesPastScoreFloor: number;
     filesPastLowValueFilter: number;
+    filesPastScoreFloor: number;
     filesRanked: number;
     filesRenderedByLoop: number;
     filesInFinalOutput: number;
@@ -216,18 +231,21 @@ export class ExploreDiagnostics {
     }
   }
 
-  /** Candidate count after the initial `group.score >= floor` filter. */
-  setScoreFloor(floor: number, grouped: number, kept: number): void {
-    this.scoreFloor = floor;
+  /**
+   * Candidate count after the test/spec/icon/i18n hard-exclude — the FIRST
+   * selection stage, ahead of the score floor.
+   */
+  setLowValueFiltered(grouped: number, kept: number): void {
     this.stages.grouped = grouped;
-    this.stages.pastScoreFloor = kept;
     this.stages.pastLowValueFilter = kept;
+    this.stages.pastScoreFloor = kept;
     this.stages.pastRelevanceGate = kept;
   }
 
-  /** Candidate count after the test/spec/icon/i18n hard-exclude. */
-  setLowValueFiltered(kept: number): void {
-    this.stages.pastLowValueFilter = kept;
+  /** Candidate count after the `group.score >= floor` filter. */
+  setScoreFloor(floor: number, kept: number): void {
+    this.scoreFloor = floor;
+    this.stages.pastScoreFloor = kept;
     this.stages.pastRelevanceGate = kept;
   }
 
@@ -342,8 +360,8 @@ export class ExploreDiagnostics {
         graphGateThreshold: this.graphGateThreshold,
         graphGateApplied: this.graphGateApplied,
         filesGrouped: this.stages.grouped,
-        filesPastScoreFloor: this.stages.pastScoreFloor,
         filesPastLowValueFilter: this.stages.pastLowValueFilter,
+        filesPastScoreFloor: this.stages.pastScoreFloor,
         filesRanked: this.stages.pastRelevanceGate,
         filesRenderedByLoop: filesIncluded,
         filesInFinalOutput: rendered.length,
@@ -364,6 +382,8 @@ export class ExploreDiagnostics {
           spine: r.spine,
           lowValue: r.lowValue,
           generated: r.generated,
+          penalty: round6(r.penalty),
+          kinds: r.kinds,
           render: r.render ?? null,
           skipped: r.skipped ?? null,
           clipped: r.clipped,
@@ -463,8 +483,8 @@ export function renderTable(report: ExploreDiagnosticReport): string {
   );
   out.push(
     `  files ${num(sel.filesGrouped)} grouped` +
-    ` → ${num(sel.filesPastScoreFloor)} past score floor (>=${sel.scoreFloor})` +
     ` → ${num(sel.filesPastLowValueFilter)} past low-value filter` +
+    ` → ${num(sel.filesPastScoreFloor)} past score floor (>=${sel.scoreFloor.toFixed(1)})` +
     ` → ${num(sel.filesRanked)} past relevance gate` +
     ` → ${num(sel.filesInFinalOutput)} in output (maxFiles ${num(budget.maxFiles)})`,
   );
@@ -479,7 +499,7 @@ export function renderTable(report: ExploreDiagnosticReport): string {
   // when the ceiling truncated; showing both makes that divergence obvious.
   const shown = files.filter((f) => f.emittedChars > 0 || f.finalChars > 0);
   if (shown.length > 0) {
-    out.push('   #  alloc%  deliv%    bytes  score    graph  hits  flags                render     file');
+    out.push('   #  alloc%  deliv%    bytes  score    graph  hits  pen   flags                render     file');
     for (const f of shown) {
       out.push(
         '  ' +
@@ -487,13 +507,15 @@ export function renderTable(report: ExploreDiagnosticReport): string {
         pct(f.allocatedShare).padStart(6) + '  ' +
         pct(f.share).padStart(6) + '  ' +
         num(f.emittedChars).padStart(7) + '  ' +
-        String(f.score).padStart(5) + '  ' +
+        f.score.toFixed(1).padStart(5) + '  ' +
         f.graphScore.toFixed(5).padStart(7) + '  ' +
         String(f.termHits).padStart(4) + '  ' +
+        f.penalty.toFixed(2).padStart(4) + '  ' +
         flagString(f).padEnd(19) + '  ' +
         ((f.render ?? '-') + (f.clipped ? '*' : '')).padEnd(9) + '  ' +
         f.path,
       );
+      out.push('        kinds: ' + (f.kinds || '-'));
     }
     out.push('  (bytes = source allocated by the render loop; deliv% = 0 means the hard ceiling dropped the section)');
     out.push('  (* = clipped: some source in this file was elided, windowed, or its section dropped)');
@@ -508,7 +530,8 @@ export function renderTable(report: ExploreDiagnosticReport): string {
     for (const f of skipped.slice(0, 15)) {
       out.push(
         `    #${String(f.rank).padStart(2)} ${f.path} — ${f.skipped ?? f.render ?? 'not reached'}` +
-        ` (score ${f.score}, graph ${f.graphScore.toFixed(5)}, hits ${f.termHits})`,
+        ` (score ${f.score.toFixed(1)}, graph ${f.graphScore.toFixed(5)}, hits ${f.termHits},` +
+        ` pen ${f.penalty.toFixed(2)}, ${f.kinds || '-'})`,
       );
     }
     if (skipped.length > 15) out.push(`    … and ${skipped.length - 15} more`);

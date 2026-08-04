@@ -196,11 +196,17 @@ describe('codegraph_explore allocation diagnostic', () => {
     // Totals: envelope vs budget, and the file-selection funnel with its floor.
     expect(out).toMatch(/envelope [\d,]+ chars delivered · [\d,]+ allocated of [\d,]+ budget/);
     expect(out).toMatch(/hard ceiling [\d,]+/);
-    expect(out).toMatch(/files [\d,]+ grouped .*past score floor \(>=\d+\).*in output \(maxFiles \d+\)/);
+    // The funnel runs low-value filter → score floor; the floor is fractional
+    // now that scoring is kind-weighted (CG-10).
+    expect(out).toMatch(
+      /files [\d,]+ grouped .*past low-value filter .*past score floor \(>=[\d.]+\).*in output \(maxFiles \d+\)/,
+    );
     // Per-file columns.
-    expect(out).toMatch(/#\s+alloc%\s+deliv%\s+bytes\s+score\s+graph\s+hits\s+flags\s+render\s+file/);
+    expect(out).toMatch(/#\s+alloc%\s+deliv%\s+bytes\s+score\s+graph\s+hits\s+pen\s+flags\s+render\s+file/);
     expect(out).toContain('src/session.ts');
     expect(out).toMatch(/\d+\.\d%/);
+    // Kind mix — what each file's score was bought with.
+    expect(out).toMatch(/kinds: (?:\w+:\d+ ?)+/);
   });
 
   it('appends one JSON report per call to a sidecar path', async () => {
@@ -222,7 +228,8 @@ describe('codegraph_explore allocation diagnostic', () => {
     expect(report.budget.maxOutputChars).toBeGreaterThan(0);
     expect(report.envelope.chars).toBeGreaterThan(0);
     expect(report.selection.scoreFloor).toBeGreaterThan(0);
-    expect(report.selection.filesGrouped).toBeGreaterThanOrEqual(report.selection.filesPastScoreFloor);
+    expect(report.selection.filesGrouped).toBeGreaterThanOrEqual(report.selection.filesPastLowValueFilter);
+    expect(report.selection.filesPastLowValueFilter).toBeGreaterThanOrEqual(report.selection.filesPastScoreFloor);
     expect(report.selection.filesPastScoreFloor).toBeGreaterThanOrEqual(report.selection.filesRanked);
     expect(report.selection.filesRanked).toBeGreaterThanOrEqual(report.selection.filesInFinalOutput);
     expect(report.selection.filesInFinalOutput).toBeGreaterThan(0);
