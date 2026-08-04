@@ -126,6 +126,41 @@ question.
 
 ---
 
+## The without-arm was never actually without codegraph
+
+Establishing this baseline turned up a contamination channel that had been open
+the whole time, and it invalidates any number this harness produced for an arm
+that had Bash.
+
+The without-arm gets an empty MCP config, so it has no codegraph tool. It still
+has **Bash** — and the target repo still carries the `.codegraph/` index the
+with-arm needs, with the `codegraph` binary on PATH. Agents find that. In the
+first clean-looking 7-repo pass, **14 of 15 without-arm runs ran `codegraph
+explore` through Bash**, one of them by way of `ls .codegraph && codegraph
+explore …`. That arm was measuring codegraph-over-CLI against codegraph-over-MCP,
+not codegraph against its absence.
+
+It cuts the other way too. When the *with*-arm shells out, the output arrives as
+a Bash result and is attributed to Bash — understating what codegraph itself
+occupies. One of 15 with-arm runs did this.
+
+The fix is in `run-all.sh`: both arms now run on a PATH where the CLI is hidden,
+so the MCP server is the only way to reach codegraph and stays the A/B's single
+variable. The binary usually shares a directory with tools the run needs — here
+`claude` sits right next to it — so the directory is substituted in place by one
+of symlinks to every entry except `codegraph`, which keeps PATH order and
+precedence intact. The run aborts if `claude` or `node` did not survive.
+
+Prevention alone would fail silently the next time the binary lands somewhere
+new, so there is detection as well: `parse-run.mjs` flags any Bash command naming
+codegraph, and `parse-bench-readme.mjs` drops contaminated without-arm runs from
+the aggregate (`CG_INCLUDE_CONTAMINATED=1` keeps them).
+
+**Anyone re-reading older A/B results from this harness should assume the
+without-arm may have been using codegraph.**
+
+---
+
 ## Baseline: the 7 README repos
 
 <!-- RESULTS -->

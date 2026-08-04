@@ -83,6 +83,35 @@ for t in claude node; do
   PATH="$ARM_PATH" command -v "$t" >/dev/null || { echo "sanitized PATH lost '$t' — refusing to run"; exit 1; }
 done
 
+# Hiding it from PATH is not enough. An agent denied `codegraph` ran
+# `find / -maxdepth 4 -iname "*codegraph*"`, found the binary, and invoked it by
+# ABSOLUTE PATH — so block the invocation itself with a PreToolUse hook. Written
+# into $OUT as a run artifact rather than a repo file, same as the MCP configs.
+# The pattern deliberately matches only COMMAND positions: `grep codegraph x`,
+# `ls .codegraph` and `which codegraph` are looking, not using, and pass through.
+CG_CMD_RE='(^|[;&|(]|&&|\|\||\$\(|`)[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*[A-Za-z0-9_./~-]*codegraph([[:space:]]|$)'
+cat > "$OUT/no-cli-hook.sh" <<HOOK
+#!/usr/bin/env bash
+# Deny Bash invocations of the codegraph CLI so the MCP server stays the A/B's
+# single variable. Looking for it is fine; running it is not.
+set -uo pipefail
+cmd="\$(cat | jq -r '.tool_input.command // empty' 2>/dev/null)"
+if printf '%s' "\$cmd" | grep -Eq '$CG_CMD_RE'; then
+  msg="The codegraph CLI is not available in this session. Answer using the tools you have."
+  jq -n --arg m "\$msg" '{reason:\$m, hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:\$m}}'
+fi
+exit 0
+HOOK
+chmod +x "$OUT/no-cli-hook.sh"
+cat > "$OUT/hook-settings.json" <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash $OUT/no-cli-hook.sh"}]}]}}
+JSON
+command -v jq >/dev/null || { echo "jq is required for the CLI-block hook — install it or the arms will be contaminated"; exit 1; }
+# Prove the hook denies a real invocation and lets a mere mention through.
+_probe() { printf '{"tool_input":{"command":%s}}' "$1" | bash "$OUT/no-cli-hook.sh" | grep -c deny; }
+[ "$(_probe '"/Users/x/.local/bin/codegraph explore \"q\""')" = 1 ] || { echo "hook fails to block an absolute-path invocation"; exit 1; }
+[ "$(_probe '"grep -rn codegraph src/"')" = 0 ] || { echo "hook over-blocks a plain mention"; exit 1; }
+
 [ -n "$CG_BIN" ] || { echo "no codegraph binary on PATH (set CG_BIN)"; exit 1; }
 [ -d "$REPO/.codegraph" ] || { echo "no .codegraph index at $REPO — index it first"; exit 1; }
 case "$MODE" in headless|tmux|all) ;; *) echo "mode must be headless|tmux|all (got '$MODE')"; exit 1;; esac
@@ -129,6 +158,7 @@ headless() {
         --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
         --max-budget-usd 4 \
         --strict-mcp-config --mcp-config "$cfg" \
+        --settings "$OUT/hook-settings.json" \
         ${resume[@]+"${resume[@]}"} \
         </dev/null > "$out" 2>>"$OUT/run-$label.err" )
     echo "exit $? -> $out ($(wc -l < "$out" | tr -d ' ') lines) [turn $seg/${#TURNS[@]}]"

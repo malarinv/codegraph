@@ -59,6 +59,11 @@ const FAMILIES = ['codegraph', 'read', 'search', 'bash', 'other'];
 // The without-arm's way of getting the same bytes: reading and searching files.
 const FILE_ACCESS = ['read', 'search', 'bash'];
 
+// A Bash command that INVOKES the codegraph CLI, in any command position and by
+// any path. Mentions are not invocations: `grep codegraph src/`, `ls .codegraph`
+// and `which codegraph` all pass. Kept in step with run-all.sh's blocking hook.
+const CG_CLI_RE = /(^|[;&|(]|&&|\|\||\$\(|`)\s*(?:[A-Za-z_]\w*=\S*\s+)*[\w./~-]*codegraph(\s|$)/;
+
 const textOf = (content) =>
   Array.isArray(content) ? content.map((c) => c.text ?? (typeof c === 'string' ? c : JSON.stringify(c))).join('')
     : typeof content === 'string' ? content
@@ -131,7 +136,7 @@ export function parseSession(files) {
             // An arm with no codegraph MCP can still shell out to the CLI — the
             // target repo carries the .codegraph/ index and the binary is on
             // PATH. That silently turns a "without" arm into codegraph-over-CLI.
-            if (/\bcodegraph\b/.test(b.input?.command ?? '')) cliCalls++;
+            if (CG_CLI_RE.test(b.input?.command ?? '')) cliCalls++;
           }
           else if (b.name === 'Read') detail = ` ${(b.input?.file_path ?? '').split('/').slice(-1)[0]}`;
           toolCalls.push(`${b.name}${detail}`);
