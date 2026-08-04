@@ -446,3 +446,59 @@ Both were found by writing the invariant rather than by reading the code:
 tier monotonicity, the floor) reference the constants and hold at any value; one test pins
 the literals, so re-tuning a constant is a visible decision that says *re-run the probe*
 rather than a silent re-calibration of the fixtures.
+
+## CG-15 — what the agent A/B found: a reservation can go unspent
+
+The agent A/B (full record: [`../benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explore-allocation-ab-1500.md))
+passed on both medium repos — client-go and excalidraw at Read 0 in every run, excalidraw
+**34s → 24s median with one fewer explore call**, the generated clientsets that took 10.5% of a
+baseline envelope gone from every new run — and **failed on the small control**, express, in 1
+run of 3: 4 Reads of `lib/utils.js` where the baseline made 1 Read of a different file.
+
+It is not agent variance. Replaying that run's own query deterministically:
+
+| `lib/utils.js` (5,293 B, 272 lines) | baseline | CG-12 |
+|---|---|---|
+| delivered | **6,380 (46.1%) whole** | **583 (7.7%) cluster stub** |
+| source envelope (budget 13,000) | 13,849 | 9,241 |
+
+The diagnostic says the allocator was right and the render loop was not:
+
+```
+allocation 12,398 reserved of 12,400 pool · nothing cliffed
+ #  deliv%   bytes  reserved  score   flags                render    file
+ 1    5.7%     583     3,870   56.0   named entry central  clusters  lib/utils.js
+```
+
+`utils.js` is the **top-ranked** file and was **reserved 3,870 chars — of which it spent 583.**
+The whole-file bound (`src/mcp/tools.ts:4008`) is
+`allowance + min(GRACE_MAX, allowance * GRACE_FRACTION)` = `3,870 + 580` = 4,450, just under the
+file's 5,293 bytes, so the whole-file render is declined; the fallback cluster render has three
+matched symbols to work with and emits 583 chars. The remaining 3,287 chars of the reservation
+are **not redistributed — they are lost**, which is why the response shrank by a third against
+an unchanged budget.
+
+This is CG-12's own acceptance criterion (*"no file that was previously unclipped becomes
+clipped"*) failing. CG-14 recorded one instance as a documented exception (`memory-budget.ts`);
+this is the same defect in the wild, where it costs an agent round-trip. It is **not** systemic:
+on both medium repos the render loop saturates (`[over budget] [TRUNCATED]`, 23,599 of a 23,600
+pool reserved) so there is nothing left to lose. It needs a file whose reservation lands below
+its own size while its matched-symbol set is thin — likeliest on small repos, where per-file
+reservations are smallest.
+
+### The two candidate fixes
+
+Widening the envelope is explicitly **not** one of them — that is the dial iter2 already proved
+doesn't work, and the bytes here were reserved for this file already.
+
+1. **Let a large-enough reservation buy the whole file.** Render whole when
+   `allowance >= k * fileSize` for some `k < 1` (utils.js sits at 0.73), letting the bounded
+   overshoot the hard ceiling already tolerates absorb the difference. Smaller change, matches
+   the observed shape.
+2. **Redistribute the shortfall.** Once the render loop knows a file's realised size, hand what
+   it cannot spend to the next-ranked file. The stronger invariant — *the pool is spent* — and
+   it fixes the shrinking-envelope symptom directly rather than case by case.
+
+They compose; (1) alone would have carried this case. Whichever lands needs the express shape as
+a hermetic fixture — a mid-sized top-ranked file with few matched symbols, sized just above its
+reservation — because nothing in the current suite has that shape, which is how it shipped.

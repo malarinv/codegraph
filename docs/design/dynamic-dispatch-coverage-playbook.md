@@ -278,6 +278,28 @@ Status legend: ✅ done+validated · 🔬 hole identified · ⬜ not started.
 (Verify the exact supported set against `src/extraction/languages/` and
 `src/resolution/frameworks/` before starting — this table is a starting point.)
 
+### Retrieval A/Bs that are not coverage work
+
+Coverage decides whether a flow *exists* in the graph. A second class of change decides
+whether the answer explore returns is *sufficient* — how the byte envelope is divided across
+the files it found. Same pass bar (Read → 0, no wall-clock regression), same `--model sonnet
+--effort high` rule, but the harness is `ab-new-vs-baseline.sh` (new build vs baseline build,
+**both codegraph-on**) rather than `run-all.sh`'s with-vs-without, because the question is
+whether a change to codegraph helped, not whether codegraph helps.
+
+| Change | Repos | Result |
+|---|---|---|
+| **Score-proportional byte allocation** (#1500, epic CG-1) — 2026-08-04, `feature/CG-1` vs `main`, 3 runs/arm | client-go (Go, 2,454 f, 2,001 generated — the reporter's shape), excalidraw (TS, 672 f), express (JS, 147 f, control) | **Gate FAILED.** Read 0/0/0 both arms on client-go and excalidraw; excalidraw **34s → 24s median with one fewer explore call**; generated clientsets/informers drop from 10.5% of a baseline envelope to 0% in every new run. But express regressed in 1 of 3 runs (**4 Reads, 52s**) from a reproducible non-agent cause: a file whose proportional reservation lands below its own size no longer renders whole and its cluster render leaves the reservation **unspent** (`lib/utils.js` 6,380 B whole → 583 B stub, envelope 13.8K → 9.2K). Full record: [`docs/benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explore-allocation-ab-1500.md) |
+
+Two harness lessons from that run, both now baked into `ab-new-vs-baseline.sh`:
+
+- **Name codegraph in the prompt for this class of A/B.** Whether the agent picks the tool at
+  all is an adoption axis a retrieval change does not touch; a run that never calls explore
+  measures nothing about how explore divides its bytes (one pre-run: 0 codegraph calls, 3
+  Reads). It is not a forced-Read-0 — the agent stays free to fall back, which is the bar.
+- **`CODEGRAPH_NO_PROMPT_HOOK=1` on both arms.** The machine's ambient front-load hook resolves
+  to whatever is in `dist/`, which the script itself rewrites between arms.
+
 ---
 
 ## 7. Known limits & gotchas (from the excalidraw/django work)
