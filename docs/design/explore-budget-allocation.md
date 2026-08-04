@@ -190,12 +190,94 @@ was tried and rejected: node-count ties handed the slot to `examples/route-middl
 instead, at 48% of the envelope. Thin-and-precise beats padded-with-noise — a wrong file
 does not save the agent the follow-up call it would pad against.
 
+## CG-12 — score-proportional allocation
+
+CG-10 fixed *what* gets into the response. This fixes *how the bytes are split among what
+got in* — which, until now, was not really decided at all. Every admitted file was capped at
+the same flat `maxCharsPerFile`, and the whole-file rule handed anything under
+`maxCharsPerFile × 3` its entire contents. So the envelope followed **file size**:
+
+- self-query: `memory-budget.ts` (score 18) shipped whole at 5,672 and took **51.2%**;
+  `tools.ts` (score 41, 4× the graph mass, 3× the term hits — it literally holds the
+  allocator) was clipped at 3,800 and got **32.9%**.
+- payroll-go: two generated CRUD files shipped whole at ~4.5 KB each *and* consumed two of
+  the tier's four file slots, so `BuildPayslip` — the hand-written "calculate" half of the
+  question — ranked #6 and never rendered at all.
+
+### The model
+
+`allocateExploreBudget` (`src/mcp/tools.ts`) runs once, after ranking, before anything
+renders. It reserves each file a share of the envelope; the render loop then spends a
+reservation instead of racing for whatever the files above it left.
+
+1. **Weight** = `score × worth × (spine ? 2 : 1)`. `worth` is `rankPenalty` applied a
+   *second* time: ranking answers "is this file about the query", allocation answers "will
+   these bytes teach the agent anything". Generated CRUD can legitimately rank — it
+   name-collides on every domain word, and it is big and densely self-referential, so it
+   scores on the structural keys the comparator leads with — while its bytes stay mechanical
+   boilerplate. That second penalty is what finally sinks it.
+2. **Relative cliff** at 15% of the top weight, itself capped at `SCORE_FLOOR_MAX`. A file
+   under it gets **zero source** — path, symbols and line numbers only. It costs ~100 chars
+   instead of ~4,500, and it does **not consume a `maxFiles` slot**, so the slot passes to a
+   file that earns its bytes. That slot hand-off is what got `BuildPayslip` into the
+   response. The cap matters as much as the fraction: one 500-scoring god-file would
+   otherwise put the cliff at 75 and silence every peer the score floor had just admitted.
+3. **Floor then split.** Every admitted file gets `MIN_CHARS` (700 — enough for one complete
+   method); the remainder splits by weight. The floor is what keeps a diffuse survey
+   question returning a spread; the remainder is what concentrates a precise one.
+4. **Safety valve**, not a per-file cap: no file exceeds 70% of the envelope. The flat
+   per-file cap is retired as the primary guard — the proportional split already bounds a
+   file by its weight share.
+
+The reservation then governs **every** render path — whole-file, clusters, focused/skeleton
+— where before the whole-file branch was 3× more generous than the cluster branch, which is
+the 3× swing that decided the split by file size.
+
+Two supporting changes were needed to make the reservation actually bite:
+
+- **Oversize clusters shrink by member.** A cluster is a merge of whole symbol ranges, and
+  on a densely-packed file every symbol merges into one blob spanning the file (cycle.go's
+  209-line `Service`). The old rule took the top-ranked cluster whole however big it was, so
+  a single-cluster file simply ignored its budget — it took ~40% more than allotted and the
+  file below it was then dropped for lack of room. Shrinking drops whole **members** by
+  importance, so a body is still never cut.
+- **The arrival-order stops are gone.** `budget-90pct` and the `!fileNecessary && totalChars
+  > maxOutputChars` checks dropped files by the order they were reached: whichever files
+  ranked first spent the envelope, and everything after them was cut on a cap it had no say
+  in. Only an absolute hard-ceiling stop remains.
+
+### Measured effect (CG-12)
+
+| repo · query | before (post-CG-10) | after |
+|---|---|---|
+| this repo · self-query fixture | `tools.ts` 32.9%, `memory-budget.ts` 51.2% | **`tools.ts` 60.6%**, memory-budget 17.2% |
+| payroll-go fixture | answer 61.5%, generated 23.5%, `BuildPayslip` absent | answer **78.7%**, generated **0%**, `BuildPayslip` **delivered** |
+| express · route a request | 2 files, top 43.1% | 1 file, top **82.3%** (`response.js` cliffed — 0 term hits) |
+| express · app registers middleware | 1 file, 71.6% | **byte-identical** |
+| cobra · parse flags and execute | 2 files, `command.go` 40.1% | 2 files, `command.go` **77.2%** |
+| cobra · DIFFUSE "main components" | 3 files, top 48.1% | 3 files, top 50.0% — spread preserved |
+| gin · request reaches a handler | 3 files, top `ginS/gins.go` 48.8% | 3 files, top **`routergroup.go`** 53.8% |
+| gin · DIFFUSE "what it provides" | 3 files, top `recovery.go` 43.0% | **4 files**, top `context.go` 33.3% |
+
+The two diffuse rows are the over-correction control: file counts hold (3→3, 3→4), so a
+survey question still gets a spread. The two gin rows also moved the top file to a more apt
+one — `routergroup.go` over the thin `ginS` singleton wrapper, `context.go` over
+`recovery.go` — because concentration is decided by weight rather than by which file
+happened to be small.
+
+**Exception to "no previously-unclipped file becomes clipped".** `memory-budget.ts` was
+unclipped-whole at 5,672 and now clusters within its 3.1 KB reservation. That is the epic's
+own diagnosis of the bug rather than a regression: it scored 18 against `tools.ts`'s 58 and
+was taking the larger slice purely for being small enough to ship whole. The guarantee holds
+where it was meant to — no file loses bytes to a *tighter cap*; the only files that lose are
+ones the proportional split says were over-served.
+
 ## The regression fixtures (CG-6)
 
 Two fixtures pin the failure mode so it can never silently return. They were written to
-**fail** — that is what they were for. CG-10 closed the ranking half of both; the byte-split
-assertions still fail and are the pass gate for CG-12. The numbers quoted below are the
-**pre-CG-10 baseline**; see "Measured effect" above for where they stand now.
+**fail** — that is what they were for. CG-10 closed the ranking half of both and CG-12 the
+byte-split half; **both now pass** and are live regressions. The numbers quoted below are
+the **pre-CG-10 baseline**; see the two "Measured effect" tables above for where they stand.
 
 They are declared in `scripts/agent-eval/allocation-fixtures.json` and run by
 `scripts/agent-eval/probe-allocation.mjs`, which drives the CG-4 diagnostic through a JSONL

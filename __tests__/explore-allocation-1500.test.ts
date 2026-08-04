@@ -218,11 +218,13 @@ describe('#1500 — generated Go CRUD beside a hand-written payroll workflow', (
      * `cycle.go` now delivers 38.9% and the generated layer 23.5%. Four of the
      * five gates below are green and are now live regressions.
      *
-     * STILL OPEN, for CG-12 (proportional byte allocation): the render loop
-     * still allocates by FILE SIZE within the ranked set, and `maxFiles` is 4 at
-     * this tier — so `payslip_builder.go` ranks #6 and never renders, and
-     * `func (s *Service) BuildPayslip` is absent. Its `it.fails` passes ONLY
-     * while that is still true. ⚠ When it goes red, remove `.fails`, keep it.
+     * AFTER CG-12 (score-proportional allocation): every file's share of the
+     * envelope is reserved before anything renders, and a file under 15% of the
+     * top weight gets no source at all — so the two generated files cliff to
+     * pointers, hand their `maxFiles` slots to the hand-written store and
+     * builder, and the answer group takes ~79% with the generated layer at 0%.
+     * `func (s *Service) BuildPayslip` — the "calculate" half of the question —
+     * finally reaches the agent. All gates below are live regressions now.
      */
     it('CG-10 GATE: concentrates the envelope on the hand-written workflow', () => {
       expect(answerShare()).toBeGreaterThanOrEqual(0.55);
@@ -249,12 +251,20 @@ describe('#1500 — generated Go CRUD beside a hand-written payroll workflow', (
       expect(response).toContain('s.store.Upsert(ctx, slip)');
     });
 
-    it.fails('CG-12 GATE: delivers the calculation the question asks about', () => {
-      // `payslip_builder.go` ranks #6; the tier's maxFiles is 4 and the render
-      // loop spends by file size, so it never gets bytes. Score-proportional
-      // allocation (CG-12) is what closes this.
+    it('CG-12 GATE: delivers the calculation the question asks about', () => {
+      // `payslip_builder.go` ranks #6 and the tier's maxFiles is 4 — it reaches
+      // the response only because the two generated files cliff to pointers
+      // WITHOUT consuming a slot. That slot hand-off is the CG-12 mechanism.
       expect(bytes.get('internal/usecase/payroll/payslip_builder.go') ?? 0).toBeGreaterThan(0);
       expect(response).toContain('func (s *Service) BuildPayslip');
+    });
+
+    it('CG-12 GATE: withholds the generated CRUD bytes but still names it', () => {
+      // A cliffed file costs ~100 chars instead of ~4,500, and stays one
+      // follow-up explore away — withholding is only cheap if it stays nameable.
+      expect(bytes.get('internal/gen/fkit/payroll/payslip.go') ?? 0).toBe(0);
+      expect(response).toContain('**Not shown above — explore these names for their source**');
+      expect(response).toMatch(/internal\/gen\/fkit\/payroll\/payslip\.go: \w+:\d+/);
     });
 
     it('records the shape of the allocation so a regression is legible', () => {
@@ -269,7 +279,7 @@ describe('#1500 — generated Go CRUD beside a hand-written payroll workflow', (
       }).toEqual({
         generatedWinsEnvelope: false,
         workflowFileDelivers: true,
-        builderFileDelivers: false,
+        builderFileDelivers: true,
       });
     });
   });

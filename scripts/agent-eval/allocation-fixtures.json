@@ -4,12 +4,12 @@
     "explore budget allocation. Run them with `node scripts/agent-eval/probe-allocation.mjs`",
     "against a built dist/.",
     "",
-    "STATUS: CG-10 (relevance scoring) closed the RANKING half of both fixtures — nothing",
-    "incidental reaches the envelope any more. What still fails is the BYTE SPLIT among the",
-    "files that correctly ranked in, because the render loop spends by file size: a small",
-    "weakly-relevant file ships whole while the strongly-relevant one is clipped at",
-    "maxCharsPerFile. That is CG-12's gate. Each fixture's `baseline` records the pre-CG-10",
-    "numbers; `afterCG10` records where it stands now.",
+    "STATUS: BOTH FIXTURES PASS. CG-10 (relevance scoring) closed the RANKING half —",
+    "nothing incidental reaches the envelope any more — and CG-12 (score-proportional",
+    "allocation with a relative cliff) closed the BYTE SPLIT: each file's share is reserved",
+    "before anything renders, and a file under 15% of the top weight gets no source at all,",
+    "freeing both its bytes and its maxFiles slot. Each fixture records the pre-CG-10",
+    "`baseline`, the interim `afterCG10`, and the current `afterCG12`.",
     "",
     "`groups` partitions the files explore rendered into `answer` (what the query is",
     "actually about) and `incidental` (what wins the envelope today on name collisions).",
@@ -81,6 +81,19 @@
           "internal/gen/fkit/payroll/payslip.go": 0.0
         },
         "verdict": "PASSES answerShareAtLeast (61.5%), incidentalShareAtMost (23.5%), topFileGroup, and the cycle.go + runPayrollCycleAll + real-Upsert needles. The generated files now rank #3/#4 instead of #1/#2 — kind weighting plus a 0.3x generated penalty on BOTH the score and the graph mass, which is the key the comparator sorts on. STILL FAILING for CG-12: payslip_builder.go ranks #6 against the tier's maxFiles of 4, so `func (s *Service) BuildPayslip` never renders."
+      },
+      "afterCG12": {
+        "measuredOn": "2026-08-04",
+        "note": "19,337 delivered, nothing truncated. Both generated files cliffed to pointers (weight 3.9 and 3.5 against a cliff of 5.4), which frees the two maxFiles slots the hand-written store and builder then take.",
+        "delivered": {
+          "internal/usecase/payroll/cycle.go": 0.306,
+          "internal/domain/payroll/payslip.go": 0.212,
+          "internal/usecase/payroll/payslip_builder.go": 0.151,
+          "internal/store/payslipstore/store.go": 0.118,
+          "internal/gen/fkit/payroll/payroll_cycle.go": 0.0,
+          "internal/gen/fkit/payroll/payslip.go": 0.0
+        },
+        "verdict": "ALL GATES PASS. Answer group 78.7% (from 25.6% at baseline), generated layer 0.0% (from 57.4%). All four hand-written files deliver source, including payslip_builder.go — `func (s *Service) BuildPayslip`, the 'calculate' half of the question, finally reaches the agent. The generated files are still NAMED with their symbols and line numbers under 'Not shown above', so withholding their bytes costs ~100 chars each instead of ~4,500 and stays one follow-up explore away."
       }
     },
     {
@@ -130,6 +143,16 @@
           "src/mcp/tools.ts": 0.329
         },
         "verdict": "PASSES incidentalShareAtMost: every scripts/agent-eval/*.mjs file is gone (0.0%), which is CG-10's acceptance bar — their sole match was an unused file-scope `explore`/`BUDGET` constant, worth 0.08x weight, and the relative floor (8.2) then cut them. tools.ts ranks #1. STILL FAILING for CG-12: memory-budget.ts scores 18 to tools.ts's 41 yet takes 51.2% of the envelope to tools.ts's 32.9%, purely because it is small enough to ship whole while tools.ts is clipped at maxCharsPerFile. Allocation still follows file size, not relevance."
+      },
+      "afterCG12": {
+        "measuredOn": "2026-08-04",
+        "note": "18,134 delivered, nothing truncated. tools.ts scores 58 here (it grew by the allocator this task added), memory-budget.ts 18.",
+        "delivered": {
+          "src/mcp/tools.ts": 0.606,
+          "src/resolution/memory-budget.ts": 0.172,
+          "src/resolution/lru-cache.ts": 0.111
+        },
+        "verdict": "ALL GATES PASS. tools.ts takes 60.6% of the envelope, up from 18.5% at baseline and 32.9% after CG-10 — past the epic's >50% acceptance bar. The reversal is the whole point: memory-budget.ts no longer wins by being small enough to ship whole (it now clusters within its 3.1K reservation), and tools.ts is no longer clipped at maxCharsPerFile (11K reservation, ~3x the old flat cap). Exception to 'no previously-unclipped file becomes clipped': memory-budget.ts was unclipped-whole at 5,672 and is now clipped to its proportional share. That is the epic's own diagnosis of the bug, not a regression — it scored 18 against tools.ts's 58 and was taking the larger slice."
       }
     }
   ]

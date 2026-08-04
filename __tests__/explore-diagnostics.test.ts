@@ -202,7 +202,9 @@ describe('codegraph_explore allocation diagnostic', () => {
       /files [\d,]+ grouped .*past low-value filter .*past score floor \(>=[\d.]+\).*in output \(maxFiles \d+\)/,
     );
     // Per-file columns.
-    expect(out).toMatch(/#\s+alloc%\s+deliv%\s+bytes\s+score\s+graph\s+hits\s+pen\s+flags\s+render\s+file/);
+    expect(out).toMatch(/#\s+alloc%\s+deliv%\s+bytes\s+reserved\s+score\s+graph\s+hits\s+pen\s+flags\s+render\s+file/);
+    // The proportional split (CG-12): what was reserved, and where the cliff fell.
+    expect(out).toMatch(/allocation [\d,]+ reserved of [\d,]+ pool · cliff at weight [\d.]+/);
     expect(out).toContain('src/session.ts');
     expect(out).toMatch(/\d+\.\d%/);
     // Kind mix — what each file's score was bought with.

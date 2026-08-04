@@ -45,9 +45,9 @@ export type ExploreRenderMode =
 /** Why a ranked candidate never reached the output. */
 export type ExploreSkipReason =
   | 'max-files'          // maxFiles reached before this file
-  | 'budget-90pct'       // incidental file past the 90%-of-budget soft stop
-  | 'budget-whole-file'  // incidental whole-file render wouldn't fit
-  | 'budget-clusters'    // incidental cluster render wouldn't fit
+  | 'cliff'              // below the relevance cliff — pointer, not bytes (CG-12)
+  | 'budget-whole-file'  // whole-file render wouldn't fit under the hard ceiling
+  | 'budget-clusters'    // cluster render wouldn't fit under the hard ceiling
   | 'unreadable'         // outside root, missing, or read error
   | 'no-ranges';         // no renderable line ranges in this file
 
@@ -82,6 +82,14 @@ export interface ExploreCandidateMeta {
 
 interface FileRecord extends ExploreCandidateMeta {
   path: string;
+  /**
+   * Chars this file was RESERVED by the proportional allocator (CG-12), before
+   * it rendered anything. `0` = cliffed; `null` = never reached the allocator.
+   * The gap between this and `emittedChars` is the whole story of a budget bug:
+   * reserved-but-unspent means the file had nothing to say, spent-over-reserved
+   * means an oversize first cluster or the whole-file grace overshot.
+   */
+  allowance: number | null;
   render?: ExploreRenderMode;
   /** Source chars the render loop handed to `lines` (pre-final-truncation). */
   emittedChars: number;
@@ -117,6 +125,7 @@ interface BudgetShape {
 /** One file's line in the report. Also the JSONL sidecar's per-file shape. */
 export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   path: string;
+  allowance: number | null;
   render: ExploreRenderMode | null;
   skipped: ExploreSkipReason | null;
   clipped: boolean;
@@ -163,6 +172,17 @@ export interface ExploreDiagnosticReport {
     filesRenderedByLoop: number;
     filesInFinalOutput: number;
   };
+  /** The proportional split (CG-12): what each file was promised, and why. */
+  allocation: {
+    /** Chars divided among admitted files (envelope minus per-file overhead). */
+    pool: number;
+    /** Weight threshold the cliff fired at; 0 when nothing was cliffed. */
+    cliffAt: number;
+    /** Files given zero source — pointers in the not-shown list instead. */
+    cliffed: string[];
+    /** Sum of reservations. Must not exceed `pool`. */
+    reserved: number;
+  };
   files: ExploreDiagnosticFile[];
 }
 
@@ -201,6 +221,9 @@ export class ExploreDiagnostics {
   private graphGateThreshold = 0;
   private graphGateApplied = false;
   private note = '';
+  private allocPool = 0;
+  private allocCliffAt = 0;
+  private allocCliffed: string[] = [];
 
   private constructor(
     private readonly sink: Sink,
@@ -260,9 +283,32 @@ export class ExploreDiagnostics {
   /** Record one ranked candidate's scoring inputs, in final sort order. */
   noteCandidate(path: string, meta: ExploreCandidateMeta): void {
     this.files.set(path, {
-      path, ...meta,
+      path, ...meta, allowance: null,
       emittedChars: 0, finalChars: 0, share: 0, allocatedShare: 0, clipped: false,
     });
+  }
+
+  /**
+   * Record the proportional split (CG-12), taken right after ranking and before
+   * a single byte renders. Called once per explore.
+   */
+  setAllocation(
+    allowances: ReadonlyMap<string, number>,
+    cliffed: readonly string[],
+    cliffAt: number,
+    pool: number,
+  ): void {
+    this.allocPool = pool;
+    this.allocCliffAt = cliffAt;
+    this.allocCliffed = [...cliffed];
+    for (const [path, chars] of allowances) {
+      const rec = this.files.get(path);
+      if (rec) rec.allowance = chars;
+    }
+    for (const path of cliffed) {
+      const rec = this.files.get(path);
+      if (rec) rec.allowance = 0;
+    }
   }
 
   /** A candidate rendered source into the response. */
@@ -366,6 +412,12 @@ export class ExploreDiagnostics {
         filesRenderedByLoop: filesIncluded,
         filesInFinalOutput: rendered.length,
       },
+      allocation: {
+        pool: this.allocPool,
+        cliffAt: round6(this.allocCliffAt),
+        cliffed: [...this.allocCliffed],
+        reserved: records.reduce((s, r) => s + (r.allowance ?? 0), 0),
+      },
       files: records
         .slice()
         .sort((a, b) => b.emittedChars - a.emittedChars || b.finalChars - a.finalChars || a.rank - b.rank)
@@ -384,6 +436,7 @@ export class ExploreDiagnostics {
           generated: r.generated,
           penalty: round6(r.penalty),
           kinds: r.kinds,
+          allowance: r.allowance,
           render: r.render ?? null,
           skipped: r.skipped ?? null,
           clipped: r.clipped,
@@ -492,6 +545,14 @@ export function renderTable(report: ExploreDiagnosticReport): string {
     `  relevance gate ${sel.graphGateApplied ? 'applied' : 'not applied'}` +
     ` at graph >= ${sel.graphGateThreshold.toFixed(5)} (6% of max ${sel.maxGraph.toFixed(5)})`,
   );
+  const alloc = report.allocation;
+  out.push(
+    `  allocation ${num(alloc.reserved)} reserved of ${num(alloc.pool)} pool` +
+    ` · cliff at weight ${alloc.cliffAt.toFixed(2)}` +
+    (alloc.cliffed.length > 0
+      ? ` · ${alloc.cliffed.length} cliffed to pointers: ${alloc.cliffed.join(', ')}`
+      : ' · nothing cliffed'),
+  );
   out.push('');
 
   // Allocated (not delivered) is the allocator's own decision — the number the
@@ -499,7 +560,7 @@ export function renderTable(report: ExploreDiagnosticReport): string {
   // when the ceiling truncated; showing both makes that divergence obvious.
   const shown = files.filter((f) => f.emittedChars > 0 || f.finalChars > 0);
   if (shown.length > 0) {
-    out.push('   #  alloc%  deliv%    bytes  score    graph  hits  pen   flags                render     file');
+    out.push('   #  alloc%  deliv%    bytes  reserved  score    graph  hits  pen   flags                render     file');
     for (const f of shown) {
       out.push(
         '  ' +
@@ -507,6 +568,7 @@ export function renderTable(report: ExploreDiagnosticReport): string {
         pct(f.allocatedShare).padStart(6) + '  ' +
         pct(f.share).padStart(6) + '  ' +
         num(f.emittedChars).padStart(7) + '  ' +
+        (f.allowance === null ? '-' : num(f.allowance)).padStart(8) + '  ' +
         f.score.toFixed(1).padStart(5) + '  ' +
         f.graphScore.toFixed(5).padStart(7) + '  ' +
         String(f.termHits).padStart(4) + '  ' +
@@ -531,7 +593,7 @@ export function renderTable(report: ExploreDiagnosticReport): string {
       out.push(
         `    #${String(f.rank).padStart(2)} ${f.path} — ${f.skipped ?? f.render ?? 'not reached'}` +
         ` (score ${f.score.toFixed(1)}, graph ${f.graphScore.toFixed(5)}, hits ${f.termHits},` +
-        ` pen ${f.penalty.toFixed(2)}, ${f.kinds || '-'})`,
+        ` pen ${f.penalty.toFixed(2)}, ${flagString(f) || 'no flags'}, ${f.kinds || '-'})`,
       );
     }
     if (skipped.length > 15) out.push(`    … and ${skipped.length - 15} more`);
