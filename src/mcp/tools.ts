@@ -521,6 +521,45 @@ export const EXPLORE_ALLOCATION = {
    */
   WHOLE_FILE_GRACE_FRACTION: 0.15,
   WHOLE_FILE_GRACE_MAX: 800,
+  /**
+   * A reservation that already covers this fraction of a file BUYS THE WHOLE
+   * FILE (CG-21), even though the file is bigger than the reservation.
+   *
+   * The grace above is calibrated as a *sliver* — it only rescues a file that
+   * essentially fits. Below it there is a hole the render loop cannot fill:
+   * express's `lib/utils.js` (5,293 B) was the TOP-ranked file, reserved 3,870,
+   * declined the whole-file render at a 4,450 grace bound, and then spent 583 on
+   * a three-symbol cluster render. The other 3,287 chars of its reservation were
+   * neither redistributed nor delivered — the envelope shrank by a third against
+   * an unchanged budget and the agent Read the file back four times.
+   *
+   * So the rule is not "does the file fit the reservation" but "has the
+   * reservation already bought most of the file": at 0.6 the loop pays at most
+   * two-thirds of a reservation extra to avoid losing the whole thing, and it
+   * spends bytes it was going to spend anyway on a file that already earned
+   * them. Below the fraction the shortfall is real — the file is several times
+   * its reservation, clustering is the right answer, and the carry-forward
+   * (`reservedSoFar`/`sourceSpent` in the render loop) hands whatever it cannot
+   * spend to the next file down.
+   */
+  WHOLE_FILE_BUY_FRACTION: 0.6,
+  /**
+   * The buy rule's overshoot is funded from ONE pool for the whole response,
+   * sized as this fraction of the envelope — deliberately the same 15% as
+   * `WHOLE_FILE_GRACE_FRACTION`, one level up: the grace is a sliver of a
+   * FILE's reservation, this is a sliver of the RESPONSE's envelope.
+   *
+   * Per-file funding is the version that fails, and it fails the same way the
+   * bug being fixed does. The merit test is a RATIO, so wherever several files
+   * sit near it they all qualify, and N independent overshoots inflate the
+   * response until the render ceiling drops whatever is last. Measured on the
+   * #1500 payroll fixture: three files bought whole and `payslip_builder.go` —
+   * the file that computes the payslip the question asks about, rank #6 — was
+   * dropped entirely so three higher-ranked files could each ship their final
+   * sliver. A dropped section is strictly worse than a clustered one, so one
+   * shared pool, spent in rank order, is the bound that matters.
+   */
+  WHOLE_FILE_BUY_OVERSHOOT_FRACTION: 0.15,
 } as const;
 
 /** One candidate file's allocation inputs, in final rank order. */
@@ -3818,6 +3857,32 @@ export class ToolHandler {
     // instead of a different symbol's code under the requested name.
     const staleRendered: string[] = [];
     const staleOmitted: string[] = [];
+    // Reservation carry-forward (CG-21). A reservation is a promise the render
+    // loop has to KEEP, not a cap it may quietly under-use: a file that cannot
+    // spend what it was given — thin matched-symbol set, unreadable, drifted off
+    // disk, skipped for the ceiling — must hand the difference DOWN the rank
+    // order, not drop it. Tracked as two running totals rather than a `spent`
+    // variable threaded through the dozen `continue`s below, so no exit path can
+    // forget to account: everything the loop has PROMISED so far, and everything
+    // it has actually EMITTED. Their gap is the slack the next file may add to
+    // its own reservation.
+    //
+    // Symmetric on the other side: a whole-file buy that overshoots makes
+    // `sourceSpent` outrun `reservedSoFar`, which suppresses slack until a later
+    // under-spend covers the debt. So the pool is conserved in both directions,
+    // and no file is ever cut BELOW the reservation it was promised.
+    let reservedSoFar = 0;
+    let sourceSpent = 0;
+    // Funding line for the whole-file BUY rule: the response's SOURCE may reach
+    // everything the allocator promised plus one bounded overshoot, and no more.
+    // Measured against the promise rather than `renderCeiling` on purpose — the
+    // ceiling sits 50% above the envelope and says nothing about who is owed
+    // what, so funding a buy from it just moves the shortfall to whichever file
+    // the loop reaches last. See WHOLE_FILE_BUY_OVERSHOOT_FRACTION.
+    const reservedTotal = [...allocation.allowances.values()].reduce((sum, n) => sum + n, 0);
+    const sourceCeiling = reservedTotal + Math.round(
+      budget.maxOutputChars * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_OVERSHOOT_FRACTION,
+    );
 
     for (const [filePath, group] of sortedFiles) {
       if (filesIncluded >= maxFiles) {
@@ -3835,11 +3900,24 @@ export class ToolHandler {
       // bounded by it instead of by the flat per-file cap, which is what stops
       // allocation from following file size: a small weakly-relevant file no
       // longer ships whole while the strongly-relevant one is clipped.
-      const allowance = allocation.allowances.get(filePath);
-      if (allowance === undefined) {
+      const reserved = allocation.allowances.get(filePath);
+      if (reserved === undefined) {
         diag?.recordSkip(filePath, 'max-files');
         continue;
       }
+      // What this file may actually spend: its own reservation PLUS whatever the
+      // files above it left on the table. Every render bound below reads this,
+      // never `reserved` — that is what makes the carry-forward reach the render
+      // paths instead of being bookkeeping. Slack flows to the next file in RANK
+      // order because that is the only file a single-pass loop can still pay;
+      // `MAX_SHARE` keeps that from turning a weak tail file into the response,
+      // so the allocator's share ceiling holds end-to-end and not just at
+      // reservation time.
+      const allowance = Math.min(
+        reserved + Math.max(0, reservedSoFar - sourceSpent),
+        Math.max(reserved, Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE)),
+      );
+      reservedSoFar += reserved;
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) {
         diag?.recordSkip(filePath, 'unreadable');
@@ -3974,6 +4052,7 @@ export class ToolHandler {
             : 'skeleton (signatures only — codegraph_explore a name for its full body; do NOT Read)';
           lines.push(fileSectionHeader(filePath, `${names} · ${tag}`), '', '```' + lang, skel.join('\n'), '```', '');
           totalChars += skel.join('\n').length + 120;
+          sourceSpent += skel.join('\n').length;
           // Always "clipped": the per-symbol view elides bodies by construction.
           diag?.recordRender(filePath, bodyIds.size > 0 ? 'focused' : 'skeleton', skel.join('\n').length, true);
           renderedFilePaths.push(filePath);
@@ -4005,11 +4084,36 @@ export class ToolHandler {
       // reservation removes the swing without touching the rule's purpose (a small
       // file sliced is a lossy subset the agent just Reads in full anyway).
       const WHOLE_FILE_MAX_LINES = isCentralFile ? 280 : 220;
-      const WHOLE_FILE_MAX_CHARS = allowance + Math.min(
+      // Two bounds, whichever is larger (CG-21):
+      //   GRACE — the reservation plus a sliver, for a file that essentially fits;
+      //   BUY   — the reservation already covers most of the file, so the rest is
+      //           cheaper to ship than to lose. A file between the two used to
+      //           fall through to clustering and then spend a FRACTION of its
+      //           reservation, and the remainder was neither delivered nor
+      //           redistributed. See WHOLE_FILE_BUY_FRACTION.
+      //
+      // The BUY arm is two independent tests, and keeping them apart is the whole
+      // design. MERIT reads `reserved` — did THIS file's own relevance earn most
+      // of itself? — so borrowed slack can never promote a weak file to whole.
+      // FUNDING reads the shared overshoot pool, so the bytes exist to pay for it.
+      // Slack still reaches the file through `allowance`: it raises the GRACE arm
+      // and shrinks what a buy has to borrow.
+      const graceBound = allowance + Math.min(
         EXPLORE_ALLOCATION.WHOLE_FILE_GRACE_MAX,
         Math.round(allowance * EXPLORE_ALLOCATION.WHOLE_FILE_GRACE_FRACTION),
       );
-      if (fileLines.length <= WHOLE_FILE_MAX_LINES && fileContent.length <= WHOLE_FILE_MAX_CHARS) {
+      // FUNDING, as one inequality: after this file ships whole, does the source
+      // still fit the promise-plus-overshoot line WITH every reservation below
+      // it left payable? `owedBelow` is what makes it a displacement guard
+      // rather than a size cap — a buy that fits the line only by spending a
+      // lower-ranked file's reservation is the trade that dropped
+      // `payslip_builder.go`, and it is refused here. Self-limiting: each buy
+      // grows `sourceSpent`, so the pool cannot be spent twice.
+      const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
+      const buysWhole = fileContent.length <= graceBound
+        || (reserved >= fileContent.length * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_FRACTION
+            && sourceSpent + fileContent.length + owedBelow <= sourceCeiling);
+      if (fileLines.length <= WHOLE_FILE_MAX_LINES && buysWhole) {
         const body = fileContent.replace(/\n+$/, '');
         let wholeSection = exploreLineNumbersEnabled() ? numberSourceLines(body, 1) : body;
         const uniqSymbols = [...new Set(
@@ -4034,6 +4138,7 @@ export class ToolHandler {
         }
         lines.push(wholeHeader, '', '```' + lang, wholeSection, '```', '');
         totalChars += wholeSection.length + 200;
+        sourceSpent += wholeSection.length;
         diag?.recordRender(filePath, 'whole', wholeSection.length, false);
         renderedFilePaths.push(filePath);
         filesIncluded++;
@@ -4406,6 +4511,7 @@ export class ToolHandler {
       lines.push('');
 
       totalChars += fileSection.length + 200;
+      sourceSpent += fileSection.length;
       diag?.recordRender(filePath, 'clusters', fileSection.length, chosenIndices.size < clusters.length);
       renderedFilePaths.push(filePath);
       filesIncluded++;
