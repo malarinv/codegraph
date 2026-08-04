@@ -188,6 +188,19 @@ export function parseSession(files) {
   const charsPerToken = sumD > 0 ? sumC / sumD : CHARS_PER_TOKEN_FALLBACK;
   const calibrated = sumD > 0;
 
+  // How far a single result's token density strays from the run-level ratio.
+  // On a gap that is almost entirely one tool result, `delta` IS that result's
+  // token count, so |chars/ratio - delta| / delta is the attribution error for
+  // that result. The median over such gaps is the metric's real error bar.
+  const errs = [];
+  for (const g of gaps) {
+    if (g.compacted || g.delta <= 0 || g.chars <= 500) continue;
+    if (g.toolChars / g.chars < 0.95) continue;
+    errs.push(Math.abs(g.toolChars / charsPerToken - g.delta) / g.delta);
+  }
+  errs.sort((a, b) => a - b);
+  const dispersion = errs.length ? errs[(errs.length - 1) >> 1] : null;
+
   // ---- Pass 2: attribute gap tokens, then apply evictions FIFO. ------------
   const contributed = Object.fromEntries(FAMILIES.map((f) => [f, 0]));
   const resultChars = Object.fromEntries(FAMILIES.map((f) => [f, 0]));
@@ -258,7 +271,7 @@ export function parseSession(files) {
     processed,
     occupancy: {
       ctxFinal, ctxBase, windowTokens: WINDOW_TOKENS,
-      charsPerToken, calibrated, compactions, evicted: Math.round(evicted),
+      charsPerToken, calibrated, compactions, dispersion, evicted: Math.round(evicted),
       residual: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(residual[f])])),
       contributed: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(contributed[f])])),
       chars: resultChars, results: resultCount,
@@ -298,6 +311,7 @@ export function formatOccupancy(s, indent = '  ') {
     - (o.residual.codegraph + o.residualFileAccess + o.residual.other);
   out.push(
     `${indent}  measure: ${o.charsPerToken.toFixed(2)} chars/tok ${o.calibrated ? 'measured' : '(FALLBACK — no clean gap to calibrate on)'}` +
+    (o.dispersion !== null ? ` ±${(o.dispersion * 100).toFixed(1)}%` : '') +
     ` · turns ${s.turns} · compactions ${o.compactions}` +
     (o.evicted > 0 || dropped > 1 ? ` · evicted ${n(o.evicted)} tok` : '')
   );
