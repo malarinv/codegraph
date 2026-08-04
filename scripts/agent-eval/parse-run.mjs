@@ -90,7 +90,7 @@ export function parseSession(files) {
   const toolCalls = [];          // display sequence
   const nameById = new Map();    // tool_use_id -> tool name
   const counts = {};             // tool name -> calls
-  let initTools = null, result = null, raced = false;
+  let initTools = null, result = null, raced = false, cliCalls = 0;
   const results = [];  // one `result` event per session segment (multi-turn)
   let compactions = 0;
 
@@ -126,7 +126,13 @@ export function parseSession(files) {
           let detail = '';
           if (b.name === 'Task') detail = ` [subagent_type=${b.input?.subagent_type ?? '?'}] ${(b.input?.description ?? '').slice(0, 40)}`;
           else if (/codegraph/.test(b.name)) detail = ` ${JSON.stringify(b.input?.query ?? b.input?.task ?? b.input?.symbol ?? '').slice(0, 60)}`;
-          else if (b.name === 'Bash') detail = ` ${(b.input?.command ?? '').slice(0, 50)}`;
+          else if (b.name === 'Bash') {
+            detail = ` ${(b.input?.command ?? '').slice(0, 50)}`;
+            // An arm with no codegraph MCP can still shell out to the CLI — the
+            // target repo carries the .codegraph/ index and the binary is on
+            // PATH. That silently turns a "without" arm into codegraph-over-CLI.
+            if (/\bcodegraph\b/.test(b.input?.command ?? '')) cliCalls++;
+          }
           else if (b.name === 'Read') detail = ` ${(b.input?.file_path ?? '').split('/').slice(-1)[0]}`;
           toolCalls.push(`${b.name}${detail}`);
         }
@@ -268,7 +274,7 @@ export function parseSession(files) {
     + sumUsage('cache_creation_input_tokens') + sumUsage('output_tokens');
 
   return {
-    files, toolCalls, counts, initTools, result, results, raced,
+    files, toolCalls, counts, initTools, result, results, raced, cliCalls,
     ok: results.length > 0 && results.every((r) => r.subtype === 'success'),
     turns: reqIdx.length,
     tools: toolCalls.filter((t) => !t.startsWith('ToolSearch')).length,
@@ -450,6 +456,7 @@ if (isMain) {
 
   console.log(`\n=== ${files.map((f) => f.split('/').pop()).join(' + ')} ===`);
   console.log(`codegraph tools exposed: ${s.initTools ? s.initTools.length : '?'}${s.raced ? '  [MCP COLD-START RACE — tool call hit "No such tool available"]' : ''}`);
+  if (s.cliCalls) console.log(`!! ${s.cliCalls} Bash call${s.cliCalls === 1 ? '' : 's'} invoked the codegraph CLI — if this is a without-arm, the run is CONTAMINATED`);
   console.log(`\nTool calls (${s.toolCalls.length}):`);
   console.log('  by type:', JSON.stringify(s.counts));
   s.toolCalls.forEach((tc, i) => console.log(`  ${i + 1}. ${tc}`));

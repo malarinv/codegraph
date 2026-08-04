@@ -43,6 +43,46 @@ mkdir -p "$OUT"
 # The A/B's only variable must be the MCP server wired below.
 export CODEGRAPH_NO_PROMPT_HOOK=1
 
+# Hide the codegraph CLI from BOTH arms, so the only way to reach codegraph is
+# the MCP server wired below — which is what makes it the A/B's single variable.
+#
+# Both arms have Bash, and the target repo carries the .codegraph/ index the
+# with-arm needs. Agents FIND that: 14 of 15 without-arm runs in one 7-repo pass
+# ran `codegraph explore` through Bash (one via `ls .codegraph && codegraph
+# explore …`), so that arm was measuring codegraph-over-CLI, not
+# codegraph-absent. It matters in the with-arm too — output that arrives through
+# Bash is attributed to Bash, understating what codegraph itself occupies.
+#
+# The binary usually shares a directory with tools the run needs (claude itself
+# lives next to it here), so dropping the whole directory is not an option.
+# Substitute an equivalent directory IN PLACE: symlinks to every entry except
+# codegraph, keeping PATH order and precedence intact.
+SHIM_BIN="$OUT/nocg-bin"
+rm -rf "$SHIM_BIN"; mkdir -p "$SHIM_BIN"
+sanitized_path() {
+  local out="" d e
+  local IFS=:
+  for d in $PATH; do
+    [ -n "$d" ] || continue
+    if [ -x "$d/codegraph" ]; then
+      for e in "$d"/*; do
+        [ "$(basename "$e")" = codegraph ] && continue
+        ln -sf "$e" "$SHIM_BIN/" 2>/dev/null
+      done
+      d="$SHIM_BIN"
+    fi
+    out="${out:+$out:}$d"
+  done
+  printf '%s' "$out"
+}
+ARM_PATH="$(sanitized_path)"
+if PATH="$ARM_PATH" command -v codegraph >/dev/null 2>&1; then
+  echo "WARNING: 'codegraph' is still on the arm PATH — runs will be contaminated"
+fi
+for t in claude node; do
+  PATH="$ARM_PATH" command -v "$t" >/dev/null || { echo "sanitized PATH lost '$t' — refusing to run"; exit 1; }
+done
+
 [ -n "$CG_BIN" ] || { echo "no codegraph binary on PATH (set CG_BIN)"; exit 1; }
 [ -d "$REPO/.codegraph" ] || { echo "no .codegraph index at $REPO — index it first"; exit 1; }
 case "$MODE" in headless|tmux|all) ;; *) echo "mode must be headless|tmux|all (got '$MODE')"; exit 1;; esac
@@ -83,7 +123,7 @@ headless() {
     [ "$seg" -gt 1 ] && out="$OUT/run-$label.t$seg.jsonl"
     local resume=()
     [ -n "$sid" ] && resume=(--resume "$sid")
-    ( cd "$REPO" && claude -p "$q" \
+    ( cd "$REPO" && PATH="$ARM_PATH" claude -p "$q" \
         --output-format stream-json --verbose \
         --permission-mode bypassPermissions \
         --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
@@ -104,9 +144,11 @@ headless() {
   echo
 }
 
+# CG_ARMS=with|without|both — re-run one arm without redoing the other.
+ARMS="${CG_ARMS:-both}"
 if [ "$MODE" = headless ] || [ "$MODE" = all ]; then
-  headless "headless-with"    "$OUT/mcp-codegraph.json"
-  headless "headless-without" "$OUT/mcp-empty.json"
+  case "$ARMS" in both|with)    headless "headless-with"    "$OUT/mcp-codegraph.json";; esac
+  case "$ARMS" in both|without) headless "headless-without" "$OUT/mcp-empty.json";; esac
 fi
 
 if [ "$MODE" = tmux ] || [ "$MODE" = all ]; then

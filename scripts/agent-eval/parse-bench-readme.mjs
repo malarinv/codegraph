@@ -42,7 +42,7 @@ function parse(dir, label) {
   const o = s.occupancy;
   return {
     dur: s.dur, tools: s.tools, reads: s.reads, grep: s.grep, cg: s.cg,
-    bash: s.counts.Bash || 0,
+    bash: s.counts.Bash || 0, cliCalls: s.cliCalls,
     tokens: s.processed, cost: s.cost, raced: s.raced, turns: s.turns,
     segments: files.length,
     ctx: o.ctxFinal,
@@ -67,7 +67,11 @@ const pct = (w, wo) => wo > 0 ? Math.round((1 - w / wo) * 100) : 0;
 // race, not steady-state value. `CG_INCLUDE_RACED=1` keeps them (to see the raw
 // distribution). The WITHOUT arm has no MCP, so it's never raced.
 const includeRaced = process.env.CG_INCLUDE_RACED === '1';
+// A without-arm run that shelled out to the codegraph CLI measured
+// codegraph-over-CLI, not codegraph-absent. Drop it unless asked otherwise.
+const includeContaminated = process.env.CG_INCLUDE_CONTAMINATED === '1';
 const rows = [];
+let contaminated = 0;
 for (const repo of REPOS) {
   const dir = join(ROOT, repo);
   const runDirs = existsSync(dir) ? readdirSync(dir).filter(d => /^run\d+$/.test(d)).sort() : [];
@@ -75,10 +79,15 @@ for (const repo of REPOS) {
   for (const rd of runDirs) {
     const w = parse(join(dir, rd), 'headless-with');
     if (w) { if (w.raced && !includeRaced) racedExcluded++; else W.push(w); }
-    const wo = parse(join(dir, rd), 'headless-without'); if (wo) WO.push(wo);
+    const wo = parse(join(dir, rd), 'headless-without');
+    if (wo) {
+      if (wo.cliCalls && !includeContaminated) { contaminated++; console.error(`[excluded] ${repo}/${rd} without-arm ran the codegraph CLI ${wo.cliCalls}x`); }
+      else WO.push(wo);
+    }
   }
   rows.push({ repo, W, WO, racedExcluded });
 }
+if (contaminated) console.error(`[excluded] ${contaminated} contaminated without-arm run(s); CG_INCLUDE_CONTAMINATED=1 keeps them\n`);
 
 // ---- Table 1: the existing throughput view. --------------------------------
 console.log('repo        n(w/wo)  time WITH→WITHOUT      tools W→WO   tokens W→WO (saved)     cost W→WO (saved)');
