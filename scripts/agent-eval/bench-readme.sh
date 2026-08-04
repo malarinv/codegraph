@@ -14,6 +14,7 @@ set -uo pipefail
 H="$(cd "$(dirname "$0")" && pwd)"
 C="${CORPUS:-/tmp/codegraph-corpus}"
 RUNS="${RUNS:-4}"
+RUN_FROM="${RUN_FROM:-1}"   # extend an existing pass: RUN_FROM=3 RUNS=3 adds run3 only
 TURNS="${CG_TURNS:-3}"
 ROWS=(
 "vscode|How does the extension host communicate with the main process?|Where in that path would a message be dropped if the extension host crashes?|What would I need to change to add a new message type to that protocol?"
@@ -24,7 +25,7 @@ ROWS=(
 "gin|How does gin route requests through its middleware chain?|Where is the 404 / no-route case handled in that same chain?|What would I change to add a per-route middleware that runs before the global ones?"
 "alamofire|How does Alamofire build, send, and validate a request?|Where does retry / interceptor logic hook into that path?|What would I change to add a new validation step to it?"
 )
-echo "### README A/B START $(date) RUNS=$RUNS TURNS=$TURNS"
+echo "### README A/B START $(date) RUNS=$RUN_FROM..$RUNS TURNS=$TURNS"
 for row in "${ROWS[@]}"; do
   repo="${row%%|*}"; rest="${row#*|}"
   # Take the first $TURNS questions and join them with "||" for run-all.sh.
@@ -36,7 +37,7 @@ for row in "${ROWS[@]}"; do
     q="$q$part"; n=$((n + 1))
   done
   echo "===== $repo ($n turns) ====="
-  for run in $(seq 1 "$RUNS"); do
+  for run in $(seq "$RUN_FROM" "$RUNS"); do
     out="/tmp/ab-readme/$repo/run$run"
     mkdir -p "$out"
     AGENT_EVAL_OUT="$out" bash "$H/run-all.sh" "$C/$repo" "$q" headless > "$out/console.log" 2>&1
