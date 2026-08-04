@@ -39,7 +39,6 @@ import {
 } from 'fs';
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
-import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import { getUpdateNotice } from '../upgrade/update-check';
 import { ExploreDiagnostics } from './explore-diagnostics';
@@ -1588,9 +1587,10 @@ export class ToolHandler {
     // Down-rank generated files within the FTS-returned set so a search
     // for "Send" surfaces the hand-written keeper before .pb.go stubs
     // that share the name. Stable: only reorders generated vs. not.
+    const isGen = cg.generatedFilePredicate(results.map((r) => r.node.filePath));
     const ranked = [...results].sort((a, b) => {
-      const aGen = isGeneratedFile(a.node.filePath) ? 1 : 0;
-      const bGen = isGeneratedFile(b.node.filePath) ? 1 : 0;
+      const aGen = isGen(a.node.filePath) ? 1 : 0;
+      const bGen = isGen(b.node.filePath) ? 1 : 0;
       return aGen - bGen;
     });
 
@@ -3113,6 +3113,13 @@ export class ToolHandler {
       !MULTITERM_OFF &&
       (fileTermHits.get(fp) ?? 0) >= 2 &&
       (entryFiles.has(fp) || centralFiles.has(fp));
+
+    // One DB probe over the ranked candidates, then O(1) per comparison. Unions
+    // the index-time content-banner flag with the filename convention, so a Go
+    // monorepo's generated CRUD (`payroll.go` carrying a DO-NOT-EDIT banner and
+    // nothing in its name) down-ranks the same way `.pb.go` always has (#1500).
+    const isGeneratedCandidate = cg.generatedFilePredicate(relevantFiles.map(([fp]) => fp));
+
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
@@ -3147,8 +3154,8 @@ export class ToolHandler {
       // the response (the cosmos Q3 explore otherwise leads with
       // `expected_keepers_mocks.go`, displacing the real `tally.go` content
       // and forcing the agent to Read tally.go anyway).
-      const aGen = isGeneratedFile(a[0]);
-      const bGen = isGeneratedFile(b[0]);
+      const aGen = isGeneratedCandidate(a[0]);
+      const bGen = isGeneratedCandidate(b[0]);
       if (aGen !== bGen) return aGen ? 1 : -1;
 
       if (a[1].score !== b[1].score) return b[1].score - a[1].score;
@@ -3233,7 +3240,7 @@ export class ToolHandler {
           entry: entryFiles.has(fp),
           spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id)),
           lowValue: isLowValue(fp),
-          generated: isGeneratedFile(fp),
+          generated: isGeneratedCandidate(fp),
         });
       });
     }
@@ -4753,7 +4760,8 @@ export class ToolHandler {
     if (!isQualified) {
       const exact = cg.getNodesByName(symbol);
       if (exact.length > 0) {
-        return [...exact].sort((a, b) => (isGeneratedFile(a.filePath) ? 1 : 0) - (isGeneratedFile(b.filePath) ? 1 : 0));
+        const isGen = cg.generatedFilePredicate(exact.map((n) => n.filePath));
+        return [...exact].sort((a, b) => (isGen(a.filePath) ? 1 : 0) - (isGen(b.filePath) ? 1 : 0));
       }
       // No exact match — use the single top fuzzy result (e.g. a file basename).
       const fuzzy = cg.searchNodes(symbol, { limit: 10 });
@@ -4781,10 +4789,12 @@ export class ToolHandler {
       return isQualified ? [] : results[0] ? [results[0].node] : [];
     }
 
-    // Down-rank generated files (.pb.go, .pulsar.go, _grpc.pb.go, …) so a flow
-    // query prefers the keeper implementation over the protobuf-generated stub.
+    // Down-rank generated files (.pb.go, .pulsar.go, _grpc.pb.go, and anything
+    // whose header declares it generated) so a flow query prefers the keeper
+    // implementation over the generated stub.
+    const isGen = cg.generatedFilePredicate(exactMatches.map((r) => r.node.filePath));
     return [...exactMatches]
-      .sort((a, b) => (isGeneratedFile(a.node.filePath) ? 1 : 0) - (isGeneratedFile(b.node.filePath) ? 1 : 0))
+      .sort((a, b) => (isGen(a.node.filePath) ? 1 : 0) - (isGen(b.node.filePath) ? 1 : 0))
       .map((r) => r.node);
   }
 
@@ -4837,9 +4847,10 @@ export class ToolHandler {
     // Same generated-file down-rank as findSymbol — keeps callers/callees
     // /impact aggregation aligned (a query against "Send" returns the
     // hand-written implementations before the protobuf scaffold).
+    const isGen = cg.generatedFilePredicate(exactMatches.map((r) => r.node.filePath));
     const ranked = [...exactMatches].sort((a, b) => {
-      const aGen = isGeneratedFile(a.node.filePath) ? 1 : 0;
-      const bGen = isGeneratedFile(b.node.filePath) ? 1 : 0;
+      const aGen = isGen(a.node.filePath) ? 1 : 0;
+      const bGen = isGen(b.node.filePath) ? 1 : 0;
       return aGen - bGen;
     });
 
