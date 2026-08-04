@@ -42,6 +42,7 @@ import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, C
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import { getUpdateNotice } from '../upgrade/update-check';
+import { ExploreDiagnostics } from './explore-diagnostics';
 
 /**
  * An expected, recoverable "codegraph can't serve this" condition — most
@@ -2630,12 +2631,19 @@ export class ToolHandler {
     // largest-tier defaults if stats aren't available, which preserves
     // pre-#185 behavior for callers that hit the rare stats failure.
     let budget: ExploreOutputBudget;
+    let indexedFileCount = -1;
     try {
-      budget = getExploreOutputBudget(cg.getStats().fileCount);
+      indexedFileCount = cg.getStats().fileCount;
+      budget = getExploreOutputBudget(indexedFileCount);
     } catch {
       budget = getExploreOutputBudget(Infinity);
     }
     const maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
+
+    // Per-file allocation diagnostic (CG-4). `null` unless CODEGRAPH_EXPLORE_DEBUG
+    // is set — every `diag?.` below is then a no-op and the response is
+    // byte-identical. It only OBSERVES: it must never feed back into rendering.
+    const diag = ExploreDiagnostics.start(query, projectRoot, budget, maxFiles, indexedFileCount);
 
     // Step 1: Find relevant context with generous parameters.
     // Use a large maxNodes budget — explore has its own 35k char output limit
@@ -2649,6 +2657,7 @@ export class ToolHandler {
     });
 
     if (subgraph.nodes.size === 0) {
+      diag?.finishEmpty('no relevant code found — empty subgraph');
       return this.textResult(`No relevant code found for "${query}"`);
     }
 
@@ -2913,7 +2922,9 @@ export class ToolHandler {
     }
 
     // Only include files that have entry points or nodes directly connected to entry points
-    let relevantFiles = [...fileGroups.entries()].filter(([, group]) => group.score >= 3);
+    const SCORE_FLOOR = 3;
+    let relevantFiles = [...fileGroups.entries()].filter(([, group]) => group.score >= SCORE_FLOOR);
+    diag?.setScoreFloor(SCORE_FLOOR, fileGroups.size, relevantFiles.length);
 
     // Extract query terms for relevance checking
     const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
@@ -2955,6 +2966,7 @@ export class ToolHandler {
           relevantFiles = nonLow;
         }
       }
+      diag?.setLowValueFiltered(relevantFiles.length);
     }
 
     // Secondary signal: how many DISTINCT query terms each file matches (path +
@@ -3057,6 +3069,9 @@ export class ToolHandler {
         || (fileTermHits.get(fp) ?? 0) >= 2,
       );
       if (gated.length >= 2) relevantFiles = gated;
+      diag?.setRelevanceGate(maxGraph, maxGraph * 0.06, gated.length >= 2, relevantFiles.length);
+    } else {
+      diag?.setRelevanceGate(maxGraph, 0, false, relevantFiles.length);
     }
 
     // Sort files: graph-central first, then distinct-term match, then the
@@ -3202,6 +3217,27 @@ export class ToolHandler {
     // off-spine peers skeletonize.
     const flow = this.buildFlowFromNamedSymbols(cg, query);
 
+    // Snapshot every ranked candidate's scoring inputs, in final sort order, so
+    // the diagnostic can show what each file's share of the envelope was BOUGHT
+    // with (score, graph mass, term hits, flags) — not just what it cost.
+    if (diag) {
+      sortedFiles.forEach(([fp, group], i) => {
+        diag.noteCandidate(fp, {
+          rank: i + 1,
+          score: group.score,
+          graphScore: fileGraphScore.get(fp) ?? 0,
+          termHits: fileTermHits.get(fp) ?? 0,
+          nodes: group.nodes.length,
+          named: namedSeedFiles.has(fp),
+          central: centralFiles.has(fp),
+          entry: entryFiles.has(fp),
+          spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id)),
+          lowValue: isLowValue(fp),
+          generated: isGeneratedFile(fp),
+        });
+      });
+    }
+
     // Polymorphic-sibling detector for adaptive sizing. A class that implements/
     // extends a supertype shared by >= MIN_SIBLINGS classes is one of many
     // INTERCHANGEABLE implementations (OkHttp's 14 `: Interceptor` classes —
@@ -3278,7 +3314,10 @@ export class ToolHandler {
     const staleOmitted: string[] = [];
 
     for (const [filePath, group] of sortedFiles) {
-      if (filesIncluded >= maxFiles) break;
+      if (filesIncluded >= maxFiles) {
+        if (diag) for (const [fp] of sortedFiles) diag.recordSkip(fp, 'max-files');
+        break;
+      }
       // A file DEFINES a named/spine symbol (the answer) vs merely references the
       // flow. Past 90% budget, stop pulling INCIDENTAL files — but keep scanning
       // for necessary ones, which render even past the cap (bounded by maxFiles).
@@ -3287,15 +3326,22 @@ export class ToolHandler {
       // validate-logic file (Alamofire's Validation.swift).
       const fileNecessary = group.nodes.some(n =>
         entryNodeIds.has(n.id) || flow.pathNodeIds.has(n.id) || flow.uniqueNamedNodeIds.has(n.id));
-      if (!fileNecessary && totalChars > budget.maxOutputChars * 0.9) continue;
+      if (!fileNecessary && totalChars > budget.maxOutputChars * 0.9) {
+        diag?.recordSkip(filePath, 'budget-90pct');
+        continue;
+      }
 
       const absPath = validatePathWithinRoot(projectRoot, filePath);
-      if (!absPath || !existsSync(absPath)) continue;
+      if (!absPath || !existsSync(absPath)) {
+        diag?.recordSkip(filePath, 'unreadable');
+        continue;
+      }
 
       let fileContent: string;
       try {
         fileContent = readFileSync(absPath, 'utf-8');
       } catch {
+        diag?.recordSkip(filePath, 'unreadable');
         continue;
       }
 
@@ -3419,6 +3465,8 @@ export class ToolHandler {
             : 'skeleton (signatures only — codegraph_explore a name for its full body; do NOT Read)';
           lines.push(fileSectionHeader(filePath, `${names} · ${tag}`), '', '```' + lang, skel.join('\n'), '```', '');
           totalChars += skel.join('\n').length + 120;
+          // Always "clipped": the per-symbol view elides bodies by construction.
+          diag?.recordRender(filePath, bodyIds.size > 0 ? 'focused' : 'skeleton', skel.join('\n').length, true);
           renderedFilePaths.push(filePath);
           filesIncluded++;
           continue;
@@ -3470,10 +3518,12 @@ export class ToolHandler {
           // fit is skipped; a necessary one (below) renders in full. Half a file
           // forces the Read this is meant to prevent.
           anyFileTrimmed = true;
+          diag?.recordSkip(filePath, 'budget-whole-file');
           continue;
         }
         lines.push(wholeHeader, '', '```' + lang, wholeSection, '```', '');
         totalChars += wholeSection.length + 200;
+        diag?.recordRender(filePath, 'whole', wholeSection.length, false);
         renderedFilePaths.push(filePath);
         filesIncluded++;
         if (fileStale) staleRendered.push(filePath);
@@ -3492,6 +3542,7 @@ export class ToolHandler {
           '',
         );
         totalChars += 260;
+        diag?.recordRender(filePath, 'stale-omitted', 0, true);
         continue;
       }
 
@@ -3567,7 +3618,10 @@ export class ToolHandler {
 
       ranges.sort((a, b) => a.start - b.start);
 
-      if (ranges.length === 0) continue;
+      if (ranges.length === 0) {
+        diag?.recordSkip(filePath, 'no-ranges');
+        continue;
+      }
 
       const gapThreshold = budget.gapThreshold;
       const clusters: Array<{ start: number; end: number; symbols: string[]; score: number; maxImportance: number; hasSpine: boolean; spineCallLine?: number }> = [];
@@ -3764,6 +3818,7 @@ export class ToolHandler {
         // Keep scanning for necessary files (which bypass this cap and render in
         // full, bounded by the hard ceiling).
         anyFileTrimmed = true;
+        diag?.recordSkip(filePath, 'budget-clusters');
         continue;
       }
 
@@ -3775,6 +3830,7 @@ export class ToolHandler {
       lines.push('');
 
       totalChars += fileSection.length + 200;
+      diag?.recordRender(filePath, 'clusters', fileSection.length, chosenIndices.size < clusters.length);
       renderedFilePaths.push(filePath);
       filesIncluded++;
     }
@@ -3895,6 +3951,10 @@ export class ToolHandler {
       ? `Found ${shownSymbols} symbol${shownSymbols === 1 ? '' : 's'} across ${survivors.length} file${survivors.length === 1 ? '' : 's'}.`
       : `Found ${subgraph.nodes.size} symbol${subgraph.nodes.size === 1 ? '' : 's'} across ${fileGroups.size} file${fileGroups.size === 1 ? '' : 's'}.`;
     finalText = finalText.replace(SUMMARY_SENTINEL, summaryLine);
+
+    // Emit the allocation diagnostic from the FINAL text, so per-file bytes and
+    // shares account for the hard-ceiling truncation above (CG-4).
+    diag?.finish(finalText, output.length, hardCeiling, filesIncluded);
 
     return this.textResult(finalText);
   }
