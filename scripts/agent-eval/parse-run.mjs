@@ -94,8 +94,12 @@ export function parseSession(files) {
 
   const toolCalls = [];          // display sequence
   const nameById = new Map();    // tool_use_id -> tool name
+  const cliById = new Set();     // tool_use_ids that tried to run the codegraph CLI
   const counts = {};             // tool name -> calls
-  let initTools = null, result = null, raced = false, cliCalls = 0;
+  // Attempts vs successes: run-all.sh's hook DENIES CLI invocations, and a
+  // denied attempt puts no codegraph output in the window. Only a call that
+  // actually returned content contaminates the arm.
+  let initTools = null, result = null, raced = false, cliCalls = 0, cliContaminated = 0;
   const results = [];  // one `result` event per session segment (multi-turn)
   let compactions = 0;
 
@@ -136,7 +140,7 @@ export function parseSession(files) {
             // An arm with no codegraph MCP can still shell out to the CLI — the
             // target repo carries the .codegraph/ index and the binary is on
             // PATH. That silently turns a "without" arm into codegraph-over-CLI.
-            if (CG_CLI_RE.test(b.input?.command ?? '')) cliCalls++;
+            if (CG_CLI_RE.test(b.input?.command ?? '')) { cliCalls++; cliById.add(b.id); }
           }
           else if (b.name === 'Read') detail = ` ${(b.input?.file_path ?? '').split('/').slice(-1)[0]}`;
           toolCalls.push(`${b.name}${detail}`);
@@ -153,6 +157,9 @@ export function parseSession(files) {
             // registered its tools, so it floundered into grep/Read. That
             // measures startup latency, not steady-state value — flag it.
             if (/No such tool available/.test(t)) raced = true;
+            // A CLI attempt that came back an error was blocked (by the hook, or
+            // by the binary being genuinely absent) and put nothing in context.
+            if (cliById.has(b.tool_use_id) && !b.is_error) cliContaminated++;
             const name = nameById.get(b.tool_use_id) || '';
             timeline.push({ kind: 'add', family: familyOf(name), chars: t.length, tool: name });
           } else {
@@ -279,7 +286,7 @@ export function parseSession(files) {
     + sumUsage('cache_creation_input_tokens') + sumUsage('output_tokens');
 
   return {
-    files, toolCalls, counts, initTools, result, results, raced, cliCalls,
+    files, toolCalls, counts, initTools, result, results, raced, cliCalls, cliContaminated,
     ok: results.length > 0 && results.every((r) => r.subtype === 'success'),
     turns: reqIdx.length,
     tools: toolCalls.filter((t) => !t.startsWith('ToolSearch')).length,
@@ -461,7 +468,8 @@ if (isMain) {
 
   console.log(`\n=== ${files.map((f) => f.split('/').pop()).join(' + ')} ===`);
   console.log(`codegraph tools exposed: ${s.initTools ? s.initTools.length : '?'}${s.raced ? '  [MCP COLD-START RACE — tool call hit "No such tool available"]' : ''}`);
-  if (s.cliCalls) console.log(`!! ${s.cliCalls} Bash call${s.cliCalls === 1 ? '' : 's'} invoked the codegraph CLI — if this is a without-arm, the run is CONTAMINATED`);
+  if (s.cliContaminated) console.log(`!! ${s.cliContaminated} codegraph CLI call${s.cliContaminated === 1 ? '' : 's'} RETURNED OUTPUT via Bash — if this is a without-arm, the run is CONTAMINATED`);
+  else if (s.cliCalls) console.log(`   (${s.cliCalls} codegraph CLI attempt${s.cliCalls === 1 ? '' : 's'} blocked — no output entered the window)`);
   console.log(`\nTool calls (${s.toolCalls.length}):`);
   console.log('  by type:', JSON.stringify(s.counts));
   s.toolCalls.forEach((tc, i) => console.log(`  ${i + 1}. ${tc}`));

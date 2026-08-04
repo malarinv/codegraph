@@ -42,7 +42,7 @@ function parse(dir, label) {
   const o = s.occupancy;
   return {
     dur: s.dur, tools: s.tools, reads: s.reads, grep: s.grep, cg: s.cg,
-    bash: s.counts.Bash || 0, cliCalls: s.cliCalls,
+    bash: s.counts.Bash || 0, cliCalls: s.cliCalls, cliContaminated: s.cliContaminated,
     tokens: s.processed, cost: s.cost, raced: s.raced, turns: s.turns,
     segments: files.length,
     ctx: o.ctxFinal,
@@ -81,7 +81,7 @@ for (const repo of REPOS) {
     if (w) { if (w.raced && !includeRaced) racedExcluded++; else W.push(w); }
     const wo = parse(join(dir, rd), 'headless-without');
     if (wo) {
-      if (wo.cliCalls && !includeContaminated) { contaminated++; console.error(`[excluded] ${repo}/${rd} without-arm ran the codegraph CLI ${wo.cliCalls}x`); }
+      if (wo.cliContaminated && !includeContaminated) { contaminated++; console.error(`[excluded] ${repo}/${rd} without-arm got codegraph CLI output ${wo.cliContaminated}x`); }
       else WO.push(wo);
     }
   }
