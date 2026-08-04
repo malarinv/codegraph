@@ -4110,9 +4110,28 @@ export class ToolHandler {
       // `payslip_builder.go`, and it is refused here. Self-limiting: each buy
       // grows `sourceSpent`, so the pool cannot be spent twice.
       const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
+      // Third condition on the BUY arm only: it must also FIT. A whole render
+      // that overruns `renderCeiling` is skipped ENTIRELY a few lines below (the
+      // branch refuses to slice a file mid-method), so attempting a buy that
+      // cannot fit trades a clustered section for NO section — the same trade
+      // the funding pool exists to refuse, arriving by a different route.
+      // Failing the test here instead drops through to the cluster path, which
+      // is bounded by `headroom` and always renders something.
+      //
+      // Only reachable on the 24K tiers, which is why the small-tier fixtures
+      // cannot see it: the funding line is `reservedTotal + 0.15 * envelope`
+      // (~27.2K when a medium repo saturates) while `renderCeiling` is
+      // `min(1.5 * envelope, 25000) - 600` = 24.4K — so funding can approve
+      // ~2.8K that the ceiling then refuses. At 13K the line is ~14.4K against a
+      // ceiling of 18.9K and the two cannot cross.
+      //
+      // The GRACE arm is deliberately left alone: a file within a sliver of its
+      // reservation that still does not fit is genuinely at the end of a full
+      // response, and that behaviour predates this fix.
       const buysWhole = fileContent.length <= graceBound
         || (reserved >= fileContent.length * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_FRACTION
-            && sourceSpent + fileContent.length + owedBelow <= sourceCeiling);
+            && sourceSpent + fileContent.length + owedBelow <= sourceCeiling
+            && totalChars + fileContent.length + EXPLORE_ALLOCATION.FILE_OVERHEAD <= renderCeiling);
       if (fileLines.length <= WHOLE_FILE_MAX_LINES && buysWhole) {
         const body = fileContent.replace(/\n+$/, '');
         let wholeSection = exploreLineNumbersEnabled() ? numberSourceLines(body, 1) : body;
