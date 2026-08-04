@@ -5,6 +5,15 @@
 # without = empty MCP. Built-in Read/Grep/Bash stay available in both arms.
 #
 # Usage: run-all.sh <repo-path> "<question>" [headless|tmux|all]
+#
+# MULTI-TURN: separate questions with "||" to run them as ONE session —
+#   run-all.sh <repo> "How does X work?||Where is Y handled in that path?"
+# Turn 1 runs normally; every later turn `--resume`s the same session, so the
+# earlier turns' tool output is still in the window (that is the whole point:
+# residual context occupancy, the cost a single-question run cannot see).
+# Segments land in run-<label>.jsonl, run-<label>.t2.jsonl, … and parse-run.mjs
+# stitches them back into one session.
+#
 # Env:   CG_BIN          codegraph binary (default: command -v codegraph)
 #        AGENT_EVAL_OUT  output dir (default: /tmp/agent-eval)
 #        MODEL / EFFORT  claude model/effort (default: sonnet / high — the
@@ -14,6 +23,15 @@ set -uo pipefail
 REPO="${1:?usage: run-all.sh <repo-path> \"<question>\" [headless|tmux|all]}"
 Q="${2:?question required}"
 MODE="${3:-headless}"
+
+# Split "Q1||Q2||Q3" into turns (kept bash-3.2-safe: macOS ships 3.2).
+TURNS=()
+rest="$Q"
+while [ "$rest" != "${rest#*||}" ]; do
+  TURNS+=("${rest%%||*}")
+  rest="${rest#*||}"
+done
+TURNS+=("$rest")
 CG_BIN="${CG_BIN:-$(command -v codegraph)}"
 OUT="${AGENT_EVAL_OUT:-/tmp/agent-eval}"
 HARNESS="$(cd "$(dirname "$0")" && pwd)"
@@ -37,23 +55,52 @@ echo '{"mcpServers":{}}' > "$OUT/mcp-empty.json"
 
 echo "###### codegraph: $CG_BIN"
 echo "###### repo:      $REPO"
-echo "###### question:  $Q"
+echo "###### turns:     ${#TURNS[@]}"
+for t in "${TURNS[@]}"; do echo "######   - $t"; done
 echo
 
-# Headless arm: claude -p with stream-json -> exact tool sequence + tokens/cost.
+# Pull the session id out of a segment's result event so the next turn can
+# --resume it (rather than minting a --session-id, which needs a valid uuid).
+session_id_of() {
+  node -e '
+    const fs=require("fs");
+    for (const l of fs.readFileSync(process.argv[1],"utf8").split("\n").reverse()) {
+      if (!l) continue; let e; try { e=JSON.parse(l) } catch { continue }
+      if (e.session_id) { console.log(e.session_id); break }
+    }' "$1" 2>/dev/null
+}
+
+# Headless arm: claude -p with stream-json -> exact tool sequence + tokens/cost
+# + residual context occupancy. One session, one segment file per turn.
 headless() {
   local label="$1" cfg="$2"
   echo "############################## HEADLESS [$label] ##############################"
-  ( cd "$REPO" && claude -p "$Q" \
-      --output-format stream-json --verbose \
-      --permission-mode bypassPermissions \
-      --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
-      --max-budget-usd 4 \
-      --strict-mcp-config --mcp-config "$cfg" \
-      > "$OUT/run-$label.jsonl" 2>"$OUT/run-$label.err" )
-  echo "exit $? -> $OUT/run-$label.jsonl ($(wc -l < "$OUT/run-$label.jsonl" | tr -d ' ') lines)"
+  local sid="" seg=0 out="" files=()
+  : > "$OUT/run-$label.err"
+  for q in "${TURNS[@]}"; do
+    seg=$((seg + 1))
+    out="$OUT/run-$label.jsonl"
+    [ "$seg" -gt 1 ] && out="$OUT/run-$label.t$seg.jsonl"
+    local resume=()
+    [ -n "$sid" ] && resume=(--resume "$sid")
+    ( cd "$REPO" && claude -p "$q" \
+        --output-format stream-json --verbose \
+        --permission-mode bypassPermissions \
+        --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
+        --max-budget-usd 4 \
+        --strict-mcp-config --mcp-config "$cfg" \
+        ${resume[@]+"${resume[@]}"} \
+        </dev/null > "$out" 2>>"$OUT/run-$label.err" )
+    echo "exit $? -> $out ($(wc -l < "$out" | tr -d ' ') lines) [turn $seg/${#TURNS[@]}]"
+    files+=("$out")
+    sid="$(session_id_of "$out")"
+    if [ -z "$sid" ] && [ "$seg" -lt "${#TURNS[@]}" ]; then
+      echo "  WARN: no session_id in $out — later turns would start a FRESH context; stopping this arm"
+      break
+    fi
+  done
   tail -2 "$OUT/run-$label.err" 2>/dev/null
-  node "$HARNESS/parse-run.mjs" "$OUT/run-$label.jsonl" 2>&1 || true
+  node "$HARNESS/parse-run.mjs" "${files[@]}" 2>&1 || true
   echo
 }
 
@@ -65,11 +112,11 @@ fi
 if [ "$MODE" = tmux ] || [ "$MODE" = all ]; then
   echo "############################## INTERACTIVE [with] ##############################"
   CLAUDE_EXTRA_ARGS="--model ${MODEL:-sonnet} --effort ${EFFORT:-high} --strict-mcp-config --mcp-config $OUT/mcp-codegraph.json" \
-    bash "$HARNESS/itrun.sh" "$REPO" "int-with" "$Q" 2>&1 || echo "[itrun WITH failed]"
+    bash "$HARNESS/itrun.sh" "$REPO" "int-with" "${TURNS[0]}" 2>&1 || echo "[itrun WITH failed]"
   echo
   echo "############################## INTERACTIVE [without] ##############################"
   CLAUDE_EXTRA_ARGS="--model ${MODEL:-sonnet} --effort ${EFFORT:-high} --strict-mcp-config --mcp-config $OUT/mcp-empty.json" \
-    bash "$HARNESS/itrun.sh" "$REPO" "int-without" "$Q" 2>&1 || echo "[itrun WITHOUT failed]"
+    bash "$HARNESS/itrun.sh" "$REPO" "int-without" "${TURNS[0]}" 2>&1 || echo "[itrun WITHOUT failed]"
   echo
 fi
 echo "############################## RUN-ALL COMPLETE ##############################"
