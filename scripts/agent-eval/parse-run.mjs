@@ -231,6 +231,11 @@ export function parseSession(files) {
   for (const q of queue) residual[q.family] += q.tokens;
 
   const ctxFinal = reqIdx.length ? timeline[reqIdx[reqIdx.length - 1]].ctx : 0;
+  // The FIRST request's prompt is system + tool schemas + the question, before
+  // any tool has answered. Differencing the arms' ctxBase prices codegraph's
+  // FIXED occupancy — its tool schema and MCP `initialize` instructions — which
+  // it pays whether or not the agent ever calls it.
+  const ctxBase = reqIdx.length ? timeline[reqIdx[0]].ctx : 0;
   // Multi-turn: duration/cost/tokens are per-segment, so sum them. `result.usage`
   // is cumulative WITHIN a segment (verified: its in+cache+out equals the sum of
   // that segment's per-request prompts), so summing segments is correct and does
@@ -252,7 +257,7 @@ export function parseSession(files) {
     cost: results.reduce((s, r) => s + (r.total_cost_usd || 0), 0),
     processed,
     occupancy: {
-      ctxFinal, windowTokens: WINDOW_TOKENS,
+      ctxFinal, ctxBase, windowTokens: WINDOW_TOKENS,
       charsPerToken, calibrated, compactions, evicted: Math.round(evicted),
       residual: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(residual[f])])),
       contributed: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(contributed[f])])),
@@ -287,6 +292,7 @@ export function formatOccupancy(s, indent = '  ') {
   row('other tools', o.residual.other, o.chars.other, o.results.other);
   const toolTotal = Object.values(o.residual).reduce((a, b) => a + b, 0);
   row('base (prompt+prose)', Math.max(0, o.ctxFinal - toolTotal));
+  out.push(`${indent}  ${'  of which fixed'.padEnd(18)}${(n(o.ctxBase) + ' tok').padStart(12)}  system + tool schemas + question, before any tool answered`);
   out.push(...rows);
   const dropped = o.contributed.codegraph + o.contributedFileAccess + o.contributed.other
     - (o.residual.codegraph + o.residualFileAccess + o.residual.other);

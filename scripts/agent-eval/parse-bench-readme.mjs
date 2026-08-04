@@ -45,6 +45,7 @@ function parse(dir, label) {
     tokens: s.processed, cost: s.cost, raced: s.raced, turns: s.turns,
     segments: files.length,
     ctx: o.ctxFinal,
+    ctxBase: o.ctxBase,
     occCg: o.residual.codegraph,
     occFile: o.residualFileAccess,
     // The arm's own retrieval residual: codegraph in the with-arm, Read/Grep/Bash
@@ -107,10 +108,11 @@ console.log(`\n\nRESIDUAL CONTEXT OCCUPANCY — retrieval tokens still in the wi
 console.log(`(WITH = codegraph responses · WITHOUT = Read + Grep/Glob + Bash responses)`);
 console.log(`${anyMulti ? 'multi-turn sessions' : 'SINGLE-TURN sessions — see the caveat below'}\n`);
 console.log('repo        turns   final ctx W→WO        residual W→WO         % of ctx W→WO     % of window W→WO');
-const occ = { resid: [], shareCtx: [] };
+const occ = { resid: [], shareCtx: [], fixed: [] };
 for (const { repo, W, WO } of rows) {
   if (!W.length || !WO.length) { console.log(`${repo.padEnd(11)} (incomplete)`); continue; }
   const m = (arr, k) => median(arr.map(x => x[k]));
+  occ.fixed.push(m(W, 'ctxBase') - m(WO, 'ctxBase'));
   const wR = m(W, 'occSelf'), woR = m(WO, 'occSelf');
   const wCtx = m(W, 'ctx'), woCtx = m(WO, 'ctx');
   const wSc = m(W, 'occShareCtx'), woSc = m(WO, 'occShareCtx');
@@ -125,6 +127,11 @@ for (const { repo, W, WO } of rows) {
   );
 }
 console.log(`\nAVERAGE: retrieval residual ${avg(occ.resid)}% lower with codegraph  ·  share-of-context ${avg(occ.shareCtx)}% lower`);
+console.log(
+  `FIXED overhead: codegraph's tool schema + MCP instructions cost ${avg(occ.fixed) >= 0 ? '+' : ''}${avg(occ.fixed)} tok\n` +
+  `  of context before any tool is called (median WITH ctxBase - median WITHOUT ctxBase, averaged\n` +
+  `  over repos). It is paid whether or not the agent ever calls codegraph.`
+);
 if (!anyMulti) {
   console.log(
     `\nCAVEAT: every row above is a SINGLE-turn session, so the residual is measured at the\n` +
