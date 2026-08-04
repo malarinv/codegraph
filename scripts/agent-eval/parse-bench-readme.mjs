@@ -144,11 +144,6 @@ for (const { repo, W, WO } of rows) {
   const one = (r) => `${fmtTok(r.occSelf)}${r.cg ? ` cg${r.cg}` : ''}${r.reads ? ` rd${r.reads}` : ''}${r.grep ? ` gr${r.grep}` : ''}${r.bash ? ` bs${r.bash}` : ''}`;
   console.log(`  ${repo.padEnd(11)} W: ${W.map(one).join(' | ').padEnd(46)} WO: ${WO.map(one).join(' | ')}`);
 }
-console.log(
-  `FIXED overhead: codegraph's tool schema + MCP instructions cost ${avg(occ.fixed) >= 0 ? '+' : ''}${avg(occ.fixed)} tok\n` +
-  `  of context before any tool is called (median WITH ctxBase - median WITHOUT ctxBase, averaged\n` +
-  `  over repos). It is paid whether or not the agent ever calls codegraph.`
-);
 if (!anyMulti) {
   console.log(
     `\nCAVEAT: every row is a SINGLE-turn session, so the residual is measured at the\n` +
