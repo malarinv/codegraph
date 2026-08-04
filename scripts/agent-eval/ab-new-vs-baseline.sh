@@ -58,7 +58,9 @@ cleanup() {
   git -C "$ENGINE" checkout HEAD -- $CHANGED 2>/dev/null
   ( cd "$ENGINE" && npm run build >/dev/null 2>&1 )
 }
-trap cleanup EXIT
+# INT/TERM too: killing the script mid-baseline-arm otherwise leaves the engine
+# checked out at the baseline ref, which silently poisons every later build.
+trap cleanup EXIT INT TERM
 
 mkdir -p "$OUT"
 echo "###### engine=$ENGINE  baseline=$BASE_REF"
