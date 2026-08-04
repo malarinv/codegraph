@@ -177,10 +177,19 @@ export function parseSession(files) {
     }
     gaps.push({ delta: cur.ctx - prev.ctx, chars, toolChars, byFamily, compacted });
   }
+  const clean = gaps.filter((g) => !g.compacted && g.delta > 0 && g.chars > 500 && g.toolChars / g.chars >= 0.8);
+  // A gap where the window also SHED content has a delta far below what was
+  // added, which reads as absurdly dense text and would drag the whole run's
+  // ratio with it. Shedding can only push a gap's chars/token UP, so take the
+  // lower median as the honest centre and drop anything well above it, then
+  // pool the survivors. (On runs that never shed, every ratio is within a few
+  // percent of the others and this changes nothing.)
+  const ratios = clean.map((g) => g.toolChars / g.delta).sort((a, b) => a - b);
+  const lowerMedian = ratios.length ? ratios[Math.floor((ratios.length - 1) / 2)] : 0;
   let sumD = 0, sumC = 0;
-  for (const g of gaps) {
-    if (g.compacted || g.delta <= 0) continue;
-    if (g.chars > 500 && g.toolChars / g.chars >= 0.8) { sumD += g.delta; sumC += g.toolChars; }
+  for (const g of clean) {
+    if (lowerMedian > 0 && g.toolChars / g.delta > lowerMedian * 1.5) continue;  // shed
+    sumD += g.delta; sumC += g.toolChars;
   }
   if (sumD === 0) { // no clean gap — fall back to every growing gap, all chars
     for (const g of gaps) if (!g.compacted && g.delta > 0 && g.chars > 0) { sumD += g.delta; sumC += g.chars; }
@@ -319,10 +328,124 @@ export function formatOccupancy(s, indent = '  ') {
 }
 
 // ---------------------------------------------------------------------------
+// `--selftest`: the occupancy math over synthetic transcripts with known
+// answers. It lives here rather than in a test file on purpose — a new
+// scripts/agent-eval/*.mjs scores into the self-query eval fixture's corpus.
+function selftest() {
+  const { writeFileSync, mkdtempSync } = require0('fs');
+  const { join } = require0('path');
+  const { tmpdir } = require0('os');
+  const dir = mkdtempSync(join(tmpdir(), 'cg-occ-'));
+  let n = 0, failures = 0;
+  const check = (name, got, want, tol) => {
+    n++;
+    const ok = Math.abs(got - want) <= tol;
+    if (!ok) failures++;
+    console.log(`${ok ? '  ok  ' : '  FAIL'} ${name}: got ${Math.round(got)}, want ${want} ±${tol}`);
+  };
+  // Builders for the event shapes Claude Code actually emits.
+  const req = (ctx, id, blocks) => blocks.map((b) => JSON.stringify({
+    type: 'assistant',
+    message: { id, content: [b], usage: { input_tokens: ctx, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 2 } },
+  }));
+  const use = (id, name) => ({ type: 'tool_use', id, name, input: {} });
+  const res = (id, chars) => JSON.stringify({
+    type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: 'x'.repeat(chars) }] }] },
+  });
+  const done = () => JSON.stringify({ type: 'result', subtype: 'success', duration_ms: 1000, total_cost_usd: 0.1, usage: {} });
+  const write = (name, lines) => { const f = join(dir, name); writeFileSync(f, lines.join('\n') + '\n'); return f; };
+
+  // 1. Attribution: ratio 2.5 chars/tok, two families, no shedding.
+  //    10,000 explore chars over a 4,000-tok gap; 5,000 Read chars over 2,000.
+  let f = write('basic.jsonl', [
+    ...req(10000, 'm1', [use('t1', 'mcp__codegraph__codegraph_explore')]),
+    res('t1', 10000),
+    ...req(14000, 'm2', [use('t2', 'Read')]),
+    res('t2', 5000),
+    ...req(16000, 'm3', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  let o = parseSession([f]).occupancy;
+  check('chars/token', o.charsPerToken * 1000, 2500, 30);
+  check('codegraph residual', o.residual.codegraph, 4000, 60);
+  check('Read residual', o.residual.read, 2000, 40);
+  check('file-access residual', o.residualFileAccess, 2000, 40);
+  check('final context', o.ctxFinal, 16000, 0);
+  check('fixed base', o.ctxBase, 10000, 0);
+  check('nothing evicted', o.evicted, 0, 1);
+
+  // 2. Dedupe: thinking + tool_use are two events sharing one id and one usage.
+  //    Counting usage per event would report 5 requests instead of 3.
+  f = write('dupe.jsonl', [
+    ...req(10000, 'm1', [{ type: 'thinking', thinking: '' }, use('t1', 'mcp__codegraph__codegraph_explore')]),
+    res('t1', 10000),
+    ...req(14000, 'm2', [{ type: 'thinking', thinking: '' }, use('t2', 'Read')]),
+    res('t2', 5000),
+    ...req(16000, 'm3', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  let s = parseSession([f]);
+  check('turns deduped by message.id', s.turns, 3, 0);
+  check('codegraph residual (deduped)', s.occupancy.residual.codegraph, 4000, 60);
+
+  // 3. Compaction: the boundary clears everything resident before it.
+  f = write('compact.jsonl', [
+    ...req(10000, 'm1', [use('t1', 'mcp__codegraph__codegraph_explore')]),
+    res('t1', 10000),
+    ...req(14000, 'm2', [use('t2', 'mcp__codegraph__codegraph_explore')]),
+    JSON.stringify({ type: 'system', subtype: 'compact_boundary' }),
+    res('t2', 5000),
+    ...req(8000, 'm3', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  o = parseSession([f]).occupancy;
+  check('post-compaction residual = last result only', o.residual.codegraph, 2000, 40);
+  check('contributed still counts both', o.contributed.codegraph, 6000, 80);
+
+  // 4. Micro-compaction: context grows less than the results added, so the
+  //    oldest result is shed first (FIFO) — here explore, leaving Read.
+  f = write('micro.jsonl', [
+    ...req(10000, 'm1', [use('t1', 'mcp__codegraph__codegraph_explore')]),
+    res('t1', 10000),
+    ...req(14000, 'm2', [use('t2', 'Read')]),
+    res('t2', 10000),
+    ...req(14500, 'm3', [{ type: 'text', text: 'done' }]),  // +500 for 4,000 tok of Read
+    done(),
+  ]);
+  o = parseSession([f]).occupancy;
+  check('FIFO evicted the older codegraph result', o.residual.codegraph, 500, 60);
+  check('newer Read result survives', o.residual.read, 4000, 60);
+  check('eviction recorded', o.evicted, 3500, 60);
+
+  // 5. Multi-turn stitching: a resumed segment continues the same context, and
+  //    a turn that calls no tool leaves the earlier residual in place.
+  const a = write('seg1.jsonl', [
+    ...req(10000, 'm1', [use('t1', 'mcp__codegraph__codegraph_explore')]),
+    res('t1', 10000),
+    ...req(14000, 'm2', [{ type: 'text', text: 'answer one' }]),
+    done(),
+  ]);
+  const b = write('seg2.jsonl', [
+    ...req(14600, 'm3', [{ type: 'text', text: 'answer two, from what is already here' }]),
+    done(),
+  ]);
+  s = parseSession([a, b]);
+  check('stitched turns', s.turns, 3, 0);
+  check('residual carries into turn 2', s.occupancy.residual.codegraph, 4000, 60);
+  check('stitched final context', s.occupancy.ctxFinal, 14600, 0);
+  check('stitched cost sums segments', s.cost * 100, 20, 0.1);
+
+  console.log(`\n${n - failures}/${n} checks passed`);
+  return failures;
+}
+// `--selftest` needs sync fs helpers the module path doesn't import at top level.
+function require0(m) { return process.getBuiltinModule(m); }
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain && process.argv.includes('--selftest')) process.exit(selftest() ? 1 : 0);
 if (isMain) {
   const files = process.argv.slice(2).filter((a) => !a.startsWith('--'));
-  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...]'); process.exit(1); }
+  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...]  |  --selftest'); process.exit(1); }
   const s = parseSession(files);
 
   console.log(`\n=== ${files.map((f) => f.split('/').pop()).join(' + ')} ===`);
