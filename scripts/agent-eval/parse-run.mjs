@@ -3,11 +3,15 @@
 // RESIDUAL CONTEXT OCCUPANCY — how many tokens of the context window each tool
 // family's responses still occupy when the run ends.
 //
-// Usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--envelope] [--answer <glob>]...
+// Usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--brief] [--envelope] [--answer <glob>]...
 //   Multiple files = one multi-turn session's segments, IN ORDER (run-all.sh
 //   writes run-<label>.jsonl, run-<label>.t2.jsonl, … for a `Q1||Q2||Q3` set).
 //   `--resume` does not replay prior messages, so the segments concatenate
 //   cleanly and token accounting carries across the boundary.
+//
+//   `--brief` drops the numbered tool-call transcript and keeps everything else,
+//   for harnesses that print one of these blocks per run (ab-new-vs-baseline.sh
+//   at RUNS>=2 is otherwise mostly call listings).
 //
 //   Every run also reports EXPLORE SUFFICIENCY — each codegraph_explore call
 //   bucketed by what the agent did next (see classifySufficiency) — and EXPLORE
@@ -729,7 +733,7 @@ const TRANSPARENT_TOOLS = new Set(['ToolSearch', 'TodoWrite']);
 const DELEGATION_TOOLS = new Set(['Agent', 'Task']);
 
 /** Buckets, worst → best. Labels double as the summary rows. */
-const SUFFICIENCY = [
+export const SUFFICIENCY = [
   ['explore_again', 'explore again', 'insufficient: did not answer'],
   ['read_returned', 'Read a file we returned', 'allocation: right file, wrong bytes'],
   ['read_missed', 'Read a file we did not return', 'recall: file never surfaced'],
@@ -1340,12 +1344,14 @@ if (isMain) {
   const files = [];
   const answerGlobs = [];
   let wantEnvelope = false;
+  let brief = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--envelope') wantEnvelope = true;
+    else if (argv[i] === '--brief') brief = true;
     else if (argv[i] === '--answer') { answerGlobs.push(argv[++i]); wantEnvelope = true; }
     else if (!argv[i].startsWith('--')) files.push(argv[i]);
   }
-  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--envelope] [--answer <glob>]...  |  --selftest'); process.exit(1); }
+  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--brief] [--envelope] [--answer <glob>]...  |  --selftest'); process.exit(1); }
   const s = parseSession(files);
 
   console.log(`\n=== ${files.map((f) => f.split('/').pop()).join(' + ')} ===`);
@@ -1354,7 +1360,7 @@ if (isMain) {
   else if (s.cliCalls) console.log(`   (${s.cliCalls} codegraph CLI attempt${s.cliCalls === 1 ? '' : 's'} blocked — no output entered the window)`);
   console.log(`\nTool calls (${s.toolCalls.length}):`);
   console.log('  by type:', JSON.stringify(s.counts));
-  s.toolCalls.forEach((tc, i) => console.log(`  ${i + 1}. ${tc}`));
+  if (!brief) s.toolCalls.forEach((tc, i) => console.log(`  ${i + 1}. ${tc}`));
 
   if (s.result) {
     const seg = s.results.length > 1 ? ` | ${s.results.length} segments (${s.results.map((r) => r.subtype).join(',')})` : '';

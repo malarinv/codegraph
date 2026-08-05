@@ -6,6 +6,15 @@
 #
 # Usage: run-all.sh <repo-path> "<question>" [headless|tmux|all]
 #
+# Each headless arm reports the three feedback metrics (parse-run.mjs prints all
+# three under every run, and compare-arms.mjs puts the arms side by side at the
+# end when both ran):
+#   residual context occupancy (CG-7)  window still held by the arm's retrieval
+#   explore sufficiency        (CG-8)  was the response ENOUGH — the agent's next act
+#   allocation efficiency      (CG-9)  share of returned bytes the answer cited
+# docs/benchmarks/agent-eval-feedback-metrics.md is the entry point; the three
+# per-metric docs it links carry the caveats.
+#
 # MULTI-TURN: separate questions with "||" to run them as ONE session —
 #   run-all.sh <repo> "How does X work?||Where is Y handled in that path?"
 # Turn 1 runs normally; every later turn `--resume`s the same session, so the
@@ -45,72 +54,12 @@ export CODEGRAPH_NO_PROMPT_HOOK=1
 
 # Hide the codegraph CLI from BOTH arms, so the only way to reach codegraph is
 # the MCP server wired below — which is what makes it the A/B's single variable.
-#
-# Both arms have Bash, and the target repo carries the .codegraph/ index the
-# with-arm needs. Agents FIND that: 14 of 15 without-arm runs in one 7-repo pass
-# ran `codegraph explore` through Bash (one via `ls .codegraph && codegraph
-# explore …`), so that arm was measuring codegraph-over-CLI, not
-# codegraph-absent. It matters in the with-arm too — output that arrives through
-# Bash is attributed to Bash, understating what codegraph itself occupies.
-#
-# The binary usually shares a directory with tools the run needs (claude itself
-# lives next to it here), so dropping the whole directory is not an option.
-# Substitute an equivalent directory IN PLACE: symlinks to every entry except
-# codegraph, keeping PATH order and precedence intact.
-SHIM_BIN="$OUT/nocg-bin"
-rm -rf "$SHIM_BIN"; mkdir -p "$SHIM_BIN"
-sanitized_path() {
-  local out="" d e
-  local IFS=:
-  for d in $PATH; do
-    [ -n "$d" ] || continue
-    if [ -x "$d/codegraph" ]; then
-      for e in "$d"/*; do
-        [ "$(basename "$e")" = codegraph ] && continue
-        ln -sf "$e" "$SHIM_BIN/" 2>/dev/null
-      done
-      d="$SHIM_BIN"
-    fi
-    out="${out:+$out:}$d"
-  done
-  printf '%s' "$out"
-}
-ARM_PATH="$(sanitized_path)"
-if PATH="$ARM_PATH" command -v codegraph >/dev/null 2>&1; then
-  echo "WARNING: 'codegraph' is still on the arm PATH — runs will be contaminated"
-fi
-for t in claude node; do
-  PATH="$ARM_PATH" command -v "$t" >/dev/null || { echo "sanitized PATH lost '$t' — refusing to run"; exit 1; }
-done
-
-# Hiding it from PATH is not enough. An agent denied `codegraph` ran
-# `find / -maxdepth 4 -iname "*codegraph*"`, found the binary, and invoked it by
-# ABSOLUTE PATH — so block the invocation itself with a PreToolUse hook. Written
-# into $OUT as a run artifact rather than a repo file, same as the MCP configs.
-# The pattern deliberately matches only COMMAND positions: `grep codegraph x`,
-# `ls .codegraph` and `which codegraph` are looking, not using, and pass through.
-CG_CMD_RE='(^|[;&|(]|&&|\|\||\$\(|`)[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*[A-Za-z0-9_./~-]*codegraph([[:space:]]|$)'
-cat > "$OUT/no-cli-hook.sh" <<HOOK
-#!/usr/bin/env bash
-# Deny Bash invocations of the codegraph CLI so the MCP server stays the A/B's
-# single variable. Looking for it is fine; running it is not.
-set -uo pipefail
-cmd="\$(cat | jq -r '.tool_input.command // empty' 2>/dev/null)"
-if printf '%s' "\$cmd" | grep -Eq '$CG_CMD_RE'; then
-  msg="The codegraph CLI is not available in this session. Answer using the tools you have."
-  jq -n --arg m "\$msg" '{reason:\$m, hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:\$m}}'
-fi
-exit 0
-HOOK
-chmod +x "$OUT/no-cli-hook.sh"
-cat > "$OUT/hook-settings.json" <<JSON
-{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash $OUT/no-cli-hook.sh"}]}]}}
-JSON
-command -v jq >/dev/null || { echo "jq is required for the CLI-block hook — install it or the arms will be contaminated"; exit 1; }
-# Prove the hook denies a real invocation and lets a mere mention through.
-_probe() { printf '{"tool_input":{"command":%s}}' "$1" | bash "$OUT/no-cli-hook.sh" | grep -c deny; }
-[ "$(_probe '"/Users/x/.local/bin/codegraph explore \"q\""')" = 1 ] || { echo "hook fails to block an absolute-path invocation"; exit 1; }
-[ "$(_probe '"grep -rn codegraph src/"')" = 0 ] || { echo "hook over-blocks a plain mention"; exit 1; }
+# Two layers (sanitized PATH + a PreToolUse hook that blocks absolute-path
+# invocations), both in no-cli-shim.sh, which ab-new-vs-baseline.sh shares; the
+# reasoning and the incident that forced each layer are documented there.
+# Sets $ARM_PATH and $ARM_SETTINGS, and aborts if either layer fails its probe.
+. "$HARNESS/no-cli-shim.sh"
+cg_no_cli_setup "$OUT" || exit 1
 
 [ -n "$CG_BIN" ] || { echo "no codegraph binary on PATH (set CG_BIN)"; exit 1; }
 [ -d "$REPO/.codegraph" ] || { echo "no .codegraph index at $REPO — index it first"; exit 1; }
@@ -158,7 +107,7 @@ headless() {
         --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
         --max-budget-usd 4 \
         --strict-mcp-config --mcp-config "$cfg" \
-        --settings "$OUT/hook-settings.json" \
+        --settings "$ARM_SETTINGS" \
         ${resume[@]+"${resume[@]}"} \
         </dev/null > "$out" 2>>"$OUT/run-$label.err" )
     echo "exit $? -> $out ($(wc -l < "$out" | tr -d ' ') lines) [turn $seg/${#TURNS[@]}]"
@@ -179,6 +128,12 @@ ARMS="${CG_ARMS:-both}"
 if [ "$MODE" = headless ] || [ "$MODE" = all ]; then
   case "$ARMS" in both|with)    headless "headless-with"    "$OUT/mcp-codegraph.json";; esac
   case "$ARMS" in both|without) headless "headless-without" "$OUT/mcp-empty.json";; esac
+  # Both arms' three metrics on one screen. The per-arm blocks above say WHY a
+  # number moved (which query fell short, which file was never cited); this says
+  # whether it moved at all. CG_ARMS=with|without leaves one arm's logs from an
+  # earlier invocation in $OUT, and comparing against those is the point of the
+  # split — so this runs whichever arms have logs, not only a fresh pair.
+  node "$HARNESS/compare-arms.mjs" "$OUT" headless-with headless-without 2>&1 || true
 fi
 
 if [ "$MODE" = tmux ] || [ "$MODE" = all ]; then
