@@ -99,8 +99,19 @@ fix at the wrong end of the pipeline. The line says which
 
 ## Validation
 
-Hand-checked against real transcripts, then swept over all 76 A/B logs on this
-machine (0 crashes, 176 calls bucketed).
+Hand-checked against real transcripts, then swept over every A/B log on this
+machine: 76 single-question runs (176 calls) plus the 14 multi-turn with-arm
+sessions of the 7-repo README corpus (62 calls), 0 crashes. That corpus
+exercises every bucket:
+
+```
+explore again 29 (47%) · Read a file we returned 7 (11%) ·
+Read a file we did not return 1 (2%) · Grep/Glob 14 (23%) · moved on 11 (18%)
+```
+
+Read it as a baseline, not a verdict: these are three-turn sessions on hard
+flow questions, and "explored again" includes the legitimate second call on a
+repo whose budget is 2–3 calls.
 
 **`cg22/ab-express/run-baseline-1` — the allocation bucket, by hand.** Sequence:
 explore *"res.send Content-Type ETag generation"* → explore *"response.js
@@ -113,6 +124,15 @@ question: one explore, `moved on / answered`, 100% sufficient.
 **`cg15/ab-express/run-new-2` — the same verdict on a longer run.** Four
 explores; the fourth returned `lib/utils.js` and the agent then read
 `/…/t-new/lib/utils.js` at `offset: 195`. Right file, wrong window.
+
+**`ab-readme/excalidraw/run2` — the recall bucket, by hand.** The third explore
+returned `components/App.tsx` and `components/canvases/InteractiveCanvas.tsx`;
+the agent's next action was `Read components/canvases/StaticCanvas.tsx` — the
+sibling canvas, named in the response and not shipped. Bucketed
+`Read a file we did not return (named, not returned)`. The fourth call in the
+same session delegated, and the subagent's first move was a shell read of
+`element/src/shape.ts`, which that explore *had* returned → allocation, shown as
+`Agent → Bash Read shape.ts`.
 
 **excalidraw `canvasNonce` — the recall bucket, end to end.** A fresh
 `run-all.sh` arm on the documented data-flow frontier: three explores, the last
