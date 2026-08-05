@@ -146,7 +146,25 @@ for (const { repo, W, WO } of rows) {
     `${wSw.toFixed(1)}%→${woSw.toFixed(1)}%`
   );
 }
-console.log(`\nAVERAGE: retrieval residual ${avg(occ.resid)}% lower with codegraph  ·  share-of-context ${avg(occ.shareCtx)}% lower`);
+// Direction must follow the SIGN, not the hope. `pct(w, wo)` is the reduction
+// going with→without, so a NEGATIVE value means the with-arm's residual is
+// LARGER. Hardcoding "lower" printed "-82% lower with codegraph" for the case
+// where codegraph in fact occupies 82% MORE — a double negative that reads as a
+// win and inverts the headline. Say which way it went, in words.
+const dir = (v) => (v < 0 ? 'HIGHER' : 'lower');
+const magn = (v) => Math.abs(v);
+console.log(
+  `\nAVERAGE: retrieval residual ${magn(avg(occ.resid))}% ${dir(avg(occ.resid))} with codegraph` +
+  `  ·  share-of-context ${magn(avg(occ.shareCtx))}% ${dir(avg(occ.shareCtx))}`
+);
+if (avg(occ.resid) < 0) {
+  console.log(
+    `  ^ codegraph front-loads one large verbatim payload that STAYS resident, where Read/Grep\n` +
+    `    churn many small results that evict. Read alongside the cost/token table above: fewer\n` +
+    `    total tokens processed can coexist with a larger persistent footprint. This is the axis\n` +
+    `    issue #1500 reported.`
+  );
+}
 
 console.log(
   `FIXED overhead: codegraph's tool schema + MCP instructions cost ${avg(occ.fixed) >= 0 ? '+' : ''}${avg(occ.fixed)} tok\n` +
