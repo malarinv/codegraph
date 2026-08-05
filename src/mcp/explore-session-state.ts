@@ -70,6 +70,13 @@ export interface ExploreFileEmission {
   ranges: ExploreLineRange[];
   /** Source chars emitted for this file (excludes headers / fences). */
   bytes: number;
+  /**
+   * Identity of the bytes those ranges were sliced from (CG-18). Cross-call
+   * dedup withholds a span only when the file still hashes to this, so an edit
+   * between two calls re-serves instead of pointing at source the agent holds a
+   * now-wrong copy of. Absent = unprovable, which dedup treats as "re-serve".
+   */
+  fingerprint?: string;
   /** Set when ranges were dropped to stay under the per-file bound. */
   rangesTruncated?: boolean;
 }
@@ -309,6 +316,7 @@ export class ExploreSessionState {
       .map((f) => {
         const { ranges, truncated } = coalesceRanges(f.ranges ?? []);
         const out: ExploreFileEmission = { path: f.path, ranges, bytes: Math.max(0, f.bytes || 0) };
+        if (typeof f.fingerprint === 'string' && f.fingerprint) out.fingerprint = f.fingerprint;
         if (truncated) out.rangesTruncated = true;
         return out;
       });

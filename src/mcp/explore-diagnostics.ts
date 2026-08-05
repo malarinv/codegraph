@@ -41,6 +41,7 @@ export type ExploreRenderMode =
   | 'focused'       // per-symbol view, named/spine bodies full
   | 'skeleton'      // per-symbol view, signatures only
   | 'stale-omitted' // drifted on disk; source deliberately withheld
+  | 'backref'       // fully served by an earlier call this session (CG-18)
   | 'dropped';      // rendered into `lines` but cut by the final hard ceiling
 
 /** Why a ranked candidate never reached the output. */
@@ -92,6 +93,17 @@ interface FileRecord extends ExploreCandidateMeta {
    */
   allowance: number | null;
   render?: ExploreRenderMode;
+  /**
+   * Source chars this call did NOT re-send because an earlier call in the
+   * session already did (CG-18). Reclaimed, not lost: it leaves through
+   * `sourceSpent` (the carry-forward pool hands it to lower-ranked files) and,
+   * for a fully back-referenced file, through the freed `maxFiles` slot. The
+   * reallocation is legible as the difference between this file's
+   * `allowance` and `emittedChars` against the files below it in the table.
+   */
+  dedupSavedChars: number;
+  /** Line spans replaced by a back-reference. */
+  dedupCovered: Array<[number, number]>;
   /** Source chars the render loop handed to `lines` (pre-final-truncation). */
   emittedChars: number;
   /** Source chars present in the FINAL text — authoritative, truncation-aware. */
@@ -130,6 +142,8 @@ export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   render: ExploreRenderMode | null;
   skipped: ExploreSkipReason | null;
   clipped: boolean;
+  dedupSavedChars: number;
+  dedupCovered: Array<[number, number]>;
   emittedChars: number;
   finalChars: number;
   share: number;
@@ -190,6 +204,17 @@ export interface ExploreDiagnosticReport {
     filesRanked: number;
     filesRenderedByLoop: number;
     filesInFinalOutput: number;
+  };
+  /**
+   * Cross-call source dedup (CG-18): what this call did NOT re-send because an
+   * earlier call in this session already sent it, and where those bytes went.
+   * `savedChars` 0 with a non-empty session block means nothing overlapped.
+   */
+  dedup: {
+    savedChars: number;
+    backReferenced: string[];
+    /** Files fully replaced by a pointer — each one also freed a `maxFiles` slot. */
+    fullyBackReferenced: string[];
   };
   /** The proportional split (CG-12): what each file was promised, and why. */
   allocation: {
@@ -338,6 +363,7 @@ export class ExploreDiagnostics {
   noteCandidate(path: string, meta: ExploreCandidateMeta): void {
     this.files.set(path, {
       path, ...meta, allowance: null,
+      dedupSavedChars: 0, dedupCovered: [],
       emittedChars: 0, finalChars: 0, share: 0, allocatedShare: 0, clipped: false,
     });
   }
@@ -376,6 +402,19 @@ export class ExploreDiagnostics {
   }
 
   /**
+   * Source this call withheld because the session already holds it (CG-18).
+   * Called with `(path, 0, [])` to clear a record — the anti-abandonment restore
+   * puts a suppressed file's source back, and a diagnostic still claiming the
+   * saving would misreport where the envelope went.
+   */
+  recordDedup(path: string, savedChars: number, covered: ReadonlyArray<{ start: number; end: number }>): void {
+    const rec = this.files.get(path);
+    if (!rec) return;
+    rec.dedupSavedChars = savedChars;
+    rec.dedupCovered = covered.map((r) => [r.start, r.end] as [number, number]);
+  }
+
+  /**
    * A candidate was passed over before rendering. First reason wins — the
    * blanket `max-files` sweep must not overwrite a file's specific reason.
    */
@@ -410,8 +449,10 @@ export class ExploreDiagnostics {
         rec.share = envelope > 0 ? rec.finalChars / envelope : 0;
         rec.allocatedShare = allocatedChars > 0 ? rec.emittedChars / allocatedChars : 0;
         // Rendered into `lines` but absent from the final text → the hard
-        // ceiling dropped its whole section.
-        if (rec.render && rec.render !== 'stale-omitted' && rec.finalChars === 0) {
+        // ceiling dropped its whole section. A back-referenced file has no
+        // fenced source BY DESIGN (CG-18), so it is never "dropped".
+        if (rec.render && rec.render !== 'stale-omitted' && rec.render !== 'backref'
+            && rec.finalChars === 0) {
           rec.render = 'dropped';
           rec.clipped = true;
         }
@@ -467,6 +508,11 @@ export class ExploreDiagnostics {
         filesRenderedByLoop: filesIncluded,
         filesInFinalOutput: rendered.length,
       },
+      dedup: {
+        savedChars: records.reduce((s, r) => s + r.dedupSavedChars, 0),
+        backReferenced: records.filter((r) => r.dedupSavedChars > 0).map((r) => r.path),
+        fullyBackReferenced: records.filter((r) => r.render === 'backref').map((r) => r.path),
+      },
       allocation: {
         pool: this.allocPool,
         cliffAt: round6(this.allocCliffAt),
@@ -495,6 +541,8 @@ export class ExploreDiagnostics {
           render: r.render ?? null,
           skipped: r.skipped ?? null,
           clipped: r.clipped,
+          dedupSavedChars: r.dedupSavedChars,
+          dedupCovered: r.dedupCovered.map((s) => [...s] as [number, number]),
           emittedChars: r.emittedChars,
           finalChars: r.finalChars,
           share: round6(r.share),
@@ -614,6 +662,15 @@ export function renderTable(report: ExploreDiagnosticReport): string {
     `  relevance gate ${sel.graphGateApplied ? 'applied' : 'not applied'}` +
     ` at graph >= ${sel.graphGateThreshold.toFixed(5)} (6% of max ${sel.maxGraph.toFixed(5)})`,
   );
+  const dedup = report.dedup;
+  if (dedup && dedup.savedChars > 0) {
+    out.push(
+      `  dedup ${num(dedup.savedChars)} chars not re-sent` +
+      ` · ${dedup.fullyBackReferenced.length} file(s) fully back-referenced` +
+      ` (each also freed a maxFiles slot)` +
+      (dedup.backReferenced.length > 0 ? `: ${dedup.backReferenced.join(', ')}` : ''),
+    );
+  }
   const alloc = report.allocation;
   out.push(
     `  allocation ${num(alloc.reserved)} reserved of ${num(alloc.pool)} pool` +
@@ -627,7 +684,7 @@ export function renderTable(report: ExploreDiagnosticReport): string {
   // Allocated (not delivered) is the allocator's own decision — the number the
   // budget work is about. Delivered is what the agent got. They differ only
   // when the ceiling truncated; showing both makes that divergence obvious.
-  const shown = files.filter((f) => f.emittedChars > 0 || f.finalChars > 0);
+  const shown = files.filter((f) => f.emittedChars > 0 || f.finalChars > 0 || f.render === 'backref');
   if (shown.length > 0) {
     out.push('   #  alloc%  deliv%    bytes  reserved  score    graph  hits  pen   flags                render     file');
     for (const f of shown) {
@@ -647,6 +704,11 @@ export function renderTable(report: ExploreDiagnosticReport): string {
         f.path,
       );
       out.push('        kinds: ' + (f.kinds || '-'));
+      if (f.dedupSavedChars > 0) {
+        const spans = f.dedupCovered.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(',');
+        const more = f.dedupCovered.length > 6 ? `,+${f.dedupCovered.length - 6}` : '';
+        out.push(`        dedup: ${num(f.dedupSavedChars)} chars already sent this session · L${spans}${more}`);
+      }
     }
     out.push('  (bytes = source allocated by the render loop; deliv% = 0 means the hard ceiling dropped the section)');
     out.push('  (* = clipped: some source in this file was elided, windowed, or its section dropped)');
