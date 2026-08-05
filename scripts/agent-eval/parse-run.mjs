@@ -9,6 +9,9 @@
 //   `--resume` does not replay prior messages, so the segments concatenate
 //   cleanly and token accounting carries across the boundary.
 //
+//   Every run also reports EXPLORE SUFFICIENCY — each codegraph_explore call
+//   bucketed by what the agent did next (see classifySufficiency).
+//
 //   `--envelope` additionally reports how the codegraph_explore responses were
 //   DIVIDED across files — the per-file share of the source envelope (#1500).
 //   `--answer <glob>` (repeatable, implies --envelope) marks the files that
@@ -300,6 +303,8 @@ export function parseSession(files) {
   return {
     files, toolCalls, counts, initTools, result, results, raced, cliCalls, cliContaminated,
     exploreTexts,
+    // What the agent did after each explore — the free sufficiency signal (CG-8).
+    sufficiency: classifySufficiency(events),
     ok: results.length > 0 && results.every((r) => r.subtype === 'success'),
     turns: reqIdx.length,
     tools: toolCalls.filter((t) => !t.startsWith('ToolSearch')).length,
@@ -421,6 +426,236 @@ export function formatEnvelope(exploreTexts, answerGlobs = [], indent = '  ') {
 }
 
 // ---------------------------------------------------------------------------
+// Explore sufficiency (CG-8)
+// ---------------------------------------------------------------------------
+// The agent's NEXT action after a codegraph_explore is free ground truth about
+// whether that response was enough. The buckets are chosen so each one maps to
+// a distinct fix:
+//
+//   another codegraph call      insufficient — the response did not answer
+//   Read of a file we RETURNED  allocation bug — right file, wrong bytes
+//   Read of a file we did NOT   recall bug — the file never surfaced
+//   Grep/Glob                   recall bug (weaker: the agent is still hunting)
+//   anything else / no tool     sufficient — the agent moved on
+//
+// Three rules keep this honest:
+//   * Only a call issued in a LATER assistant message counts as a reaction. A
+//     Read fired in the same message as the explore was issued before its
+//     response existed, so it cannot be a verdict on it (those are counted
+//     separately as `concurrent`).
+//   * ToolSearch/TodoWrite are stepped over: loading a deferred tool schema or
+//     ticking a checklist says nothing about the response.
+//   * SUBAGENT CALLS ARE A SEPARATE THREAD. Claude Code interleaves a subagent's
+//     tool calls into the same stream, tagged `parent_tool_use_id` — verified on
+//     a real run where a delegated search's greps landed between the parent's
+//     own calls. Reactions are matched within one thread, or the subagent's
+//     first grep would be scored as the parent's verdict on an explore it never
+//     saw.
+//
+// A delegation (`Agent`/`Task`) is judged by what the SUBAGENT did first, since
+// that thread is right there in the transcript. Scoring the delegation itself as
+// "moved on" would have called this run sufficient while the subagent was off
+// grepping for the file — the one direction of error a tuning metric must not
+// have. A delegation that never runs a tool stays "moved on".
+
+/** Tools that carry no signal about whether the previous response was enough. */
+const TRANSPARENT_TOOLS = new Set(['ToolSearch', 'TodoWrite']);
+/** Tools that hand the work to a subagent whose thread we then judge instead. */
+const DELEGATION_TOOLS = new Set(['Agent', 'Task']);
+
+/** Buckets, worst → best. Labels double as the summary rows. */
+const SUFFICIENCY = [
+  ['explore_again', 'explore again', 'insufficient: did not answer'],
+  ['read_returned', 'Read a file we returned', 'allocation: right file, wrong bytes'],
+  ['read_missed', 'Read a file we did not return', 'recall: file never surfaced'],
+  ['search', 'Grep/Glob', 'recall (weak): still hunting for the file'],
+  ['sufficient', 'moved on / answered', 'sufficient'],
+];
+const SUFFICIENCY_KEYS = SUFFICIENCY.map(([k]) => k);
+
+// Shell equivalents of Read and of Grep. Both arms have Bash, and on small
+// repos an agent reaches for `sed -n 100,200p file` as readily as for Read —
+// counting only the Read tool would score those explores as sufficient.
+const BASH_READ_RE = /(?:^|[;&|]|\$\(|`)\s*(?:sudo\s+)?(?:cat|bat|head|tail|less|more|nl|sed|awk)\s+([^\n|;&]*)/;
+const BASH_SEARCH_RE = /(?:^|[;&|]|\$\(|`)\s*(?:sudo\s+)?(?:grep|egrep|fgrep|rg|ag|ack|find|fd|ls|tree)\b/;
+
+/** What a Bash command is really doing, as far as retrieval is concerned. */
+function bashIntent(cmd) {
+  const c = String(cmd || '');
+  // A heredoc or a redirect is WRITING a file — `cat <<EOF > x` must not read
+  // as a Read.
+  if (!/<</.test(c) && !/>\s*\S/.test(c)) {
+    const m = BASH_READ_RE.exec(c);
+    if (m) {
+      // Drop flags and numeric arguments (`sed -n '100,200p' lib/x.js`), then
+      // take the last path-shaped token.
+      const args = m[1].split(/\s+/).filter((a) => a && !a.startsWith('-') && !/^['"]?\d/.test(a));
+      const path = args.reverse().find((a) => /[/.]/.test(a));
+      if (path) return { kind: 'read', path: path.replace(/^['"]|['"]$/g, '') };
+    }
+  }
+  if (BASH_SEARCH_RE.test(c)) return { kind: 'search' };
+  return null;
+}
+
+const normPath = (p) => String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '');
+/** Same file, with either side repo-relative and the other absolute. */
+function samePath(a, b) {
+  const x = normPath(a), y = normPath(b);
+  if (!x || !y) return false;
+  return x === y || x.endsWith('/' + y) || y.endsWith('/' + x);
+}
+
+/**
+ * The files whose SOURCE an explore response returned — its per-file sections,
+ * which start with the unique ``**` `` marker (FILE_SECTION_PREFIX in
+ * src/mcp/tools.ts). formatEnvelope keys off the same marker; it needs the byte
+ * offsets too, which is why it re-scans rather than calling this.
+ */
+export function exploreReturnedFiles(text) {
+  return [...String(text ?? '').matchAll(/^\*\*`([^`]+)`\*\*/gm)].map((m) => m[1]);
+}
+
+// Every path-shaped token anywhere in a response — flow steps, blast radius,
+// symbol lists. A file in here but NOT in the returned set was POINTED AT and
+// not delivered, which is a different (and more damning) miss than one the
+// response never mentioned at all.
+const PATH_TOKEN_RE = /(?:[\w@.+-]+\/)+[\w@.+-]+\.[A-Za-z]\w*/g;
+
+/**
+ * The reaction one action represents, given what the explore had returned.
+ * `earlier` is what PREVIOUS explores in the same thread returned: a re-read of
+ * a file we already shipped is an allocation miss wherever it was shipped, and
+ * filing it as recall would point the fix at the wrong end of the pipeline.
+ */
+function reactionOf(action, returned, mentioned, earlier = []) {
+  const { name, input } = action;
+  const readOf = (path, prefix) => {
+    const base = normPath(path).split('/').pop() || String(path ?? '');
+    if (returned.some((r) => samePath(path, r))) return { bucket: 'read_returned', next: `${prefix}Read ${base}` };
+    if (earlier.some((r) => samePath(path, r))) return { bucket: 'read_returned', next: `${prefix}Read ${base} (returned by an earlier explore)` };
+    const named = mentioned.some((m) => samePath(path, m));
+    return { bucket: 'read_missed', next: `${prefix}Read ${base}${named ? ' (named, not returned)' : ''}`, named };
+  };
+  if (/codegraph/.test(name)) return { bucket: 'explore_again', next: name.replace(/^mcp__[^_]*__/, '') };
+  if (name === 'Read' || name === 'NotebookRead') return readOf(input.file_path ?? input.notebook_path, '');
+  if (name === 'Grep' || name === 'Glob') return { bucket: 'search', next: name };
+  if (name === 'Bash') {
+    const intent = bashIntent(input.command);
+    if (intent?.kind === 'read') return readOf(intent.path, 'Bash ');
+    if (intent?.kind === 'search') return { bucket: 'search', next: 'Bash search' };
+  }
+  return { bucket: 'sufficient', next: name };
+}
+
+/** Is this action one of the ways an agent gets file bytes into its head? */
+const isFileAccess = (a) =>
+  a.name === 'Read' || a.name === 'NotebookRead' || a.name === 'Grep' || a.name === 'Glob'
+  || (a.name === 'Bash' && bashIntent(a.input?.command) !== null);
+
+/**
+ * Bucket every answered codegraph_explore call in a transcript by what the
+ * agent did next. Takes the raw JSONL events so it serves both transcript
+ * shapes: stream-json runs (parse-run.mjs) and interactive session logs
+ * (parse-session.mjs) — both emit one assistant event per content block with
+ * `message.id`, and tool results as `tool_result` blocks in user messages.
+ */
+export function classifySufficiency(events) {
+  // One action list PER THREAD: 'main', plus one per subagent (keyed by the
+  // delegating tool_use id, which is what `parent_tool_use_id` carries).
+  const threads = new Map();
+  const nameById = new Map();
+  const textById = new Map();    // explore tool_use_id -> response text
+  for (const ev of events) {
+    const content = ev?.message?.content;
+    if (!Array.isArray(content)) continue;
+    const thread = ev.parent_tool_use_id ?? 'main';
+    if (ev.type === 'assistant') {
+      if (!threads.has(thread)) threads.set(thread, []);
+      const list = threads.get(thread);
+      for (const b of content) {
+        if (b.type !== 'tool_use') continue;
+        nameById.set(b.id, b.name);
+        // No message.id (never seen on a real log) degrades to "every call is
+        // its own message", i.e. same-message calls read as reactions.
+        list.push({ msgId: ev.message.id || `#${thread}-${list.length}`, id: b.id, name: b.name, input: b.input || {} });
+      }
+    } else if (ev.type === 'user') {
+      for (const b of content) {
+        if (b.type !== 'tool_result') continue;
+        const name = nameById.get(b.tool_use_id) || '';
+        if (/codegraph_explore/.test(name) && !b.is_error) textById.set(b.tool_use_id, textOf(b.content));
+      }
+    }
+  }
+
+  const calls = [];
+  let errors = 0, concurrent = 0;
+  // What a delegation really did: the subagent's first substantive call. A
+  // nested delegation is skipped rather than followed, so a subagent that only
+  // spawns another subagent leaves the call as "moved on".
+  const throughDelegation = (action, returned, mentioned, earlier) => {
+    const first = (threads.get(action.id) || []).find((x) => !TRANSPARENT_TOOLS.has(x.name) && !DELEGATION_TOOLS.has(x.name));
+    if (!first) return { bucket: 'sufficient', next: action.name };
+    const r = reactionOf(first, returned, mentioned, earlier);
+    return { ...r, next: `${action.name} → ${r.next}` };
+  };
+  for (const [thread, actions] of threads) {
+    const earlier = [];  // files previous explores in THIS thread already shipped
+    for (let i = 0; i < actions.length; i++) {
+      const a = actions[i];
+      if (!/codegraph_explore/.test(a.name)) continue;
+      const text = textById.get(a.id);
+      // No response text = the call errored, or the run ended before it
+      // returned. Nothing to judge the sufficiency of; count it and move on.
+      if (text === undefined) { errors++; continue; }
+      const returned = exploreReturnedFiles(text);
+      const mentioned = text.match(PATH_TOKEN_RE) || [];
+      let reaction = { bucket: 'sufficient', next: '(final answer)' };
+      for (let j = i + 1; j < actions.length; j++) {
+        const b = actions[j];
+        if (b.msgId === a.msgId) { if (isFileAccess(b)) concurrent++; continue; }
+        if (TRANSPARENT_TOOLS.has(b.name)) continue;
+        reaction = DELEGATION_TOOLS.has(b.name)
+          ? throughDelegation(b, returned, mentioned, earlier)
+          : reactionOf(b, returned, mentioned, earlier);
+        break;
+      }
+      earlier.push(...returned);
+      calls.push({ thread, query: String(a.input.query ?? ''), files: returned.length, chars: text.length, ...reaction });
+    }
+  }
+
+  const counts = Object.fromEntries(SUFFICIENCY_KEYS.map((k) => [k, 0]));
+  for (const c of calls) counts[c.bucket]++;
+  return { calls, counts, errors, concurrent, answered: calls.length };
+}
+
+/** The sufficiency block, as printed under a run and reused by aggregators. */
+export function formatSufficiency(s, indent = '  ') {
+  const f = s.sufficiency;
+  if (!f.answered) {
+    return `${indent}Explore sufficiency: no answered codegraph_explore calls`
+      + (f.errors ? ` (${f.errors} errored or never returned)` : '');
+  }
+  const pct = (n) => ((n / f.answered) * 100).toFixed(0) + '%';
+  const out = [`${indent}Explore sufficiency — what the agent did NEXT (${f.answered} answered call${f.answered === 1 ? '' : 's'}):`];
+  for (const [key, label, meaning] of SUFFICIENCY) {
+    out.push(`${indent}  ${String(f.counts[key]).padStart(3)} ${pct(f.counts[key]).padStart(4)}  ${label.padEnd(31)}${meaning}`);
+  }
+  f.calls.forEach((c, i) => {
+    const q = c.query.length > 46 ? c.query.slice(0, 45) + '…' : c.query;
+    const where = c.thread && c.thread !== 'main' ? ' [subagent]' : '';
+    out.push(`${indent}  ${i + 1}.${where} "${q}" [${c.files} file${c.files === 1 ? '' : 's'}] → ${c.next}`);
+  });
+  const notes = [];
+  if (f.errors) notes.push(`${f.errors} errored/unanswered call${f.errors === 1 ? '' : 's'} (not bucketed)`);
+  if (f.concurrent) notes.push(`${f.concurrent} file-access call${f.concurrent === 1 ? '' : 's'} in the SAME message as an explore (not a reaction)`);
+  if (notes.length) out.push(`${indent}  note: ${notes.join(' · ')}`);
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // `--selftest`: the occupancy math over synthetic transcripts with known
 // answers. It lives here rather than in a test file on purpose — a new
 // scripts/agent-eval/*.mjs scores into the self-query eval fixture's corpus.
@@ -441,7 +676,7 @@ function selftest() {
     type: 'assistant',
     message: { id, content: [b], usage: { input_tokens: ctx, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 2 } },
   }));
-  const use = (id, name) => ({ type: 'tool_use', id, name, input: {} });
+  const use = (id, name, input = {}) => ({ type: 'tool_use', id, name, input });
   const res = (id, chars) => JSON.stringify({
     type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: 'x'.repeat(chars) }] }] },
   });
@@ -528,6 +763,186 @@ function selftest() {
   check('stitched final context', s.occupancy.ctxFinal, 14600, 0);
   check('stitched cost sums segments', s.cost * 100, 20, 0.1);
 
+  // ---- 6. Explore sufficiency: the bucket each explore call earns. --------
+  const checkIs = (name, got, want) => {
+    n++;
+    const ok = got === want;
+    if (!ok) failures++;
+    console.log(`${ok ? '  ok  ' : '  FAIL'} ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+  };
+  const EXPLORE = 'mcp__codegraph__codegraph_explore';
+  // An explore response's shape that matters here: one `**`path`**` section per
+  // file whose source it returned, plus whatever else it named.
+  const exploreRes = (id, paths, extra = '', isError = false) => JSON.stringify({
+    type: 'user',
+    message: {
+      content: [{
+        type: 'tool_result', tool_use_id: id, ...(isError ? { is_error: true } : {}),
+        content: [{ type: 'text', text: paths.map((p) => `**\`${p}\`** — fn(function)\n\n1\tcode here\n`).join('\n') + extra }],
+      }],
+    },
+  });
+  const suff = (lines) => classifySufficiency(lines.map((l) => JSON.parse(l)));
+
+  // explore → explore is insufficient; the second explore → a Read of a file it
+  // RETURNED is the allocation bucket (this is the CG-22 express baseline).
+  let sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'res.send Content-Type ETag generation' })]),
+    exploreRes('e1', ['lib/response.js', 'lib/utils.js']),
+    ...req(12000, 'm2', [use('e2', EXPLORE, { query: 'response.js res.send function body' })]),
+    exploreRes('e2', ['lib/response.js']),
+    ...req(14000, 'm3', [use('r1', 'Read', { file_path: '/private/tmp/t-base/lib/response.js' })]),
+    res('r1', 3722),
+    ...req(15000, 'm4', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  check('two answered explore calls', sf.answered, 2, 0);
+  checkIs('explore → explore = insufficient', sf.calls[0].bucket, 'explore_again');
+  checkIs('explore → Read of a returned file (abs path)', sf.calls[1].bucket, 'read_returned');
+
+  // A file the response NAMED but did not return is still a recall miss — and
+  // is flagged as named, since pointing without delivering is its own failure.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js'], '\n**Flow**\n1. lib/router/index.js:42 handle\n'),
+    ...req(12000, 'm2', [use('r1', 'Read', { file_path: '/t/lib/router/index.js' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  checkIs('explore → Read of a named-but-unreturned file', sf.calls[0].bucket, 'read_missed');
+  checkIs('  …flagged as named', sf.calls[0].named, true);
+
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [use('r1', 'Read', { file_path: '/t/lib/never/mentioned.js' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  checkIs('explore → Read of a file never surfaced', sf.calls[0].bucket, 'read_missed');
+  checkIs('  …not flagged as named', sf.calls[0].named, false);
+
+  // Grep, and the shell equivalents of Read and Grep.
+  const oneShot = (next) => suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [next]),
+    res(next.id, 100),
+    done(),
+  ]).calls[0];
+  checkIs('explore → Grep', oneShot(use('g1', 'Grep', { pattern: 'send' })).bucket, 'search');
+  checkIs('explore → Glob', oneShot(use('g1', 'Glob', { pattern: '**/*.js' })).bucket, 'search');
+  checkIs('explore → Bash sed of a returned file',
+    oneShot(use('b1', 'Bash', { command: "sed -n '100,200p' lib/response.js" })).bucket, 'read_returned');
+  checkIs('explore → Bash grep', oneShot(use('b1', 'Bash', { command: 'grep -rn send lib/' })).bucket, 'search');
+  checkIs('explore → Bash that writes a file is not a read',
+    oneShot(use('b1', 'Bash', { command: "cat > /tmp/note.md <<'EOF'\nx\nEOF" })).bucket, 'sufficient');
+  checkIs('explore → Bash npm test = moved on',
+    oneShot(use('b1', 'Bash', { command: 'npm test' })).bucket, 'sufficient');
+  checkIs('explore → Edit = sufficient',
+    oneShot(use('x1', 'Edit', { file_path: '/t/lib/response.js' })).bucket, 'sufficient');
+
+  // No further tool call at all: the agent answered from the response.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [{ type: 'text', text: 'here is how it works' }]),
+    done(),
+  ]);
+  checkIs('explore → final answer', sf.calls[0].bucket, 'sufficient');
+  checkIs('  …labelled as the final answer', sf.calls[0].next, '(final answer)');
+
+  // A Read issued in the SAME message as the explore predates its response, so
+  // it is not a verdict on it — step past it and count it separately.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' }), use('r1', 'Read', { file_path: '/t/lib/response.js' })]),
+    exploreRes('e1', ['lib/response.js']),
+    res('r1', 100),
+    ...req(12000, 'm2', [use('x1', 'Edit', { file_path: '/t/lib/response.js' })]),
+    res('x1', 20),
+    done(),
+  ]);
+  checkIs('same-message Read is not a reaction', sf.calls[0].bucket, 'sufficient');
+  check('  …counted as concurrent instead', sf.concurrent, 1, 0);
+
+  // ToolSearch/TodoWrite carry no signal — the Read behind them is the verdict.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [use('t1', 'TodoWrite', {})]),
+    res('t1', 20),
+    ...req(13000, 'm3', [use('r1', 'Read', { file_path: '/t/lib/response.js' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  checkIs('bookkeeping tools are stepped over', sf.calls[0].bucket, 'read_returned');
+
+  // A re-read of a file an EARLIER explore shipped is still an allocation miss:
+  // we returned it and clipped it wrong, just not on this call.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'first' })]),
+    exploreRes('e1', ['lib/response.js', 'lib/utils.js']),
+    ...req(11000, 'm2', [use('e2', EXPLORE, { query: 'second' })]),
+    exploreRes('e2', ['lib/response.js']),
+    ...req(12000, 'm3', [use('r1', 'Read', { file_path: '/t/lib/utils.js' })]),
+    res('r1', 400),
+    done(),
+  ]);
+  checkIs('re-read of an earlier explore’s file is allocation, not recall',
+    sf.calls[1].bucket, 'read_returned');
+  checkIs('  …and says which explore returned it',
+    sf.calls[1].next, 'Read utils.js (returned by an earlier explore)');
+
+  // A subagent's calls are interleaved into the same stream under
+  // `parent_tool_use_id` (verified on a real excalidraw run). They belong to
+  // their own thread: the parent's verdict is the delegation, judged by what
+  // the subagent actually did first — here, grepping for a file we never
+  // returned.
+  const sub = (parent, obj) => JSON.stringify({ ...JSON.parse(obj), parent_tool_use_id: parent });
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [use('a1', 'Agent', { subagent_type: 'Explore' })]),
+    ...req(0, 'sm1', [use('sb1', 'Bash', { command: 'grep -rn nonce lib/' })]).map((l) => sub('a1', l)),
+    sub('a1', res('sb1', 400)),
+    ...req(14000, 'm3', [{ type: 'text', text: 'done' }]),
+    res('a1', 900),
+    done(),
+  ]);
+  checkIs('delegation is judged by what the subagent did', sf.calls[0].bucket, 'search');
+  checkIs('  …and says so', sf.calls[0].next, 'Agent → Bash search');
+
+  // A subagent's Read must NOT be read as the parent's reaction to an explore
+  // the subagent never saw: the parent moved on, the subagent's own explore is
+  // judged inside its own thread.
+  sf = suff([
+    ...req(10000, 'm1', [use('a1', 'Agent', { subagent_type: 'Explore' })]),
+    ...req(0, 'sm1', [use('e1', EXPLORE, { query: 'sub q' })]).map((l) => sub('a1', l)),
+    sub('a1', exploreRes('e1', ['lib/response.js'])),
+    ...req(11000, 'm2', [use('e2', EXPLORE, { query: 'parent q' })]),
+    exploreRes('e2', ['lib/other.js']),
+    ...req(0, 'sm2', [use('sr1', 'Read', { file_path: '/t/lib/response.js' })]).map((l) => sub('a1', l)),
+    sub('a1', res('sr1', 400)),
+    ...req(13000, 'm3', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  check('both threads bucketed', sf.answered, 2, 0);
+  checkIs('parent explore is not blamed for a subagent Read',
+    sf.calls.find((c) => c.query === 'parent q').bucket, 'sufficient');
+  checkIs('subagent explore is judged in its own thread',
+    sf.calls.find((c) => c.query === 'sub q').bucket, 'read_returned');
+
+  // An errored explore has no response to judge; it is counted, not bucketed.
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', [], 'not indexed', true),
+    ...req(12000, 'm2', [use('r1', 'Read', { file_path: '/t/lib/response.js' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  check('errored explore is not bucketed', sf.answered, 0, 0);
+  check('  …but is counted', sf.errors, 1, 0);
+
   console.log(`\n${n - failures}/${n} checks passed`);
   return failures;
 }
@@ -567,6 +982,8 @@ if (isMain) {
   }
   console.log('');
   console.log(formatOccupancy(s));
+  console.log('');
+  console.log(formatSufficiency(s));
   if (wantEnvelope) {
     console.log('');
     console.log(formatEnvelope(s.exploreTexts, answerGlobs));

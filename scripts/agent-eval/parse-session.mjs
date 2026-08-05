@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync, statSync, existsSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { classifySufficiency, formatSufficiency } from './parse-run.mjs';
 
 const projectArg = process.argv[2];
 if (!projectArg) { console.error('usage: parse-session.mjs <project-dir>'); process.exit(1); }
@@ -91,3 +92,29 @@ if (existsSync(subDir)) {
 }
 const k = (n) => (n / 1000).toFixed(1) + 'k';
 console.log(`TOKENS: gen ${k(tok.gen)} | fresh-in ${k(tok.fresh)} | cached-in ${k(tok.cached)} | billable≈ ${k(tok.gen + tok.fresh)}`);
+
+// What the agent did after each codegraph_explore (CG-8) — the same classifier
+// the headless A/B uses, over the interactive transcript.
+//
+// A subagent's calls live in their OWN file here (headless stream-json
+// interleaves them into one stream instead), so they are stitched back in:
+// each `agent-*.meta.json` carries the `toolUseId` of the Task that spawned it,
+// which is exactly the `parent_tool_use_id` the classifier keys threads on.
+// Without that, a delegated search would score as "the agent moved on".
+const parseLines = (file, parentToolUseId) => readFileSync(file, 'utf8').split('\n')
+  .filter(Boolean)
+  .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+  .filter(Boolean)
+  .map((ev) => (parentToolUseId ? { ...ev, parent_tool_use_id: parentToolUseId } : ev));
+
+const events = parseLines(join(projDir, sessionId + '.jsonl'));
+if (existsSync(subDir)) {
+  for (const f of readdirSync(subDir).filter((f) => f.endsWith('.jsonl'))) {
+    let parent = null;
+    const meta = join(subDir, f.replace(/\.jsonl$/, '.meta.json'));
+    if (existsSync(meta)) { try { parent = JSON.parse(readFileSync(meta, 'utf8')).toolUseId ?? null; } catch { /* unreadable */ } }
+    events.push(...parseLines(join(subDir, f), parent ?? `subagent:${f}`));
+  }
+}
+console.log('');
+console.log(formatSufficiency({ sufficiency: classifySufficiency(events) }, ''));
