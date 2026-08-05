@@ -1,5 +1,10 @@
 # Residual context occupancy
 
+> One of three feedback metrics the agent-eval harness reports on every run.
+> [`agent-eval-feedback-metrics.md`](agent-eval-feedback-metrics.md) is the entry
+> point: which metric answers which question, which harness to run, and how to
+> read the arm-comparison table.
+
 **What it measures:** how many tokens of the context window a tool's responses
 still occupy once the question has been answered — and therefore how much
 headroom every following turn has to work in.

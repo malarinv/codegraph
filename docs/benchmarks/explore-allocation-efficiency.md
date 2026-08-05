@@ -1,5 +1,10 @@
 # Explore allocation efficiency
 
+> One of three feedback metrics the agent-eval harness reports on every run.
+> [`agent-eval-feedback-metrics.md`](agent-eval-feedback-metrics.md) is the entry
+> point: which metric answers which question, which harness to run, and how to
+> read the arm-comparison table.
+
 **What it measures:** of the bytes a `codegraph_explore` response spent, what
 share went to files the agent's answer actually drew on.
 

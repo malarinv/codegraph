@@ -1,5 +1,10 @@
 # Explore sufficiency
 
+> One of three feedback metrics the agent-eval harness reports on every run.
+> [`agent-eval-feedback-metrics.md`](agent-eval-feedback-metrics.md) is the entry
+> point: which metric answers which question, which harness to run, and how to
+> read the arm-comparison table.
+
 **What it measures:** whether a `codegraph_explore` response was *enough* — read
 off what the agent did next, which the harness was throwing away.
 
@@ -112,6 +117,17 @@ Read a file we did not return 1 (2%) · Grep/Glob 14 (23%) · moved on 11 (18%)
 Read it as a baseline, not a verdict: these are three-turn sessions on hard
 flow questions, and "explored again" includes the legitimate second call on a
 repo whose budget is 2–3 calls.
+
+**That block is a snapshot, and it no longer re-derives.** `bench-readme.sh`
+overwrites `/tmp/ab-readme` on every campaign, so the logs sitting there are not
+the ones swept above. Pooling the 14 with-arm sessions on disk as of 2026-08-05
+gives `explore again 47 (76%) · Read a file we returned 1 (2%) · Read a file we
+did not return 1 (2%) · Grep/Glob 0 (0%) · moved on 13 (21%)` over the same 62
+calls — checked against both the CG-8-era classifier and the current one, which
+agree exactly, so the classifier did not move under it. **CG-13 re-establishes
+the 7-repo baseline from a single campaign with all three metrics wired**; treat
+that as the number to compare against, and archive a campaign's logs elsewhere
+if you want a distribution to stay reproducible.
 
 **`cg22/ab-express/run-baseline-1` — the allocation bucket, by hand.** Sequence:
 explore *"res.send Content-Type ETag generation"* → explore *"response.js
