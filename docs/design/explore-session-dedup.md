@@ -6,16 +6,18 @@ delivered (the #1500 report: 4 calls on a 2-call tier budget), and the tier's ca
 can only be *asked* for in prose the agent ignores.
 
 This document covers the state layer that fixes the "no idea" part — `src/mcp/explore-session-state.ts`
-(CG-17). It changes no response. Its consumers are cross-call source dedup (CG-18) and
-budget decay past the tier budget (CG-19).
+(CG-17) — and the first thing built on it, cross-call source dedup
+(`src/mcp/explore-dedup.ts`, CG-18). Budget decay past the tier budget (CG-19) is the
+other consumer.
 
 ## What is recorded
 
 One `ExploreSessionState` per MCP session. Inside it, per **resolved project root**:
 
 - `callCount` / `responseBytes` — every explore call served this session for that project;
-- `calls[]` — the recent ones in detail: query, per-file emitted **line ranges**, source
-  bytes, response bytes, and the call's 1-based session index.
+- `calls[]` — the recent ones in detail: query, per-file emitted **line ranges**, a content
+  **fingerprint** for the bytes those ranges were sliced from, source bytes, response bytes,
+  and the call's 1-based session index.
 
 Ranges come from the render loop itself — `buildSection` returns the spans it slices
 alongside the text, and the whole-file / focused / skeleton paths report theirs at the
@@ -23,7 +25,10 @@ point they push source into the response. A separate function mirroring the wind
 padding rules would drift, and drift here is not symmetric: see *Which way to be wrong*.
 
 Only files that **survive the final hard-ceiling truncation** are recorded. A section the
-ceiling dropped was never delivered.
+ceiling dropped was never delivered. A back-referenced file records its spans at **zero
+bytes**: the record means "source the agent HOLDS for this file", not "bytes this call
+spent", so re-recording keeps a long session from ageing a pointed-at span out of the
+retained window and re-serving it for nothing.
 
 ## Four constraints, and what each one rules out
 
@@ -91,13 +96,94 @@ served per file, most-recent call first. The block is **absent** — not zeroed 
 caller tracks no state, which is how "untracked" and "first call of a tracked session" stay
 distinguishable.
 
+---
+
+# Cross-call dedup (CG-18)
+
+A call that would re-send source an earlier call already delivered sends a **pointer**
+instead. Never a bare omission: an insufficient-feeling response is precisely what sends an
+agent to Read, and one or two of those early in a session teach it to abandon codegraph
+entirely. So the replacement carries the file, the symbols, the line spans, and the two
+facts that make the copy usable — that it came from THIS conversation, and that the file has
+not changed since:
+
+```
+**`internal/usecase/payroll/cycle.go`** — Cycle, PayslipsForCycle, Service, …
+
+> **Already sent earlier in this conversation:** `internal/usecase/payroll/cycle.go`
+> L42-76, L78-215 (Cycle, PayslipsForCycle, Service, +6 more) — unchanged on disk since,
+> so that copy is still exact. Only the NEW lines are shown below; scroll back for the
+> rest. Do NOT Read this file.
+```
+
+The convention is also stated once, inline, as an exception appended to the "verbatim
+source" guarantee (the same shape #1474 uses for drift), and once in
+`server-instructions.ts`.
+
+## What gates it
+
+| Gate | Rule |
+|---|---|
+| Session | Off on a session's first call for a project — nothing to point at |
+| Content | A span is withheld only if the file still hashes to the bytes that span was sliced from |
+| Size | Only a covered run of ≥ `MIN_COVERED_LINES` (8) is replaced |
+| Remainder | New source under `MIN_DELTA_CHARS` (160) folds into the pointer instead of getting its own fence |
+| Kill switch | `CODEGRAPH_EXPLORE_DEDUP=0` renders as if the session had no history |
+
+The **content** gate is a fingerprint (`length:sha1-prefix`) recorded per file per call, NOT
+the index's drift flag. They answer different questions: two calls inside one drift window
+served the same current bytes (dedup is correct); a file edited *and re-synced* between two
+calls is never "stale" and yet the agent's copy is now wrong (dedup would be actively
+harmful). #1474's drift handling is upstream of this and unchanged — a drifted file still
+ships whole or not at all.
+
+The **size** gates exist because the pointer sentence is itself ~140 chars. Replacing a
+signature line or the ±3 lines of cluster padding would make the response bigger *and* read
+as full of holes. `MIN_DELTA_CHARS` is the one place the design withholds something the
+agent has not seen — bounded to ~two lines sitting directly against source it does hold —
+and it is there because the alternative is a code fence containing `228\t`, which reads as
+a broken response. The file is still named with its symbols, so one follow-up explore
+fetches it whole.
+
+## Where the reclaimed bytes go
+
+Two channels, both of which move bytes toward files the agent has NOT seen:
+
+- **`sourceSpent`** — a deduped file spends less, so CG-21's carry-forward pool hands the
+  difference down the rank order, and `headroom` grows for every file after it.
+- **the `maxFiles` slot** — a fully back-referenced file does not consume one (the same
+  treatment a cliffed file gets), so a file that would not have fit now renders.
+
+Within a file, the shrink decision reads the **deduped** length: shrinking a cluster on its
+raw size would drop new symbols to make room for source that is not being sent.
+
+## The all-pointer guard
+
+If dedup suppresses everything and nothing new takes its place, the response would be
+pointers only — the shape that reads as "codegraph found nothing". The render loop keeps the
+first fully-suppressed file's real section in hand and splices it back when the loop ends
+with zero new source. It costs a re-serve of one file on the one call shape where dedup
+would otherwise have saved everything. That is the safe direction, and it is why "no
+duplicate ranges across calls" holds for every call that had anything new to say, rather
+than universally. CG-20 is the abandonment gate that validates the whole thing on a real
+agent.
+
 ## Coverage
 
 `__tests__/explore-session-state.test.ts`, in three layers: the container (keying, monotonic
 index past eviction, every bound), the handler seam (a real explore against a real index
-records real ranges; the response is byte-identical to an untracked one; two states on one
-handler stay separate), and the session seam (two `MCPSession`s on one engine get their own
-state, and each call carries its own session's).
+records real ranges; a session's FIRST call is byte-identical to an untracked one; two
+states on one handler stay separate), and the session seam (two `MCPSession`s on one engine
+get their own state, and each call carries its own session's).
+
+`__tests__/explore-cross-call-dedup.test.ts` covers the dedup itself: the range algebra and
+its thresholds, the fingerprint gate (an edited file re-emits; an unprovable record is
+ignored), the pointer's wording (names the file/spans/symbols, never says "omitted", never
+steers to Read), and then the seam — a real second call re-sends **no** line the first one
+sent, comes back with >20 lines the first call never sent (reclaimed budget, not a shrunken
+response), always contains real source however much the session holds, and reports its
+savings through the CG-4 diagnostic (`dedup.savedChars`, per-file `dedupSavedChars` /
+`dedupCovered`, `render: 'backref'`).
 
 Two things vitest cannot cover, verified by hand against `dist/`:
 
