@@ -32,6 +32,7 @@
  */
 
 import { appendFileSync } from 'fs';
+import type { ExploreProjectState } from './explore-session-state';
 
 /** How a file's source was rendered into the response. */
 export type ExploreRenderMode =
@@ -135,6 +136,22 @@ export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   allocatedShare: number;
 }
 
+/**
+ * This session's explore history for this project, as of BEFORE the call being
+ * reported (CG-17). Present only when the caller tracks session state — the CLI
+ * and bare-handler callers don't, so it is absent there rather than zeroed.
+ */
+export interface ExploreDiagnosticSession {
+  /** 1-based index of THIS call within the session, for this project. */
+  callIndex: number;
+  /** Calls already served this session for this project. */
+  priorCalls: number;
+  /** Response chars already served this session for this project. */
+  priorResponseChars: number;
+  /** Files already served source this session, most-recent call first. */
+  priorFiles: Array<{ path: string; ranges: Array<[number, number]>; bytes: number }>;
+}
+
 /** The full report — one per explore call, JSON-serialized to the sink. */
 export interface ExploreDiagnosticReport {
   tool: 'codegraph_explore';
@@ -142,6 +159,8 @@ export interface ExploreDiagnosticReport {
   projectRoot: string;
   indexedFileCount: number;
   note?: string;
+  /** Session-scoped call state (CG-17); absent when the caller tracks none. */
+  session?: ExploreDiagnosticSession;
   budget: {
     maxOutputChars: number;
     maxCharsPerFile: number;
@@ -221,6 +240,7 @@ export class ExploreDiagnostics {
   private graphGateThreshold = 0;
   private graphGateApplied = false;
   private note = '';
+  private session: ExploreDiagnosticSession | undefined;
   private allocPool = 0;
   private allocCliffAt = 0;
   private allocCliffed: string[] = [];
@@ -263,6 +283,40 @@ export class ExploreDiagnostics {
     this.stages.pastLowValueFilter = kept;
     this.stages.pastScoreFloor = kept;
     this.stages.pastRelevanceGate = kept;
+  }
+
+  /**
+   * Record what this session had already been served for this project (CG-17),
+   * so the report says which call in the session it is and what the earlier ones
+   * cost. Read-only for now: nothing in the render loop consults it, which is
+   * what keeps the response byte-identical at this stage.
+   *
+   * Files are listed most-recent call first and de-duplicated by path — the same
+   * file re-served across calls is the pattern this instrument exists to make
+   * visible, and its ranges are unioned so a glance shows what of it the agent
+   * already holds.
+   */
+  noteSession(prior: ExploreProjectState | null): void {
+    if (!prior) return;
+    const byPath = new Map<string, { path: string; ranges: Array<[number, number]>; bytes: number }>();
+    for (const call of [...prior.calls].reverse()) {
+      for (const file of call.files) {
+        const existing = byPath.get(file.path);
+        const spans = file.ranges.map((r) => [r.start, r.end] as [number, number]);
+        if (existing) {
+          existing.ranges.push(...spans);
+          existing.bytes += file.bytes;
+        } else {
+          byPath.set(file.path, { path: file.path, ranges: spans, bytes: file.bytes });
+        }
+      }
+    }
+    this.session = {
+      callIndex: prior.callCount + 1,
+      priorCalls: prior.callCount,
+      priorResponseChars: prior.responseBytes,
+      priorFiles: [...byPath.values()],
+    };
   }
 
   /** Candidate count after the `group.score >= floor` filter. */
@@ -384,6 +438,7 @@ export class ExploreDiagnostics {
       projectRoot: this.projectRoot,
       indexedFileCount: this.indexedFileCount,
       note: this.note || undefined,
+      session: this.session,
       budget: {
         maxOutputChars: this.budget.maxOutputChars,
         maxCharsPerFile: this.budget.maxCharsPerFile,
@@ -524,6 +579,20 @@ export function renderTable(report: ExploreDiagnosticReport): string {
   out.push(`codegraph explore diagnostic — "${report.query}"`);
   out.push(`  project ${report.projectRoot} · ${num(report.indexedFileCount)} files indexed`);
   if (report.note) out.push(`  note: ${report.note}`);
+  if (report.session) {
+    const s = report.session;
+    out.push(
+      `  session call #${s.callIndex} for this project` +
+      ` · ${num(s.priorCalls)} prior call${s.priorCalls === 1 ? '' : 's'}` +
+      ` · ${num(s.priorResponseChars)} chars already served`,
+    );
+    for (const f of s.priorFiles.slice(0, 12)) {
+      const spans = f.ranges.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(',');
+      const more = f.ranges.length > 6 ? `,+${f.ranges.length - 6}` : '';
+      out.push(`    already served ${f.path} · ${num(f.bytes)} chars · L${spans}${more}`);
+    }
+    if (s.priorFiles.length > 12) out.push(`    … +${s.priorFiles.length - 12} more already-served file(s)`);
+  }
   out.push(
     `  envelope ${num(env.chars)} chars delivered · ${num(env.allocatedChars)} allocated` +
     ` of ${num(budget.maxOutputChars)} budget (hard ceiling ${num(budget.hardCeiling)})` +

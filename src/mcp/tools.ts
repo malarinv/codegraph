@@ -42,6 +42,16 @@ import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, C
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import { getUpdateNotice } from '../upgrade/update-check';
 import { ExploreDiagnostics } from './explore-diagnostics';
+import {
+  EXPLORE_EMISSION_KEY,
+  EXPLORE_SESSION_VIEW_ARG,
+  ExploreSessionState,
+  readExploreSessionView,
+  viewForProject,
+  type ExploreEmission,
+  type ExploreFileEmission,
+  type ExploreLineRange,
+} from './explore-session-state';
 
 /**
  * An expected, recoverable "codegraph can't serve this" condition — most
@@ -891,6 +901,15 @@ export interface ToolResult {
     text: string;
   }>;
   isError?: boolean;
+  /**
+   * INTERNAL side-channel (CG-17): what a `codegraph_explore` call actually put
+   * on the wire — files, line ranges, bytes. It rides the result because the
+   * call may have run on a query-pool worker, while the session state it feeds
+   * lives on the main thread. {@link ToolHandler.execute} records it and DELETES
+   * it, so nothing here ever reaches the client. Keyed by
+   * {@link EXPLORE_EMISSION_KEY}; the two must stay in sync.
+   */
+  _cgExploreEmission?: ExploreEmission;
 }
 
 /**
@@ -1805,9 +1824,19 @@ export class ToolHandler {
   }
 
   /**
-   * Execute a tool by name
+   * Execute a tool by name.
+   *
+   * `sessionState` is the CALLER's per-session explore history (CG-17). The
+   * daemon shares one ToolHandler across every connected session, so this state
+   * cannot live on the handler — each session owns one and hands it in, which is
+   * what keeps two sessions on one daemon from ever seeing each other's calls.
+   * Omit it (the CLI does) and explore behaves exactly as before, untracked.
    */
-  async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState?: ExploreSessionState,
+  ): Promise<ToolResult> {
     try {
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
@@ -1869,9 +1898,20 @@ export class ToolHandler {
       // cross-cutting notices — worktree-index mismatch (#155) and per-file
       // staleness (#403) — which need the watched MAIN instance and so are
       // always applied here, never in the worker.
-      const result = (this.queryPool && this.queryPool.healthy && this.queryPool.ready)
-        ? await this.queryPool.run(toolName, args)
-        : await this.executeReadTool(toolName, args);
+      //
+      // Explore also carries the session's own call history down (CG-17) and its
+      // emission record back up. Both travel as plain properties — on the args
+      // object down, on the ToolResult up — because either leg may cross a
+      // structured-clone boundary into a worker, where a closure or a handler
+      // field could not follow.
+      const dispatchArgs = this.withSessionView(toolName, args, sessionState);
+      const raw = (this.queryPool && this.queryPool.healthy && this.queryPool.ready)
+        ? await this.queryPool.run(toolName, dispatchArgs)
+        : await this.executeReadTool(toolName, dispatchArgs);
+      // Record + STRIP before anything else touches the result: the emission is
+      // internal bookkeeping and must never reach the client, whether or not a
+      // caller passed session state.
+      const result = this.takeExploreEmission(raw, sessionState);
       const withWorktree = this.withWorktreeNotice(result, args.projectPath as string | undefined);
       return this.withStalenessNotice(withWorktree, args.projectPath as string | undefined);
     } catch (err) {
@@ -1891,6 +1931,57 @@ export class ToolHandler {
         'continue without codegraph for this task.'
       );
     }
+  }
+
+  /**
+   * Attach the caller's session view to an explore call's args (CG-17), on a
+   * COPY so the caller's object is never mutated. Nothing else sees it: a
+   * non-explore tool, or a caller with no session state, gets the args
+   * unchanged and pays nothing.
+   *
+   * A client that spells the internal key itself is stripped rather than
+   * trusted — the view decides what source a later call may withhold, so it has
+   * to come from the server's own record, never from the wire.
+   */
+  private withSessionView(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState | undefined,
+  ): Record<string, unknown> {
+    if (!(EXPLORE_SESSION_VIEW_ARG in args) && (!sessionState || toolName !== 'codegraph_explore')) {
+      return args;
+    }
+    const copy = { ...args };
+    delete copy[EXPLORE_SESSION_VIEW_ARG];
+    if (sessionState && toolName === 'codegraph_explore') {
+      copy[EXPLORE_SESSION_VIEW_ARG] = sessionState.view();
+    }
+    return copy;
+  }
+
+  /**
+   * Record an explore call's emission into the caller's session state and strip
+   * it from the result (CG-17).
+   *
+   * Unconditional strip: the property is internal, so it comes off even when
+   * there is no session state to record it into (the CLI path) — that is what
+   * keeps the agent-facing response byte-identical. Recording is wrapped
+   * because a bookkeeping bug must never fail a tool call that already
+   * succeeded.
+   */
+  private takeExploreEmission(
+    result: ToolResult,
+    sessionState: ExploreSessionState | undefined,
+  ): ToolResult {
+    const emission = result?.[EXPLORE_EMISSION_KEY];
+    if (emission === undefined) return result;
+    delete result[EXPLORE_EMISSION_KEY];
+    if (sessionState) {
+      try {
+        sessionState.record(emission);
+      } catch { /* bookkeeping only — never fail a served call */ }
+    }
+    return result;
   }
 
   /**
@@ -3029,6 +3120,29 @@ export class ToolHandler {
     // byte-identical. It only OBSERVES: it must never feed back into rendering.
     const diag = ExploreDiagnostics.start(query, projectRoot, budget, maxFiles, indexedFileCount);
 
+    // What this session has already been served for THIS project (CG-17).
+    // Read-only at this stage — it is reported in the diagnostic and nothing
+    // else, so the response is unchanged. Cross-call dedup (CG-18) and budget
+    // decay (CG-19) are the consumers this exists for.
+    const priorCalls = viewForProject(readExploreSessionView(args), projectRoot);
+    diag?.noteSession(priorCalls);
+
+    // What this call ends up emitting, per file — the record handed back to the
+    // session state on the main thread. Filled by every render path below, then
+    // filtered to the files that SURVIVE the final hard-ceiling cut, so the
+    // record is what the agent actually received rather than what the loop
+    // hoped to send.
+    const emittedByFile = new Map<string, { ranges: ExploreLineRange[]; bytes: number }>();
+    const noteEmitted = (fp: string, ranges: ExploreLineRange[], bytes: number): void => {
+      const existing = emittedByFile.get(fp);
+      if (existing) {
+        existing.ranges.push(...ranges);
+        existing.bytes += bytes;
+      } else {
+        emittedByFile.set(fp, { ranges: [...ranges], bytes });
+      }
+    };
+
     // Step 1: Find relevant context with generous parameters.
     // Use a large maxNodes budget — explore has its own 35k char output limit
     // that prevents context bloat, so more nodes just means better coverage
@@ -3042,7 +3156,12 @@ export class ToolHandler {
 
     if (subgraph.nodes.size === 0) {
       diag?.finishEmpty('no relevant code found — empty subgraph');
-      return this.textResult(`No relevant code found for "${query}"`);
+      const empty = `No relevant code found for "${query}"`;
+      // Still an explore call, so it is still recorded: an empty answer spends a
+      // call against the tier budget even though it emits no source.
+      return this.exploreResult(empty, {
+        projectRoot, query, files: [], sourceBytes: 0, responseBytes: empty.length,
+      });
     }
 
     // Graph-aware glue: findRelevantContext builds the subgraph from name/text
@@ -4014,6 +4133,7 @@ export class ToolHandler {
         // signature line (capped, with a "+N more" tail so the structure map of a
         // god-file doesn't itself bloat the budget).
         const skel: string[] = [];
+        const skelRanges: ExploreLineRange[] = [];
         let coveredUntil = 0; // skip symbols already inside an emitted body
         let sigCount = 0, sigDropped = 0;
         const SIG_MAX = Math.max(12, budget.maxSymbolsInFileHeader * 2);
@@ -4023,6 +4143,7 @@ export class ToolHandler {
             const end = n.endLine;
             const body = fileLines.slice(n.startLine - 1, end).join('\n');
             skel.push(exploreLineNumbersEnabled() ? numberSourceLines(body, n.startLine) : body);
+            skelRanges.push({ start: n.startLine, end });
             coveredUntil = end;
           } else {
             // Elide the body, emit the signature. node.startLine can point at a
@@ -4034,7 +4155,11 @@ export class ToolHandler {
             if (lineNo <= coveredUntil) continue;
             if (sigCount >= SIG_MAX) { sigDropped++; continue; }
             const sig = (fileLines[lineNo - 1] || '').trim();
-            if (sig) { skel.push(exploreLineNumbersEnabled() ? `${lineNo}\t${sig}` : sig); sigCount++; }
+            if (sig) {
+              skel.push(exploreLineNumbersEnabled() ? `${lineNo}\t${sig}` : sig);
+              skelRanges.push({ start: lineNo, end: lineNo });
+              sigCount++;
+            }
           }
         }
         if (sigDropped > 0) skel.push(`… +${sigDropped} more (signatures elided)`);
@@ -4055,6 +4180,7 @@ export class ToolHandler {
           sourceSpent += skel.join('\n').length;
           // Always "clipped": the per-symbol view elides bodies by construction.
           diag?.recordRender(filePath, bodyIds.size > 0 ? 'focused' : 'skeleton', skel.join('\n').length, true);
+          noteEmitted(filePath, skelRanges, skel.join('\n').length);
           renderedFilePaths.push(filePath);
           filesIncluded++;
           continue;
@@ -4159,6 +4285,8 @@ export class ToolHandler {
         totalChars += wholeSection.length + 200;
         sourceSpent += wholeSection.length;
         diag?.recordRender(filePath, 'whole', wholeSection.length, false);
+        // The whole file, minus any trailing blank lines the render trimmed.
+        noteEmitted(filePath, [{ start: 1, end: body.split('\n').length }], wholeSection.length);
         renderedFilePaths.push(filePath);
         filesIncluded++;
         if (fileStale) staleRendered.push(filePath);
@@ -4325,28 +4453,42 @@ export class ToolHandler {
       // the spine's call still appears in context.
       const OVERSIZE_SPINE_LINES = 200;
       const SPINE_WINDOW = 28; // lines each side of the next-hop call site
-      const buildSection = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): string => {
+      // Returns the rendered text AND the line spans it covers. The spans are
+      // what the session record is built from (CG-17): reporting them from the
+      // same function that slices the source is what keeps the record honest —
+      // a second function mirroring these window/padding rules would drift, and
+      // a record that claims lines it never sent withholds them from a later
+      // call, which costs a Read.
+      const buildSection = (
+        c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number },
+      ): { text: string; ranges: ExploreLineRange[] } => {
         if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES) {
           const call = c.spineCallLine;
           const winStart = Math.max(c.start, call - SPINE_WINDOW);
           const winEnd = Math.min(c.end, call + SPINE_WINDOW);
           const parts: string[] = [];
+          const spans: ExploreLineRange[] = [];
           // Signature head, only when it sits clearly above the window (else the
           // window already covers the method opening).
           const headEnd = Math.min(c.start + 4, winStart - 2);
           if (headEnd >= c.start) {
             const head = fileLines.slice(c.start - 1, headEnd).join('\n');
             parts.push(withLineNumbers ? numberSourceLines(head, c.start) : head);
+            spans.push({ start: c.start, end: headEnd });
           }
           const win = fileLines.slice(winStart - 1, winEnd).join('\n');
           parts.push(withLineNumbers ? numberSourceLines(win, winStart) : win);
-          return parts.join(GAP_MARKER);
+          spans.push({ start: winStart, end: winEnd });
+          return { text: parts.join(GAP_MARKER), ranges: spans };
         }
         const startIdx = Math.max(0, c.start - 1 - contextPadding);
         const endIdx = Math.min(fileLines.length, c.end + contextPadding);
         const slice = fileLines.slice(startIdx, endIdx).join('\n');
         // startIdx is 0-based, so the slice's first line is line startIdx + 1.
-        return withLineNumbers ? numberSourceLines(slice, startIdx + 1) : slice;
+        return {
+          text: withLineNumbers ? numberSourceLines(slice, startIdx + 1) : slice,
+          ranges: [{ start: startIdx + 1, end: endIdx }],
+        };
       };
 
       /**
@@ -4365,7 +4507,10 @@ export class ToolHandler {
        * body is never cut, and the members are chosen by the same importance the
        * cluster ranking uses. Returns null when nothing needed shrinking.
        */
-      const shrinkCluster = (c: ExploreCluster, cap: number): string | null => {
+      const shrinkCluster = (
+        c: ExploreCluster,
+        cap: number,
+      ): { text: string; ranges: ExploreLineRange[] } | null => {
         if (c.members.length < 2) return null;
         const byImportance = [...c.members].sort((a, b) =>
           b.importance - a.importance || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
@@ -4390,7 +4535,11 @@ export class ToolHandler {
           if (last && r.start <= last.end + gapThreshold) last.end = Math.max(last.end, r.end);
           else merged.push({ start: r.start, end: r.end });
         }
-        return merged.map((m) => buildSection(m)).join(GAP_MARKER);
+        const sections = merged.map((m) => buildSection(m));
+        return {
+          text: sections.map((s) => s.text).join(GAP_MARKER),
+          ranges: sections.flatMap((s) => s.ranges),
+        };
       };
 
       // Rank clusters for inclusion under the per-file cap. Entry-point
@@ -4439,10 +4588,10 @@ export class ToolHandler {
       const chosenIndices = new Set<number>();
       // Shrunk renders for oversize clusters, by cluster index (CG-12). Computed
       // during selection and reused at emission so the two never disagree.
-      const shrunkSections = new Map<number, string>();
+      const shrunkSections = new Map<number, { text: string; ranges: ExploreLineRange[] }>();
       let projectedChars = 0;
       for (const rc of rankedClusters) {
-        const sectionLen = buildSection(rc.c).length + (chosenIndices.size > 0 ? GAP_MARKER.length : 0);
+        const sectionLen = buildSection(rc.c).text.length + (chosenIndices.size > 0 ? GAP_MARKER.length : 0);
         // The top-ranked cluster is always taken — an empty file section sends the
         // agent to Read, negating the savings. But "always taken" is not "taken at
         // any size": when it overruns the reservation it is SHRUNK to the
@@ -4453,7 +4602,7 @@ export class ToolHandler {
           const shrunk = sectionLen > cap ? shrinkCluster(rc.c, cap) : null;
           if (shrunk !== null) shrunkSections.set(rc.idx, shrunk);
           chosenIndices.add(rc.idx);
-          projectedChars += shrunk !== null ? shrunk.length : sectionLen;
+          projectedChars += shrunk !== null ? shrunk.text.length : sectionLen;
           continue;
         }
         // A spine cluster (the rendered call path) is the flow answer — include it
@@ -4469,12 +4618,14 @@ export class ToolHandler {
       // Emit chosen clusters in source order so the file reads top-to-bottom.
       let fileSection = '';
       const allSymbols: string[] = [];
+      const sectionRanges: ExploreLineRange[] = [];
       for (let i = 0; i < clusters.length; i++) {
         if (!chosenIndices.has(i)) continue;
         const cluster = clusters[i]!;
         const section = shrunkSections.get(i) ?? buildSection(cluster);
         if (fileSection.length > 0) fileSection += GAP_MARKER;
-        fileSection += section;
+        fileSection += section.text;
+        sectionRanges.push(...section.ranges);
         allSymbols.push(...cluster.symbols);
       }
 
@@ -4532,6 +4683,7 @@ export class ToolHandler {
       totalChars += fileSection.length + 200;
       sourceSpent += fileSection.length;
       diag?.recordRender(filePath, 'clusters', fileSection.length, chosenIndices.size < clusters.length);
+      noteEmitted(filePath, sectionRanges, fileSection.length);
       renderedFilePaths.push(filePath);
       filesIncluded++;
     }
@@ -4678,7 +4830,35 @@ export class ToolHandler {
     // shares account for the hard-ceiling truncation above (CG-4).
     diag?.finish(finalText, output.length, hardCeiling, filesIncluded);
 
-    return this.textResult(finalText);
+    // Session record (CG-17): only the files that SURVIVED the hard ceiling —
+    // a section the truncation dropped was never delivered, and recording it
+    // would let a later call withhold source the agent has never seen.
+    const emittedFiles: ExploreFileEmission[] = [];
+    let sourceBytes = 0;
+    for (const fp of survivors) {
+      const emitted = emittedByFile.get(fp);
+      if (!emitted || emitted.bytes <= 0) continue;
+      emittedFiles.push({ path: fp, ranges: emitted.ranges, bytes: emitted.bytes });
+      sourceBytes += emitted.bytes;
+    }
+    return this.exploreResult(finalText, {
+      projectRoot,
+      query,
+      files: emittedFiles,
+      sourceBytes,
+      responseBytes: finalText.length,
+    });
+  }
+
+  /**
+   * An explore response plus the record of what it emitted (CG-17). The record
+   * rides the result only as far as {@link execute}, which files it into the
+   * calling session's state and deletes it — see {@link EXPLORE_EMISSION_KEY}.
+   */
+  private exploreResult(text: string, emission: ExploreEmission): ToolResult {
+    const result = this.textResult(text);
+    result[EXPLORE_EMISSION_KEY] = emission;
+    return result;
   }
 
   /**
