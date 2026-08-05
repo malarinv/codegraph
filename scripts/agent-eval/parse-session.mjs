@@ -6,7 +6,10 @@
 import { readFileSync, readdirSync, statSync, existsSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { classifySufficiency, formatSufficiency } from './parse-run.mjs';
+import {
+  classifySufficiency, formatSufficiency,
+  collectExploreTexts, computeAllocation, finalAnswerText, formatAllocation,
+} from './parse-run.mjs';
 
 const projectArg = process.argv[2];
 if (!projectArg) { console.error('usage: parse-session.mjs <project-dir>'); process.exit(1); }
@@ -118,3 +121,10 @@ if (existsSync(subDir)) {
 }
 console.log('');
 console.log(formatSufficiency({ sufficiency: classifySufficiency(events) }, ''));
+
+// How much of what explore returned the answer drew on (CG-9). An interactive
+// transcript has no `result` event, so the answer is the last main-thread
+// assistant text — finalAnswerText already falls back to it.
+console.log('');
+console.log(formatAllocation(
+  { allocation: computeAllocation(collectExploreTexts(events), finalAnswerText(events)) }, ''));

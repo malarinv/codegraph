@@ -10,7 +10,9 @@
 //   cleanly and token accounting carries across the boundary.
 //
 //   Every run also reports EXPLORE SUFFICIENCY — each codegraph_explore call
-//   bucketed by what the agent did next (see classifySufficiency).
+//   bucketed by what the agent did next (see classifySufficiency) — and EXPLORE
+//   ALLOCATION EFFICIENCY, the share of the bytes explore returned that belonged
+//   to files the agent's final answer actually cited (see computeAllocation).
 //
 //   `--envelope` additionally reports how the codegraph_explore responses were
 //   DIVIDED across files — the per-file share of the source envelope (#1500).
@@ -305,6 +307,8 @@ export function parseSession(files) {
     exploreTexts,
     // What the agent did after each explore — the free sufficiency signal (CG-8).
     sufficiency: classifySufficiency(events),
+    // How much of what explore returned the answer actually drew on (CG-9).
+    allocation: computeAllocation(exploreTexts, finalAnswerText(events)),
     ok: results.length > 0 && results.every((r) => r.subtype === 'success'),
     turns: reqIdx.length,
     tools: toolCalls.filter((t) => !t.startsWith('ToolSearch')).length,
@@ -364,16 +368,58 @@ export function formatOccupancy(s, indent = '  ') {
 }
 
 /**
- * How the codegraph_explore responses the agent received were DIVIDED across
- * files — the per-file share of the source envelope (#1500 / epic CG-1).
+ * One codegraph_explore response, split into the per-file source sections the
+ * allocator divided its budget across.
  *
  * Parsed out of the RENDERED MARKDOWN, not the CG-4 diagnostic sidecar: the
  * sidecar only exists on a post-CG-4 build, so it cannot measure a baseline arm.
  * The markdown parse is the only instrument that measures both arms of a
- * new-vs-baseline A/B the same way.
+ * new-vs-baseline A/B the same way. Both the envelope view and the allocation
+ * metric key off this one parse.
+ *
+ * Returns `{ envelope, files: [{ path, chars, symbols }] }`, where `symbols` are
+ * the names the section header lists — filtered to the ones the file DEFINES.
+ * The header renders `name(kind)` for every node in the shipped clusters, and
+ * that includes edge-kind pseudo-entries for call sites (`mutateElement(calls)`
+ * on a file that merely calls it). Attributing a file from those would credit
+ * every caller of a cited symbol — measured on a real excalidraw run, it marked
+ * `dragElements.ts` used because the answer named `mutateElement`.
+ */
+/** NodeKind values that mean "this file defines it" (src/types.ts, less file/import/export). */
+const DEFINING_KINDS = new Set([
+  'module', 'class', 'struct', 'interface', 'trait', 'protocol', 'function', 'method',
+  'property', 'field', 'variable', 'constant', 'enum', 'enum_member', 'type_alias',
+  'namespace', 'route', 'component',
+]);
+export function parseExploreCall(text) {
+  const src = String(text ?? '');
+  const re = /^\*\*`([^`]+)`\*\*(.*)$/gm;
+  const marks = [];
+  let m;
+  while ((m = re.exec(src)) !== null) marks.push({ path: m[1], header: m[2] || '', at: m.index });
+  if (!marks.length) return { envelope: 0, files: [] };
+  // Sections run to the next header, or to the trailing guidance quote.
+  const tail = src.indexOf('\n> ', marks[marks.length - 1].at);
+  const end = tail === -1 ? src.length : tail;
+  const files = marks.map((mark, i) => ({
+    path: mark.path,
+    chars: (i + 1 < marks.length ? marks[i + 1].at : end) - mark.at,
+    // `mutateElement(calls), onFinished(variable), +32 more` → the defined ones.
+    symbols: [...mark.header.matchAll(/([A-Za-z_$][\w$.]*)\(([a-z_]+)\)/g)]
+      .filter((s) => DEFINING_KINDS.has(s[2]))
+      .map((s) => ({ name: s[1], kind: s[2] })),
+  }));
+  return { envelope: files.reduce((s, f) => s + f.chars, 0), files };
+}
+
+/**
+ * How the codegraph_explore responses the agent received were DIVIDED across
+ * files — the per-file share of the source envelope (#1500 / epic CG-1).
  *
  * `answerGlobs` marks the files that actually answer the question; the summary
- * reports their combined share, which is bar 2 of the CG-1/CG-22 gate.
+ * reports their combined share, which is bar 2 of the CG-1/CG-22 gate. That is
+ * HAND-SPECIFIED ground truth; the allocation metric below infers the same
+ * intersection from the agent's own answer instead.
  */
 export function formatEnvelope(exploreTexts, answerGlobs = [], indent = '  ') {
   // `tools/cache/**` -> /^tools\/cache\/.*$/ . Same semantics as probe-allocation.
@@ -388,24 +434,15 @@ export function formatEnvelope(exploreTexts, answerGlobs = [], indent = '  ') {
   const answerRes = answerGlobs.map(glob2re);
   const isAnswer = (p) => answerRes.some((re) => re.test(p));
 
-  // Each rendered file section starts with **`path`** — its bytes run to the next
-  // such header (or to the trailing guidance quote). Share is over the sum of the
-  // sections, i.e. of the source envelope the allocator divides.
+  // Share is over the sum of the per-file sections, i.e. of the source envelope
+  // the allocator divides.
   const pooled = new Map();
   let envelope = 0;
   for (const text of exploreTexts) {
-    const re = /^\*\*`([^`]+)`\*\*/gm;
-    const marks = [];
-    let m;
-    while ((m = re.exec(text)) !== null) marks.push({ path: m[1], at: m.index });
-    if (!marks.length) continue;
-    const tail = text.indexOf('\n> ', marks[marks.length - 1].at);
-    const end = tail === -1 ? text.length : tail;
-    marks.forEach((mark, i) => {
-      const chars = (i + 1 < marks.length ? marks[i + 1].at : end) - mark.at;
-      pooled.set(mark.path, (pooled.get(mark.path) ?? 0) + chars);
-      envelope += chars;
-    });
+    for (const f of parseExploreCall(text).files) {
+      pooled.set(f.path, (pooled.get(f.path) ?? 0) + f.chars);
+      envelope += f.chars;
+    }
   }
   const ranked = [...pooled.entries()]
     .map(([path, chars]) => ({ path, chars, share: envelope ? chars / envelope : 0, answer: isAnswer(path) }))
@@ -422,6 +459,234 @@ export function formatEnvelope(exploreTexts, answerGlobs = [], indent = '  ') {
     out.push(`${indent}  ${f.answer ? '*' : ' '} ${pct(f.share).padStart(6)} ${String(f.chars).padStart(6)}  ${f.path}`);
   }
   if (ranked.length > 12) out.push(`${indent}    … ${ranked.length - 12} more files`);
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Explore allocation efficiency (CG-9)
+// ---------------------------------------------------------------------------
+// The envelope view above needs a human to say which files answer the question
+// (`--answer <glob>`). This one reads that off the AGENT'S OWN FINAL ANSWER and
+// reports a single number every run:
+//
+//   allocation efficiency = bytes explore returned for files the answer drew on
+//                           ─────────────────────────────────────────────────
+//                           all bytes explore returned
+//
+// That is the #1500 defect as a number. On the CG-1 baseline self-query it sat
+// around 16–30%: one correct file, one marginal, three pure noise.
+//
+// ATTRIBUTION IS IMPERFECT AND THE ERROR IS ONE-SIDED. An agent can use a file's
+// source to rule it out, or to build a mental model, and never cite it — that
+// reads as waste. So this is a RELATIVE metric: valid for comparing two builds
+// on the SAME question, not as an absolute claim about how much of an envelope
+// earned its place. Quoting it as an absolute efficiency figure is a misuse.
+//
+// Two citation channels, deliberately ranked so the weaker one is separable:
+//   * PATH — the answer names the file (`lib/response.js:126-220`, or the bare
+//     `utils.js:225` agents drop into prose). Strong, and reported on its own as
+//     the conservative floor.
+//   * SYMBOL — the answer cites a symbol in a code span and only that file's
+//     section header lists it. Catches answers written entirely in symbol names.
+//     Guarded: a name carried by ≥3 of the returned files is too generic to
+//     attribute and is dropped, or `send`/`get` would mark half the envelope
+//     used and bias the metric optimistic — the one direction it must not lean.
+
+/** Symbol tokens too common in prose/code spans to attribute a file from. */
+const SYMBOL_STOPWORDS = new Set([
+  'function', 'return', 'const', 'this', 'true', 'false', 'null', 'void', 'undefined',
+  'string', 'object', 'number', 'boolean', 'array', 'class', 'import', 'export',
+  'async', 'await', 'default', 'type', 'value', 'name', 'data', 'self', 'super',
+  'else', 'then', 'case', 'from', 'with', 'when', 'where', 'that', 'they', 'this',
+]);
+/** A name on this many of the returned files stops identifying any one of them. */
+const SYMBOL_AMBIGUITY_LIMIT = 3;
+/** Below this length a token is far more likely prose than a symbol citation. */
+const MIN_SYMBOL_LEN = 4;
+
+/**
+ * What the agent's final answer CITES: file paths, and the identifiers it puts
+ * in code spans. `extensions` are the file extensions actually present in the
+ * envelope — the gate that lets `utils.js:225` through as a file citation while
+ * rejecting `res.send` and `mime.contentType`, which are the same token shape.
+ */
+export function answerCitations(text, extensions = new Set()) {
+  const src = String(text ?? '');
+  const paths = new Set();
+  // Dotted path with at least one directory: `lib/response.js:126-220`.
+  for (const m of src.matchAll(/(?:[\w@.+-]+\/)+[\w@.+-]+\.[A-Za-z]\w*/g)) paths.add(m[0]);
+  // Bare basename, only when its extension is one the envelope actually shipped.
+  for (const m of src.matchAll(/\b[\w@+-]+\.[A-Za-z]\w*/g)) {
+    const ext = m[0].slice(m[0].lastIndexOf('.') + 1).toLowerCase();
+    if (extensions.has(ext)) paths.add(m[0]);
+  }
+  // Identifiers inside code spans. Prose mentions are excluded on purpose: a
+  // backtick is the agent marking the token as code, which is the whole signal.
+  const symbols = new Set();
+  for (const span of src.matchAll(/`([^`\n]+)`/g)) {
+    for (const t of span[1].matchAll(/[A-Za-z_$][\w$]*/g)) {
+      const tok = t[0];
+      if (tok.length >= MIN_SYMBOL_LEN && !SYMBOL_STOPWORDS.has(tok.toLowerCase())) symbols.add(tok);
+    }
+  }
+  return { paths: [...paths], symbols };
+}
+
+/**
+ * Allocation efficiency over one session's explore responses and its final
+ * answer(s). Per call AND pooled over the run — a run-level number alone hides
+ * the common shape where call 1 is on target and call 3 is pure noise.
+ */
+export function computeAllocation(exploreTexts, answerText) {
+  const calls = exploreTexts.map(parseExploreCall).filter((c) => c.files.length);
+  const extensions = new Set();
+  for (const c of calls) {
+    for (const f of c.files) {
+      const dot = f.path.lastIndexOf('.');
+      if (dot > 0) extensions.add(f.path.slice(dot + 1).toLowerCase());
+    }
+  }
+  const cited = answerCitations(answerText, extensions);
+
+  // symbol -> the returned files whose header lists it as DEFINED. A `variable`
+  // is usually an import binding (`var compileETag = require('./utils')…`), so
+  // when the same name is also a real definition somewhere in the envelope, the
+  // definition wins and the aliasing file is not credited.
+  const symbolFiles = new Map();
+  for (const c of calls) {
+    for (const f of c.files) {
+      for (const s of f.symbols) {
+        if (!symbolFiles.has(s.name)) symbolFiles.set(s.name, { strong: new Set(), weak: new Set() });
+        const owners = symbolFiles.get(s.name);
+        (s.kind === 'variable' || s.kind === 'constant' ? owners.weak : owners.strong).add(f.path);
+      }
+    }
+  }
+  const ownersOf = (name) => {
+    const o = symbolFiles.get(name);
+    return o ? (o.strong.size ? o.strong : o.weak) : null;
+  };
+
+  // `lib/response.js` is cited by `lib/response.js`, by `response.js`, and by an
+  // absolute path ending in it — samePath already encodes exactly that.
+  const viaPath = (path) => cited.paths.some((p) => samePath(path, p));
+  const viaSymbol = (path) => {
+    for (const s of cited.symbols) {
+      const owners = ownersOf(s);
+      if (owners && owners.size < SYMBOL_AMBIGUITY_LIMIT && owners.has(path)) return s;
+    }
+    return null;
+  };
+
+  const verdict = new Map();  // path -> { via, symbol }
+  const judge = (path) => {
+    if (!verdict.has(path)) {
+      if (viaPath(path)) verdict.set(path, { via: 'path' });
+      else {
+        const s = viaSymbol(path);
+        verdict.set(path, s ? { via: 'symbol', symbol: s } : { via: null });
+      }
+    }
+    return verdict.get(path);
+  };
+
+  const perCall = calls.map((c, i) => {
+    const files = c.files.map((f) => ({ ...f, ...judge(f.path) }));
+    const used = files.filter((f) => f.via).reduce((s, f) => s + f.chars, 0);
+    const usedPath = files.filter((f) => f.via === 'path').reduce((s, f) => s + f.chars, 0);
+    return {
+      call: i + 1, envelope: c.envelope, used, usedPath, files,
+      efficiency: c.envelope ? used / c.envelope : 0,
+    };
+  });
+
+  // Pooled: a file returned twice is charged twice, because it occupied the
+  // window twice. Same accounting as formatEnvelope.
+  const pooled = new Map();
+  let envelope = 0;
+  for (const c of perCall) {
+    for (const f of c.files) {
+      const prev = pooled.get(f.path) ?? { path: f.path, chars: 0, calls: 0, via: f.via, symbol: f.symbol };
+      prev.chars += f.chars; prev.calls++;
+      pooled.set(f.path, prev);
+      envelope += f.chars;
+    }
+  }
+  const files = [...pooled.values()].sort((a, b) => b.chars - a.chars);
+  const used = files.filter((f) => f.via).reduce((s, f) => s + f.chars, 0);
+  const usedPath = files.filter((f) => f.via === 'path').reduce((s, f) => s + f.chars, 0);
+  return {
+    calls: perCall, files, envelope, used, usedPath,
+    efficiency: envelope ? used / envelope : 0,
+    efficiencyPath: envelope ? usedPath / envelope : 0,
+    filesReturned: files.length,
+    filesUsed: files.filter((f) => f.via).length,
+    hasAnswer: String(answerText ?? '').trim().length > 0,
+  };
+}
+
+/**
+ * Every answered codegraph_explore response in a transcript, in call order.
+ * parseSession collects these as it walks the timeline; this is the same list
+ * for callers that only have the raw events (parse-session.mjs).
+ */
+export function collectExploreTexts(events) {
+  const nameById = new Map();
+  const texts = [];
+  for (const ev of events) {
+    const content = ev?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b.type === 'tool_use') nameById.set(b.id, b.name);
+      else if (b.type === 'tool_result' && !b.is_error
+        && /codegraph_explore/.test(nameById.get(b.tool_use_id) || '')) texts.push(textOf(b.content));
+    }
+  }
+  return texts;
+}
+
+/**
+ * The final answer a session produced. Headless stream-json carries it on the
+ * `result` event (one per resumed segment, all of which are answers); an
+ * interactive transcript has none, so fall back to the LAST assistant text of
+ * the main thread — intermediate narration would flood the citation set.
+ */
+export function finalAnswerText(events) {
+  const answers = events.filter((e) => e.type === 'result' && typeof e.result === 'string').map((e) => e.result);
+  if (answers.length) return answers.join('\n\n');
+  let last = '';
+  for (const ev of events) {
+    if (ev.type !== 'assistant' || (ev.parent_tool_use_id ?? null) !== null) continue;
+    const text = (ev.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('');
+    if (text.trim()) last = text;
+  }
+  return last;
+}
+
+/** The allocation block, as printed under a run and reused by aggregators. */
+export function formatAllocation(s, indent = '  ') {
+  const a = s.allocation;
+  if (!a || !a.calls.length) return `${indent}Explore allocation: no codegraph_explore responses with source sections`;
+  const pct = (f) => `${(f * 100).toFixed(1)}%`;
+  const n = (x) => x.toLocaleString('en-US');
+  const out = [
+    `${indent}Explore allocation — share of returned bytes the answer used ` +
+    `(${a.calls.length} call${a.calls.length === 1 ? '' : 's'}, ${a.filesReturned} file${a.filesReturned === 1 ? '' : 's'}):`,
+    `${indent}  efficiency ${pct(a.efficiency).padStart(6)}  ${n(a.used)} of ${n(a.envelope)} chars` +
+    `   (${a.filesUsed}/${a.filesReturned} files cited; path-cited alone ${pct(a.efficiencyPath)})`,
+  ];
+  if (!a.hasAnswer) out.push(`${indent}  !! no final answer text found — efficiency is not meaningful for this run`);
+  for (const c of a.calls) {
+    out.push(`${indent}  call ${c.call}: ${pct(c.efficiency).padStart(6)}  ${n(c.used)}/${n(c.envelope)} chars` +
+      `  ${c.files.filter((f) => f.via).length}/${c.files.length} files`);
+  }
+  for (const f of a.files.slice(0, 12)) {
+    const share = a.envelope ? f.chars / a.envelope : 0;
+    const why = f.via === 'symbol' ? `symbol \`${f.symbol}\`` : f.via === 'path' ? 'path' : '—';
+    out.push(`${indent}  ${f.via ? '*' : ' '} ${pct(share).padStart(6)} ${String(f.chars).padStart(6)}  ${f.path}  ${why}`);
+  }
+  if (a.files.length > 12) out.push(`${indent}    … ${a.files.length - 12} more files`);
+  out.push(`${indent}  note: relative metric — attribution is by citation, so compare builds on the same question, not absolutes.`);
   return out.join('\n');
 }
 
@@ -943,6 +1208,122 @@ function selftest() {
   check('errored explore is not bucketed', sf.answered, 0, 0);
   check('  …but is counted', sf.errors, 1, 0);
 
+  // ---- 7. Allocation efficiency: which returned bytes the answer used. ----
+  // The response shape that matters here: a per-file section whose header lists
+  // `name(kind)`, and a body big enough that the shares are readable.
+  const alloc = (files, answer) => computeAllocation(
+    [files.map(([p, syms, size]) =>
+      `**\`${p}\`** — ${syms}\n\n\`\`\`js\n${'x'.repeat(size)}\n\`\`\`\n`).join('\n')
+      + '\n> Treat the code above as already read.\n'],
+    answer,
+  );
+  const round = (f) => Math.round(f * 1000) / 10;
+
+  // The #1500 shape: one file answers, two are noise. The answer names it by
+  // repo-relative path.
+  let al = alloc(
+    [['lib/response.js', 'send(function)', 4000], ['lib/express.js', 'app(variable)', 3000],
+      ['lib/view.js', 'View(class)', 3000]],
+    'The Content-Type is decided in `lib/response.js:126` by `res.send`.',
+  );
+  check('allocation: one of three files cited', round(al.efficiency), 40.1, 0.6);
+  checkIs('  …cited file is flagged path', al.files.find((f) => /response/.test(f.path)).via, 'path');
+  checkIs('  …noise file is not', al.files.find((f) => /view/.test(f.path)).via, null);
+  check('  …files cited', al.filesUsed, 1, 0);
+
+  // A bare basename is how agents actually cite in prose — but only when the
+  // extension is one the envelope shipped, or `res.send` reads as a file too.
+  al = alloc([['lib/response.js', 'send(function)', 4000], ['lib/view.js', 'View(class)', 4000]],
+    'It happens in response.js:134, inside `res.send`.');
+  check('bare basename counts as a path citation', round(al.efficiency), 50, 0.6);
+  al = alloc([['lib/response.js', 'send(function)', 4000], ['lib/view.js', 'View(class)', 4000]],
+    'The `res.send` and `mime.contentType` calls do it.');
+  checkIs('a dotted expression is not a file citation', al.files.every((f) => f.via !== 'path'), true);
+
+  // Symbol citations: a code span naming a symbol the file DEFINES counts; a
+  // file that merely CALLS it does not (the excalidraw dragElements.ts case).
+  al = alloc([['src/mutateElement.ts', 'mutateElement(function)', 4000],
+    ['src/dragElements.ts', 'mutateElement(calls), updateCoords(function)', 4000]],
+  'Mutation goes through `mutateElement`.');
+  checkIs('symbol citation credits the definer', al.files.find((f) => /mutateElement.ts/.test(f.path)).via, 'symbol');
+  checkIs('  …and not a caller of it', al.files.find((f) => /dragElements/.test(f.path)).via, null);
+
+  // An import binding (`variable`) loses to the real definition of the name.
+  al = alloc([['lib/utils.js', 'compileETag(function)', 4000],
+    ['lib/application.js', 'compileETag(variable), set(calls)', 4000]],
+  'The generator comes from `compileETag`.');
+  checkIs('a definition beats an import alias of the same name',
+    al.files.find((f) => /utils/.test(f.path)).via, 'symbol');
+  checkIs('  …and the aliasing file is not credited',
+    al.files.find((f) => /application/.test(f.path)).via, null);
+
+  // A name carried by ≥3 returned files identifies none of them: crediting them
+  // all would bias the metric optimistic, the one direction it must not lean.
+  al = alloc([['a/one.js', 'handle(function)', 3000], ['a/two.js', 'handle(function)', 3000],
+    ['a/three.js', 'handle(function)', 3000]],
+  'It all runs through `handle`.');
+  check('a symbol on 3 files attributes none of them', al.efficiency, 0, 0.001);
+
+  // Prose is not a citation — only a code span is.
+  al = alloc([['lib/response.js', 'sendResponse(function)', 4000], ['lib/view.js', 'View(class)', 4000]],
+    'The sendResponse path handles it.');
+  check('an unquoted symbol in prose does not count', al.efficiency, 0, 0.001);
+
+  // Per-call: the run number pools, but call 2 being pure noise must still show.
+  const twoCalls = computeAllocation([
+    '**`lib/response.js`** — send(function)\n\n```js\n' + 'x'.repeat(4000) + '\n```\n\n> guidance\n',
+    '**`lib/view.js`** — View(class)\n\n```js\n' + 'x'.repeat(4000) + '\n```\n\n> guidance\n',
+  ], 'See `lib/response.js`.');
+  check('per-call: call 1 fully used', round(twoCalls.calls[0].efficiency), 100, 0.1);
+  check('per-call: call 2 fully wasted', round(twoCalls.calls[1].efficiency), 0, 0.1);
+  check('run pools both calls', round(twoCalls.efficiency), 50, 0.6);
+
+  // A file returned twice is charged twice — it occupied the window twice.
+  const twice = computeAllocation([
+    '**`lib/response.js`** — send(function)\n\n' + 'x'.repeat(4000) + '\n\n> g\n',
+    '**`lib/response.js`** — send(function)\n\n' + 'x'.repeat(4000) + '\n\n> g\n',
+  ], 'See `lib/response.js`.');
+  check('a re-returned file is charged both times', twice.envelope, 8078, 120);
+  check('  …and credited both times', round(twice.efficiency), 100, 0.1);
+
+  // The answer text itself: the `result` event, and the interactive fallback.
+  const ev = (l) => JSON.parse(l);
+  checkIs('final answer comes from the result event',
+    finalAnswerText([ev(done()), { type: 'result', result: 'the answer' }]), 'the answer');
+  checkIs('…else the last main-thread assistant text', finalAnswerText([
+    { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'let me look' }] } },
+    { type: 'assistant', parent_tool_use_id: 'a1', message: { id: 's1', content: [{ type: 'text', text: 'subagent report' }] } },
+    { type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'the answer' }] } },
+  ]), 'the answer');
+
+  // End to end through parseSession, on the transcript shape a run really has.
+  f = write('alloc.jsonl', [
+    ...req(10000, 'm1', [use('e1', EXPLORE, { query: 'q' })]),
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result', tool_use_id: 'e1',
+          content: [{
+            type: 'text',
+            text: '**`lib/response.js`** — send(function)\n\n' + 'x'.repeat(4000)
+              + '\n\n**`lib/view.js`** — View(class)\n\n' + 'x'.repeat(4000) + '\n\n> guidance\n',
+          }],
+        }],
+      },
+    }),
+    ...req(20000, 'm2', [{ type: 'text', text: 'done' }]),
+    JSON.stringify({
+      type: 'result', subtype: 'success', duration_ms: 1000, total_cost_usd: 0.1, usage: {},
+      result: 'It is decided in `lib/response.js` by `res.send`.',
+    }),
+  ]);
+  s = parseSession([f]);
+  check('parseSession reports allocation', round(s.allocation.efficiency), 50, 0.6);
+  checkIs('  …and the block renders', /efficiency\s+50\.\d%/.test(formatAllocation(s)), true);
+  checkIs('a run with no explore says so',
+    formatAllocation({ allocation: computeAllocation([], 'answer') }).includes('no codegraph_explore responses'), true);
+
   console.log(`\n${n - failures}/${n} checks passed`);
   return failures;
 }
@@ -984,6 +1365,8 @@ if (isMain) {
   console.log(formatOccupancy(s));
   console.log('');
   console.log(formatSufficiency(s));
+  console.log('');
+  console.log(formatAllocation(s));
   if (wantEnvelope) {
     console.log('');
     console.log(formatEnvelope(s.exploreTexts, answerGlobs));
