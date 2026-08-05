@@ -194,6 +194,7 @@ is a baseline across the 7 README repos to compare future changes against.
   only its summary returns to the parent. Runs that delegate are measured on the
   parent's window alone.
 - **Occupancy is not sufficiency.** A small residual is only good if the answer
-  was still right. This metric says nothing about answer quality — that is
-  CG-8's job (sufficiency) and CG-9's (how much of the returned bytes the answer
-  actually used).
+  was still right. This metric says nothing about whether the response was
+  *enough* — that is [explore sufficiency](explore-sufficiency.md), which every
+  run now prints alongside this block — nor about how much of the returned bytes
+  the answer actually used (CG-9).
