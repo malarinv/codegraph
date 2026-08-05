@@ -54,7 +54,10 @@ table still renders against whichever arm's logs are already in `$AGENT_EVAL_OUT
 
 **A campaign — `bench-readme.sh`.** The 7 README repos, three turns each,
 `RUNS` per arm, through `run-all.sh` — so every run in a campaign carries all
-three metrics. Aggregate with `parse-bench-readme.mjs`.
+three metrics. Aggregate with `parse-bench-readme.mjs`. One has been run:
+[the 2026-08-05 baseline](residual-context-occupancy.md#baseline-the-7-readme-repos)
+(sonnet, 3 turns, 4 runs/arm) — read its regime box before comparing anything to
+it, and note that it is **not** the regime the README's table was published in.
 
 **A log you already have.** `parse-run.mjs <run.jsonl> [run.tN.jsonl …]` prints
 the three blocks for any stream-json log; `--brief` drops the numbered call
