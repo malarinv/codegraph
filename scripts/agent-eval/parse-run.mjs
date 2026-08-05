@@ -3,11 +3,18 @@
 // RESIDUAL CONTEXT OCCUPANCY — how many tokens of the context window each tool
 // family's responses still occupy when the run ends.
 //
-// Usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...]
+// Usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--envelope] [--answer <glob>]...
 //   Multiple files = one multi-turn session's segments, IN ORDER (run-all.sh
 //   writes run-<label>.jsonl, run-<label>.t2.jsonl, … for a `Q1||Q2||Q3` set).
 //   `--resume` does not replay prior messages, so the segments concatenate
 //   cleanly and token accounting carries across the boundary.
+//
+//   `--envelope` additionally reports how the codegraph_explore responses were
+//   DIVIDED across files — the per-file share of the source envelope (#1500).
+//   `--answer <glob>` (repeatable, implies --envelope) marks the files that
+//   actually answer the question and reports their combined share: bar 2 of the
+//   CG-1/CG-22 allocation gate. See formatEnvelope for why it parses the
+//   rendered markdown rather than the CG-4 diagnostic sidecar.
 //
 // ---------------------------------------------------------------------------
 // Why occupancy, and how it's measured
@@ -102,6 +109,10 @@ export function parseSession(files) {
   let initTools = null, result = null, raced = false, cliCalls = 0, cliContaminated = 0;
   const results = [];  // one `result` event per session segment (multi-turn)
   let compactions = 0;
+  // Raw codegraph_explore response text, in call order. Feeds the envelope view
+  // (see formatEnvelope) — kept here rather than re-parsed from the log later so
+  // a multi-segment session's responses stay in one ordered list.
+  const exploreTexts = [];
 
   // A timeline of everything appended to the context, in order. `req` entries
   // are assistant requests (carrying that request's ctx); `add` entries are
@@ -161,6 +172,7 @@ export function parseSession(files) {
             // by the binary being genuinely absent) and put nothing in context.
             if (cliById.has(b.tool_use_id) && !b.is_error) cliContaminated++;
             const name = nameById.get(b.tool_use_id) || '';
+            if (/codegraph_explore/.test(name) && !b.is_error) exploreTexts.push(t);
             timeline.push({ kind: 'add', family: familyOf(name), chars: t.length, tool: name });
           } else {
             timeline.push({ kind: 'add', family: null, chars: textOf([b]).length });
@@ -287,6 +299,7 @@ export function parseSession(files) {
 
   return {
     files, toolCalls, counts, initTools, result, results, raced, cliCalls, cliContaminated,
+    exploreTexts,
     ok: results.length > 0 && results.every((r) => r.subtype === 'success'),
     turns: reqIdx.length,
     tools: toolCalls.filter((t) => !t.startsWith('ToolSearch')).length,
@@ -342,6 +355,68 @@ export function formatOccupancy(s, indent = '  ') {
     ` · turns ${s.turns} · compactions ${o.compactions}` +
     (o.evicted > 0 || dropped > 1 ? ` · evicted ${n(o.evicted)} tok` : '')
   );
+  return out.join('\n');
+}
+
+/**
+ * How the codegraph_explore responses the agent received were DIVIDED across
+ * files — the per-file share of the source envelope (#1500 / epic CG-1).
+ *
+ * Parsed out of the RENDERED MARKDOWN, not the CG-4 diagnostic sidecar: the
+ * sidecar only exists on a post-CG-4 build, so it cannot measure a baseline arm.
+ * The markdown parse is the only instrument that measures both arms of a
+ * new-vs-baseline A/B the same way.
+ *
+ * `answerGlobs` marks the files that actually answer the question; the summary
+ * reports their combined share, which is bar 2 of the CG-1/CG-22 gate.
+ */
+export function formatEnvelope(exploreTexts, answerGlobs = [], indent = '  ') {
+  // `tools/cache/**` -> /^tools\/cache\/.*$/ . Same semantics as probe-allocation.
+  // The `**` sentinel is written as an escape, never a literal NUL byte — a raw
+  // one makes git treat this whole script as binary and costs every future diff.
+  const glob2re = (glob) => {
+    const S = '\\u0000';
+    const body = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, S).replace(/\*/g, '[^/]*').replaceAll(S, '.*');
+    return new RegExp(`^${body}$`);
+  };
+  const answerRes = answerGlobs.map(glob2re);
+  const isAnswer = (p) => answerRes.some((re) => re.test(p));
+
+  // Each rendered file section starts with **`path`** — its bytes run to the next
+  // such header (or to the trailing guidance quote). Share is over the sum of the
+  // sections, i.e. of the source envelope the allocator divides.
+  const pooled = new Map();
+  let envelope = 0;
+  for (const text of exploreTexts) {
+    const re = /^\*\*`([^`]+)`\*\*/gm;
+    const marks = [];
+    let m;
+    while ((m = re.exec(text)) !== null) marks.push({ path: m[1], at: m.index });
+    if (!marks.length) continue;
+    const tail = text.indexOf('\n> ', marks[marks.length - 1].at);
+    const end = tail === -1 ? text.length : tail;
+    marks.forEach((mark, i) => {
+      const chars = (i + 1 < marks.length ? marks[i + 1].at : end) - mark.at;
+      pooled.set(mark.path, (pooled.get(mark.path) ?? 0) + chars);
+      envelope += chars;
+    });
+  }
+  const ranked = [...pooled.entries()]
+    .map(([path, chars]) => ({ path, chars, share: envelope ? chars / envelope : 0, answer: isAnswer(path) }))
+    .sort((a, b) => b.chars - a.chars);
+  const answerChars = ranked.filter((r) => r.answer).reduce((s, r) => s + r.chars, 0);
+  const pct = (f) => `${(f * 100).toFixed(1)}%`;
+
+  const out = [];
+  out.push(`${indent}Explore envelope: ${envelope.toLocaleString('en-US')} chars over ${exploreTexts.length} response(s)`);
+  if (answerGlobs.length) {
+    out.push(`${indent}  answer-set share: ${pct(envelope ? answerChars / envelope : 0)} | top file answers: ${ranked[0]?.answer ?? false}`);
+  }
+  for (const f of ranked.slice(0, 12)) {
+    out.push(`${indent}  ${f.answer ? '*' : ' '} ${pct(f.share).padStart(6)} ${String(f.chars).padStart(6)}  ${f.path}`);
+  }
+  if (ranked.length > 12) out.push(`${indent}    … ${ranked.length - 12} more files`);
   return out.join('\n');
 }
 
@@ -462,8 +537,19 @@ function require0(m) { return process.getBuiltinModule(m); }
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain && process.argv.includes('--selftest')) process.exit(selftest() ? 1 : 0);
 if (isMain) {
-  const files = process.argv.slice(2).filter((a) => !a.startsWith('--'));
-  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...]  |  --selftest'); process.exit(1); }
+  // `--answer <glob>` is repeatable and implies `--envelope`. Its VALUE is not a
+  // run file, so consume it here rather than letting the positional filter below
+  // mistake a glob for a log path.
+  const argv = process.argv.slice(2);
+  const files = [];
+  const answerGlobs = [];
+  let wantEnvelope = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--envelope') wantEnvelope = true;
+    else if (argv[i] === '--answer') { answerGlobs.push(argv[++i]); wantEnvelope = true; }
+    else if (!argv[i].startsWith('--')) files.push(argv[i]);
+  }
+  if (!files.length) { console.error('usage: parse-run.mjs <run.jsonl> [run.t2.jsonl ...] [--envelope] [--answer <glob>]...  |  --selftest'); process.exit(1); }
   const s = parseSession(files);
 
   console.log(`\n=== ${files.map((f) => f.split('/').pop()).join(' + ')} ===`);
@@ -481,4 +567,8 @@ if (isMain) {
   }
   console.log('');
   console.log(formatOccupancy(s));
+  if (wantEnvelope) {
+    console.log('');
+    console.log(formatEnvelope(s.exploreTexts, answerGlobs));
+  }
 }
