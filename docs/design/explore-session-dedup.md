@@ -157,6 +157,21 @@ Two channels, both of which move bytes toward files the agent has NOT seen:
 Within a file, the shrink decision reads the **deduped** length: shrinking a cluster on its
 raw size would drop new symbols to make room for source that is not being sent.
 
+Spending rather than banking is what keeps the response the same *size* while raising the
+share of it the agent has never seen — and it is also why CG-20 found residual context
+occupancy **flat**. A design that spends every reclaimed byte cannot lower the byte count;
+what it lowers is the duplicate fraction of those bytes (−87% across CG-20's agent runs).
+Measured on two matched 3-call replays: client-go 44,740 → 46,957 unique source chars for a
+3.2% larger response, excalidraw 39,575 → 43,973 unique for a 5.4% **smaller** one. If the
+goal is ever restated as "fewer bytes," this is the one rule to reverse — and it needs its own
+abandonment gate, because banking makes a repeat call return strictly less.
+
+**`dedup.savedChars` is a pre-clip figure.** It counts what dedup suppressed from the
+*unclipped candidate* render, not what stayed out of the window — most of a suppressed range
+would have been trimmed by the budget anyway. Measured on client-go: 11,450 reported against
+1,042 chars the baseline actually re-served. Read it as "how much duplication the ranking
+wanted to emit," never as a saving; over-reading it inflates the win ~7×.
+
 ## The all-pointer guard
 
 If dedup suppresses everything and nothing new takes its place, the response would be
@@ -165,8 +180,16 @@ first fully-suppressed file's real section in hand and splices it back when the 
 with zero new source. It costs a re-serve of one file on the one call shape where dedup
 would otherwise have saved everything. That is the safe direction, and it is why "no
 duplicate ranges across calls" holds for every call that had anything new to say, rather
-than universally. CG-20 is the abandonment gate that validates the whole thing on a real
-agent.
+than universally.
+
+CG-20 ran that gate on a real agent — client-go and excalidraw, both arms codegraph-on,
+n=3 and n=6 per arm. **Read = 0 in all 24 runs**, no `isError`, codegraph last in every run,
+and the "Read a file we returned" / "Read a file we did not return" buckets empty on both
+arms, with back-references demonstrably reaching the agent in 8 of the 9 multi-call runs. The
+guard never fired on a real query — the thinnest of those 21 calls still carried 12,011 chars
+of new source, so `newSourceChars === 0` was never reached and that threshold remains untested
+in the field; the numbers and the one bar that did not pass are in
+[`../benchmarks/explore-dedup-ab-cg20.md`](../benchmarks/explore-dedup-ab-cg20.md).
 
 ## Coverage
 
