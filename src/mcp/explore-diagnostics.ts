@@ -103,6 +103,15 @@ interface FileRecord extends ExploreCandidateMeta {
    * a file spending over its reservation.
    */
   spendable: number | null;
+  /**
+   * The DISPLACEMENT-GUARDED bound (CG-31): how much this file may render
+   * without spending a reservation still owed to a file the loop has not
+   * reached. `spendable` is what the file was promised, this is what is
+   * actually still there to pay it with — when it sits below `spendable`, the
+   * difference is the overshoot the guard refused, and the files below this one
+   * in the table are the reason. `null` until the render loop reaches the file.
+   */
+  funded: number | null;
   render?: ExploreRenderMode;
   /**
    * Source chars this call did NOT re-send because an earlier call in the
@@ -152,6 +161,8 @@ export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   allowance: number | null;
   /** Reservation + inherited slack — the bound the render paths actually use. */
   spendable: number | null;
+  /** Same bound after holding back what is still owed to unreached files. */
+  funded: number | null;
   render: ExploreRenderMode | null;
   skipped: ExploreSkipReason | null;
   clipped: boolean;
@@ -375,7 +386,7 @@ export class ExploreDiagnostics {
   /** Record one ranked candidate's scoring inputs, in final sort order. */
   noteCandidate(path: string, meta: ExploreCandidateMeta): void {
     this.files.set(path, {
-      path, ...meta, allowance: null, spendable: null,
+      path, ...meta, allowance: null, spendable: null, funded: null,
       dedupSavedChars: 0, dedupCovered: [],
       emittedChars: 0, finalChars: 0, share: 0, allocatedShare: 0, clipped: false,
     });
@@ -411,6 +422,15 @@ export class ExploreDiagnostics {
   recordSpendable(path: string, chars: number): void {
     const rec = this.files.get(path);
     if (rec) rec.spendable = chars;
+  }
+
+  /**
+   * What the render loop will let this file spend once the reservations still
+   * owed BELOW it are held back (CG-31). Called alongside `recordSpendable`.
+   */
+  recordFunded(path: string, chars: number): void {
+    const rec = this.files.get(path);
+    if (rec) rec.funded = chars;
   }
 
   /** A candidate rendered source into the response. */
@@ -561,6 +581,7 @@ export class ExploreDiagnostics {
           kinds: r.kinds,
           allowance: r.allowance,
           spendable: r.spendable,
+          funded: r.funded,
           render: r.render ?? null,
           skipped: r.skipped ?? null,
           clipped: r.clipped,
@@ -731,6 +752,11 @@ export function renderTable(report: ExploreDiagnosticReport): string {
       // `spendable` took inherited slack, not a budget bug.
       if (f.spendable !== null && f.allowance !== null && f.spendable !== f.allowance) {
         out.push(`        spendable: ${num(f.spendable)} (reservation + inherited slack)`);
+      }
+      // Only when the displacement guard actually bit: the gap is what this file
+      // was refused so the files below it could still be paid.
+      if (f.funded !== null && f.spendable !== null && f.funded < f.spendable) {
+        out.push(`        funded: ${num(f.funded)} (capped — ${num(f.spendable - f.funded)} held back for files not yet rendered)`);
       }
       if (f.dedupSavedChars > 0) {
         const spans = f.dedupCovered.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(',');

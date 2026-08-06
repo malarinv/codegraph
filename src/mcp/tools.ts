@@ -4048,6 +4048,11 @@ export class ToolHandler {
     // and no file is ever cut BELOW the reservation it was promised.
     let reservedSoFar = 0;
     let sourceSpent = 0;
+    // How many admitted files the loop has already drawn a reservation for.
+    // Pairs with `reservedSoFar` to say how many reservations are still owed
+    // BELOW the current file — the render-space overhead of those pending
+    // sections has to be held back too, not just their source (CG-31).
+    let admittedSoFar = 0;
     // Funding line for the whole-file BUY rule: the response's SOURCE may reach
     // everything the allocator promised plus one bounded overshoot, and no more.
     // Measured against the promise rather than `renderCeiling` on purpose — the
@@ -4055,6 +4060,7 @@ export class ToolHandler {
     // what, so funding a buy from it just moves the shortfall to whichever file
     // the loop reaches last. See WHOLE_FILE_BUY_OVERSHOOT_FRACTION.
     const reservedTotal = [...allocation.allowances.values()].reduce((sum, n) => sum + n, 0);
+    const admittedTotal = allocation.allowances.size;
     const sourceCeiling = reservedTotal + Math.round(
       budget.maxOutputChars * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_OVERSHOOT_FRACTION,
     );
@@ -4093,7 +4099,39 @@ export class ToolHandler {
         Math.max(reserved, Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE)),
       );
       reservedSoFar += reserved;
+      admittedSoFar++;
       diag?.recordSpendable(filePath, allowance);
+      // DISPLACEMENT GUARD, in render space (CG-31). `allowance` says what this
+      // file MAY spend; it does not say the bytes are still there to spend. The
+      // hard ceiling is shared with every file the loop has not reached yet, and
+      // their reservations are promises the allocator already made — so what is
+      // left before the ceiling is not all ours: `owedRenderBelow` of it is
+      // spoken for. Subtracting it is the same inequality the whole-file BUY arm
+      // enforces with `owedBelow` (see below), moved into the units the cluster
+      // path actually spends in — source PLUS the per-section overhead each
+      // pending file will charge.
+      //
+      // Floored at this file's OWN reservation, never below: a kept promise is
+      // not a displacement, and cutting a file under what it earned is the
+      // failure this whole allocation layer exists to prevent. When the
+      // reservations genuinely cannot all fit under the ceiling (the response
+      // preamble is charged to the same ceiling but not to the allocator's
+      // envelope), the floor means the shortfall lands on the LAST file rather
+      // than being taken out of the top one — same as before this guard.
+      //
+      // Slack still reaches the file: a file above that under-spends leaves
+      // `totalChars` lower, which raises `headroom` one-for-one, so the
+      // carry-forward the `allowance` line grants is exactly the carry-forward
+      // this bound funds.
+      const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
+      const owedRenderBelow = owedBelow
+        + EXPLORE_ALLOCATION.FILE_OVERHEAD * Math.max(0, admittedTotal - admittedSoFar);
+      const headroom = Math.max(0, renderCeiling - totalChars - EXPLORE_ALLOCATION.FILE_OVERHEAD);
+      const fundedHeadroom = Math.max(
+        Math.min(reserved, headroom),
+        headroom - owedRenderBelow,
+      );
+      diag?.recordFunded(filePath, Math.min(allowance, fundedHeadroom));
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) {
         diag?.recordSkip(filePath, 'unreadable');
@@ -4306,7 +4344,13 @@ export class ToolHandler {
         // response and starve the co-flow file (harness.rs's poll). The native agent
         // windows such a file too (~190 lines at a time), so this mimics, not
         // truncates. Always emit ≥1 (never an empty section).
-        const bodyCap = allowance;
+        //
+        // Held to `fundedHeadroom` as well (CG-31) so this path cannot spend a
+        // reservation still owed below it either. It never exceeds `allowance`
+        // today, so the bound only bites once the ceiling is genuinely tight —
+        // but "every render path" has to mean every one, or the guard is just a
+        // detour the next god-file takes.
+        const bodyCap = Math.min(allowance, fundedHeadroom);
         const bodyIds = new Set<string>();
         let bodyChars = 0;
         for (const n of syms.filter(n => prio(n) < 99 && n.endLine >= n.startLine).sort((a, b) => prio(a) - prio(b))) {
@@ -4434,8 +4478,10 @@ export class ToolHandler {
       // rather than a size cap — a buy that fits the line only by spending a
       // lower-ranked file's reservation is the trade that dropped
       // `payslip_builder.go`, and it is refused here. Self-limiting: each buy
-      // grows `sourceSpent`, so the pool cannot be spent twice.
-      const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
+      // grows `sourceSpent`, so the pool cannot be spent twice. (`owedBelow` is
+      // computed once at the top of the iteration — the cluster path below
+      // enforces the same inequality in render space; see `fundedHeadroom`.)
+      //
       // Third condition on the BUY arm only: it must also FIT. A whole render
       // that overruns `renderCeiling` is skipped ENTIRELY a few lines below (the
       // branch refuses to slice a file mid-method), so attempting a buy that
@@ -4940,13 +4986,20 @@ export class ToolHandler {
       // top-scoring file at the same 3,800 as the weakest one, while the whole-file
       // branch above handed a small file 3x that. The reservation is the whole point
       // of CG-12 — bytes follow relevance, not file size.
-      const headroom = Math.max(0, renderCeiling - totalChars - 200);
-      const fileBudget = Math.min(allowance, headroom);
+      //
+      // `fundedHeadroom`, not `headroom` (CG-31): what is left before the hard
+      // ceiling includes every unreached file's reservation, and spending that
+      // is how one clustered file zeroed five admitted peers. It is ≤ `headroom`
+      // by construction, so it is the only bound these three lines need.
+      const fileBudget = Math.min(allowance, fundedHeadroom);
       // Spine ceiling: a flow-path cluster may exceed the reservation (the call path
       // IS the answer and clipping it forces the Read), but bounded — 1.5x the
       // reservation and never past the ceiling — so a pathological long in-file
-      // spine can't run away or starve co-flow files entirely.
-      const SPINE_CEILING = Math.min(Math.round(allowance * 1.5), headroom);
+      // spine can't run away or starve co-flow files entirely. The 1.5x is drawn
+      // from the shared envelope, so it is exactly the overshoot the displacement
+      // guard has to fund: past `fundedHeadroom` the extra half-reservation is
+      // another file's, not spare room.
+      const SPINE_CEILING = Math.min(Math.round(allowance * 1.5), fundedHeadroom);
       const chosenIndices = new Set<number>();
       // Final renders (deduped, shrunk where oversize) by cluster index. Computed
       // during selection and reused at emission so the two never disagree.

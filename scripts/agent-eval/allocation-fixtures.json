@@ -4,11 +4,12 @@
     "explore budget allocation. Run them with `node scripts/agent-eval/probe-allocation.mjs`",
     "against a built dist/.",
     "",
-    "STATUS: payroll-go PASSES. self-query's delivered-share gates FAIL as of CG-30 —",
-    "see its `afterCG30` block: the allocated shares are unchanged, but bounding the",
-    "oversize-member overshoot stopped the hard ceiling from truncating away the",
-    "incidental file that had been over-RESERVED all along. The over-reservation is",
-    "epic CG-24's subject (a low-scoring file taking a top-file share), not CG-30's.",
+    "STATUS: BOTH FIXTURES PASS again as of CG-31. self-query's delivered-share gates",
+    "failed on the CG-30-only build (`afterCG30`) and CG-31 restored them (`afterCG31`):",
+    "the incidental file was not over-RESERVED at all — it was over-SPENDING, drawing on",
+    "the reservations of files the render loop had not reached yet. Bounding that put the",
+    "response back inside the envelope, so nothing truncates and every admitted file",
+    "delivers. Read the two blocks together; the CG-30 verdict's diagnosis was wrong.",
     "",
     "CG-10 (relevance scoring) closed the RANKING half —",
     "nothing incidental reaches the envelope any more — and CG-12 (score-proportional",
@@ -169,7 +170,18 @@
           "src/mcp/explore-session-state.ts": 0.147,
           "src/resolution/memory-budget.ts": 0.0
         },
-        "verdict": "THREE GATES FAIL — and the cause is not the CG-30 bound. Allocation is unchanged between arms (parse-run.mjs 32.3% here vs 33.9% on main); what changed is that it now DELIVERS. On main its whole 8,548-char section was cut by the hard-ceiling truncation, so the incidental group scored 0.0% by luck, not by design, and the fixture passed on that. Bounding the oversize-member overshoot freed enough headroom that the response no longer truncates the same section away. Every file obeys the new bound on this repo (max ratio 1.40x of spendable, against the 1.5x ceiling). What the failure exposes is real and pre-existing: parse-run.mjs scores 18 against tools.ts's 58 yet is reserved a comparable slice — a low-scoring file taking a top-file share, which is epic CG-24's subject. Fix it there; do not tune the CG-30 bound to restore a pass that depended on truncation."
+        "verdict": "THREE GATES FAIL — and the cause is not the CG-30 bound. Allocation is unchanged between arms (parse-run.mjs 32.3% here vs 33.9% on main); what changed is that it now DELIVERS. On main its whole 8,548-char section was cut by the hard-ceiling truncation, so the incidental group scored 0.0% by luck, not by design, and the fixture passed on that. Bounding the oversize-member overshoot freed enough headroom that the response no longer truncates the same section away. Every file obeys the new bound on this repo (max ratio 1.40x of spendable, against the 1.5x ceiling). What the failure exposes is real and pre-existing: parse-run.mjs scores 18 against tools.ts's 58 yet is reserved a comparable slice — a low-scoring file taking a top-file share, which is epic CG-24's subject. Fix it there; do not tune the CG-30 bound to restore a pass that depended on truncation. SUPERSEDED by afterCG31 — the diagnosis above is wrong on one load-bearing point, see there."
+      },
+      "afterCG31": {
+        "measuredOn": "2026-08-06",
+        "note": "23,083 delivered of 23,080 allocated — inside the envelope, nothing truncated. Both arms measured on the SAME clean FULL REBUILD of this repo's index (CG-33: an incrementally-synced index diverges and shifts ranking). CG-30-only arm on that index: 23,692 delivered of 26,410 allocated, TRUNCATED.",
+        "delivered": {
+          "src/mcp/tools.ts": 0.359,
+          "scripts/agent-eval/parse-run.mjs": 0.187,
+          "src/mcp/explore-session-state.ts": 0.151,
+          "src/resolution/lru-cache.ts": 0.087
+        },
+        "verdict": "ALL FOUR GATES PASS. The afterCG30 verdict called parse-run.mjs over-RESERVED; it was not — its reservation is 4,314 in both arms. It was over-SPENDING: 8,548 chars, drawing on reservations belonging to files the render loop had not reached yet, which is the CG-31 defect. With the displacement guard it renders 4,314, tools.ts's identical 8,282 chars go from 35.0% to 35.9% of a response that no longer overruns, and lru-cache.ts (dropped as memory-budget.ts was on the CG-30 arm) delivers. Note what did NOT change: allocation. This fixture moved because the render loop stopped spending other files' bytes, not because anything was re-ranked."
       }
     }
   ]
