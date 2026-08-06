@@ -5187,15 +5187,6 @@ export class ToolHandler {
       }
     }
 
-    // Everything pushed from here on is EPILOGUE — meta-text about the response
-    // rather than the response. Marked so the hard-ceiling cut at the end can
-    // spend it before it spends a rendered file section (CG-31): a section is
-    // source the agent otherwise has to Read, the epilogue is a pointer list and
-    // two reminders. Lines already in `lines` are only MUTATED below (the
-    // verbatim header, the summary sentinel), never re-ordered, so the index
-    // stays valid.
-    const epilogueStart = lines.length;
-
     // The back-reference convention, stated once where the verbatim guarantee is
     // (#1474 does the same for drift). Without it a pointer reads as an
     // apology for missing source rather than as an index into source the agent
@@ -5219,6 +5210,19 @@ export class ToolHandler {
         `> ⚠ Changed on disk after the last index sync: ${staleAll.join(', ')}. Line numbers referencing ${staleAll.length === 1 ? 'this file' : 'these files'} elsewhere in this response (flow steps, blast radius, symbol lists) may be shifted until that project's next sync re-indexes ${staleAll.length === 1 ? 'it' : 'them'}.`,
       );
     }
+
+    // Everything pushed from here on is EPILOGUE — meta-text ABOUT the response
+    // rather than part of it. Marked so the hard-ceiling cut at the end can
+    // spend it before it spends a rendered file section (CG-31): a section is
+    // source the agent otherwise has to Read; the epilogue is a pointer list and
+    // two reminders, and the note that replaces it carries their instruction.
+    //
+    // Drawn AFTER the drift warning on purpose — that one is an honesty claim
+    // about source we did render, not a note about the response, so it is never
+    // the thing we drop. Lines already in `lines` are only MUTATED from here on
+    // (the verbatim header, the summary sentinel), never re-ordered, so the
+    // index stays valid.
+    const epilogueStart = lines.length;
 
     // The curated header count is computed from the files that SURVIVE the final
     // truncation (see end of method) — `filesIncluded` can over-count when the
