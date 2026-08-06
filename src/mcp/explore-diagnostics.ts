@@ -67,6 +67,12 @@ export interface ExploreCandidateMeta {
   lowValue: boolean;
   generated: boolean;
   /**
+   * Nothing but type declarations in this file, and nothing in the index
+   * depends on it (CG-28) — it cannot answer a flow question, so it ranks on
+   * discounted signals unless the query named one of the types it declares.
+   */
+  ambientDeclaration: boolean;
+  /**
    * Multiplier `rankPenalty` applied to BOTH `score` and `graphScore` (1 = no
    * penalty). Generated and test/i18n files rank on discounted signals, so the
    * raw values are `score / penalty` — worth reporting, since "why did this
@@ -579,6 +585,7 @@ export class ExploreDiagnostics {
           spine: r.spine,
           lowValue: r.lowValue,
           generated: r.generated,
+          ambientDeclaration: r.ambientDeclaration,
           penalty: round6(r.penalty),
           kinds: r.kinds,
           allowance: r.allowance,
@@ -796,5 +803,6 @@ function flagString(f: ExploreDiagnosticFile): string {
   if (f.spine) flags.push('spine');
   if (f.lowValue) flags.push('low-value');
   if (f.generated) flags.push('generated');
+  if (f.ambientDeclaration) flags.push('ambient-decl');
   return flags.join(' ') || '-';
 }

@@ -1944,6 +1944,101 @@ export class QueryBuilder {
     return (filePath: string) => flagged.has(filePath) || isGeneratedFile(filePath);
   }
 
+  /**
+   * Which of `filePaths` are AMBIENT DECLARATION files — they declare nothing
+   * but types, and nothing in the index depends on them (CG-28). A hand-written
+   * ambient `.d.ts` of global shims, a vendored typings file, module
+   * augmentation: reachable only by name, structurally attached to nothing.
+   *
+   * Structural, not extension-based, so a hand-written `types.ts` and a `.d.ts`
+   * are judged by the same rule and a `.d.ts` that does declare a class or a
+   * const is (correctly) not caught. Four conditions, all required:
+   *
+   *   1. it declares at least one symbol — an empty or unparsed file is not a
+   *      declaration file, it is a file we know nothing about;
+   *   2. EVERY declared symbol is a type-level kind (interface / type alias /
+   *      enum / namespace). The narrowness is deliberate and measured: a rule
+   *      of "no callables" alone flags 1–18% of a repo, including Kotlin sealed
+   *      classes, Rust `mod.rs` re-exports and django's locale constant tables —
+   *      real source that must not be demoted. This rule flags 0–4%;
+   *   3. no symbol in it originates a `calls`/`instantiates` edge — the direct
+   *      evidence that nothing here has a body;
+   *   4. NOTHING ELSE IN THE INDEX points at it. This is the condition that
+   *      separates an ambient shim from a working type module, and it is why
+   *      the flag is narrow enough to be safe: `displacement-ts`'s pipeline
+   *      `types.ts` passes 1–3 identically but carries 13 inbound imports and
+   *      21 references, so the files that answer a query about the pipeline are
+   *      typed BY it — it is part of that answer's structure. An ambient
+   *      `declare global` shim has zero. Deliberately index-wide rather than
+   *      restricted to the candidate list: the file that imports it is usually
+   *      not itself a candidate.
+   *
+   * Bounded-lookup like {@link getGeneratedPathsAmong}: callers hold a ranked
+   * candidate list, so this is a partial-index probe over a handful of paths.
+   */
+  getAmbientDeclarationPathsAmong(filePaths: Iterable<string>): Set<string> {
+    const unique = [...new Set(filePaths)];
+    const found = new Set<string>();
+    if (unique.length === 0) return found;
+
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      // `file`/`import`/`export`/`parameter` are structural bookkeeping, not
+      // things the file declares, so they neither qualify nor disqualify.
+      const rows = this.db
+        .prepare(`
+          SELECT file_path,
+                 SUM(CASE WHEN kind NOT IN ('file','import','export','parameter')
+                          THEN 1 ELSE 0 END) AS declared,
+                 SUM(CASE WHEN kind IN ('interface','type_alias','enum','enum_member','namespace')
+                          THEN 1 ELSE 0 END) AS typeDeclared
+          FROM nodes
+          WHERE file_path IN (${placeholders})
+          GROUP BY file_path
+        `)
+        .all(...chunk) as Array<{ file_path: string; declared: number; typeDeclared: number }>;
+      let candidates = rows
+        .filter((r) => r.declared > 0 && r.declared === r.typeDeclared)
+        .map((r) => r.file_path);
+      if (candidates.length === 0) continue;
+
+      const disqualify = (sql: string): void => {
+        if (candidates.length === 0) return;
+        const hit = new Set(
+          (this.db
+            .prepare(sql.replace('$IN$', candidates.map(() => '?').join(',')))
+            .all(...candidates) as Array<{ file_path: string }>).map((r) => r.file_path),
+        );
+        candidates = candidates.filter((p) => !hit.has(p));
+      };
+      // (3) originates behaviour
+      disqualify(`
+        SELECT DISTINCT n.file_path AS file_path
+        FROM edges e JOIN nodes n ON n.id = e.source
+        WHERE e.kind IN ('calls','instantiates') AND n.file_path IN ($IN$)
+      `);
+      // (4) something outside the file depends on it
+      disqualify(`
+        SELECT DISTINCT t.file_path AS file_path
+        FROM edges e JOIN nodes t ON t.id = e.target JOIN nodes s ON s.id = e.source
+        WHERE t.file_path IN ($IN$) AND s.file_path <> t.file_path
+      `);
+      for (const path of candidates) found.add(path);
+    }
+    return found;
+  }
+
+  /**
+   * A reusable `(path) => boolean` ambient-declaration test over a bounded
+   * candidate list — the shape a ranking comparator wants: one query up front,
+   * O(1) per comparison.
+   */
+  ambientDeclarationPredicateFor(filePaths: Iterable<string>): (filePath: string) => boolean {
+    const flagged = this.getAmbientDeclarationPathsAmong(filePaths);
+    return (filePath: string) => flagged.has(filePath);
+  }
+
   /** How many indexed files carry the generated flag. Surfaced by `status`. */
   countGeneratedFiles(): number {
     const row = this.db
