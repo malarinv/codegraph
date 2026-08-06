@@ -151,9 +151,11 @@ describe('CG-31 — the cluster path holds back what is still owed below it', ()
       // shape that makes the bounded overshoot fire at all.
       const source = fs.readFileSync(path.join(testDir, GIANT), 'utf-8');
       expect(source.length).toBeGreaterThan((rec.spendable ?? 0) * 2);
-      // And the guard actually bit — a vacuous pass here would hide a regression.
+      // And the guard actually bit — a vacuous pass here would hide a
+      // regression. Measured against the bounded overshoot a cluster's top
+      // member may otherwise take (1.5x, CG-30), which is what it refused.
       expect(rec.funded).not.toBeNull();
-      expect(rec.funded!).toBeLessThan(rec.spendable!);
+      expect(rec.funded!).toBeLessThan(Math.round(rec.spendable! * 1.5));
     });
   });
 
@@ -200,6 +202,15 @@ describe('CG-31 — the cluster path holds back what is still owed below it', ()
           expect(rec.funded, rec.path).toBeGreaterThanOrEqual(
             Math.min(rec.allowance!, rec.emittedChars));
         }
+      }
+    });
+
+    it('nothing is lost to the hard ceiling — the epilogue is cut before a section', () => {
+      // A section thrown away by the final truncation is the same starvation
+      // arriving after the guard has done its work: the bytes were held back
+      // for that file and then nobody received them.
+      for (const probe of [spread, precise]) {
+        expect(probe.report.files.filter((f) => f.render === 'dropped')).toEqual([]);
       }
     });
 

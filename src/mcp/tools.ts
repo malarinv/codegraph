@@ -3996,7 +3996,15 @@ export class ToolHandler {
     // whichever section happened to land last. Kept in sync with `hardCeiling`
     // below; the margin covers the drift epilogue and the trailing notes.
     const renderCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000) - 600;
-    let totalChars = lines.join('\n').length;
+    // `flow.text` is PART of the response — it is prepended to `lines` to make
+    // the final output — so the render loop has to spend against it, and it
+    // never did. Counting it is what makes `renderCeiling` the ceiling it
+    // claims to be: without it the loop believed it had room for a trailing
+    // section the final truncation then threw away whole, and (CG-31) the
+    // displacement guard dutifully held bytes back to pay for that section —
+    // taking them off a file the agent DOES receive and handing them to one it
+    // never sees.
+    let totalChars = flow.text.length + lines.join('\n').length;
     let filesIncluded = 0;
     // Paths we actually render source for below. Drives the curated header count
     // (#1046) — it must reflect what we show, not the raw candidate gather.
@@ -4048,11 +4056,6 @@ export class ToolHandler {
     // and no file is ever cut BELOW the reservation it was promised.
     let reservedSoFar = 0;
     let sourceSpent = 0;
-    // How many admitted files the loop has already drawn a reservation for.
-    // Pairs with `reservedSoFar` to say how many reservations are still owed
-    // BELOW the current file — the render-space overhead of those pending
-    // sections has to be held back too, not just their source (CG-31).
-    let admittedSoFar = 0;
     // Funding line for the whole-file BUY rule: the response's SOURCE may reach
     // everything the allocator promised plus one bounded overshoot, and no more.
     // Measured against the promise rather than `renderCeiling` on purpose — the
@@ -4060,12 +4063,42 @@ export class ToolHandler {
     // what, so funding a buy from it just moves the shortfall to whichever file
     // the loop reaches last. See WHOLE_FILE_BUY_OVERSHOOT_FRACTION.
     const reservedTotal = [...allocation.allowances.values()].reduce((sum, n) => sum + n, 0);
-    const admittedTotal = allocation.allowances.size;
     const sourceCeiling = reservedTotal + Math.round(
       budget.maxOutputChars * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_OVERSHOOT_FRACTION,
     );
+    /**
+     * How much of what is still owed BELOW `fileIndex` the response can actually
+     * still PAY, in render-space chars (CG-31).
+     *
+     * Not the same as the sum of those reservations. The allocator splits the
+     * envelope; the render loop spends against a ceiling that also has to hold
+     * the response's own prose, so on a saturated response the promises are
+     * OVER-SUBSCRIBED and the tail is going to be dropped whatever happens
+     * above it. Bytes held back for a file that then gets dropped are bytes
+     * nobody ever receives — measured on django, holding the full owed sum cost
+     * the rank-#1 file 2,126 chars and handed them to a rank-#6 section the
+     * hard ceiling threw away. So walk the remaining files in RANK order and
+     * hold back only the prefix that fits `budgetLeft`; the first one that does
+     * not fit ends it, because everything after it is further out of reach.
+     *
+     * Conservative and self-correcting: it assumes each file below spends its
+     * whole reservation, and when they do not, the carry-forward hands the
+     * difference to whoever comes next anyway.
+     */
+    const owedPayableBelow = (fileIndex: number, budgetLeft: number): number => {
+      let held = 0;
+      for (let j = fileIndex + 1; j < sortedFiles.length; j++) {
+        const r = allocation.allowances.get(sortedFiles[j]![0]);
+        if (r === undefined) continue;
+        const need = r + EXPLORE_ALLOCATION.FILE_OVERHEAD;
+        if (held + need > budgetLeft) break;
+        held += need;
+      }
+      return held;
+    };
 
-    for (const [filePath, group] of sortedFiles) {
+    for (let fileIndex = 0; fileIndex < sortedFiles.length; fileIndex++) {
+      const [filePath, group] = sortedFiles[fileIndex]!;
       if (filesIncluded >= maxFiles) {
         if (diag) for (const [fp] of sortedFiles) diag.recordSkip(fp, 'max-files');
         break;
@@ -4099,39 +4132,35 @@ export class ToolHandler {
         Math.max(reserved, Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE)),
       );
       reservedSoFar += reserved;
-      admittedSoFar++;
       diag?.recordSpendable(filePath, allowance);
       // DISPLACEMENT GUARD, in render space (CG-31). `allowance` says what this
       // file MAY spend; it does not say the bytes are still there to spend. The
       // hard ceiling is shared with every file the loop has not reached yet, and
       // their reservations are promises the allocator already made — so what is
-      // left before the ceiling is not all ours: `owedRenderBelow` of it is
-      // spoken for. Subtracting it is the same inequality the whole-file BUY arm
-      // enforces with `owedBelow` (see below), moved into the units the cluster
-      // path actually spends in — source PLUS the per-section overhead each
-      // pending file will charge.
+      // left before the ceiling is not all ours. Holding that back is the same
+      // inequality the whole-file BUY arm enforces with `owedBelow` (see below),
+      // moved into the units the cluster path actually spends in: source PLUS
+      // the per-section overhead each pending file will charge.
+      //
+      // Held back only where it can be PAID — see `owedPayableBelow`. A promise
+      // the ceiling cannot reach is not a claim on this file's bytes; honouring
+      // it anyway just moves source from a file the agent gets to one it does
+      // not.
       //
       // Floored at this file's OWN reservation, never below: a kept promise is
       // not a displacement, and cutting a file under what it earned is the
-      // failure this whole allocation layer exists to prevent. When the
-      // reservations genuinely cannot all fit under the ceiling (the response
-      // preamble is charged to the same ceiling but not to the allocator's
-      // envelope), the floor means the shortfall lands on the LAST file rather
-      // than being taken out of the top one — same as before this guard.
+      // failure this whole allocation layer exists to prevent.
       //
       // Slack still reaches the file: a file above that under-spends leaves
       // `totalChars` lower, which raises `headroom` one-for-one, so the
       // carry-forward the `allowance` line grants is exactly the carry-forward
       // this bound funds.
-      const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
-      const owedRenderBelow = owedBelow
-        + EXPLORE_ALLOCATION.FILE_OVERHEAD * Math.max(0, admittedTotal - admittedSoFar);
       const headroom = Math.max(0, renderCeiling - totalChars - EXPLORE_ALLOCATION.FILE_OVERHEAD);
       const fundedHeadroom = Math.max(
         Math.min(reserved, headroom),
-        headroom - owedRenderBelow,
+        headroom - owedPayableBelow(fileIndex, Math.max(0, headroom - reserved)),
       );
-      diag?.recordFunded(filePath, Math.min(allowance, fundedHeadroom));
+      diag?.recordFunded(filePath, fundedHeadroom);
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) {
         diag?.recordSkip(filePath, 'unreadable');
@@ -4478,10 +4507,10 @@ export class ToolHandler {
       // rather than a size cap — a buy that fits the line only by spending a
       // lower-ranked file's reservation is the trade that dropped
       // `payslip_builder.go`, and it is refused here. Self-limiting: each buy
-      // grows `sourceSpent`, so the pool cannot be spent twice. (`owedBelow` is
-      // computed once at the top of the iteration — the cluster path below
-      // enforces the same inequality in render space; see `fundedHeadroom`.)
-      //
+      // grows `sourceSpent`, so the pool cannot be spent twice. The cluster path
+      // below enforces the same inequality in render space — see
+      // `fundedHeadroom` / `owedPayableBelow` (CG-31).
+      const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
       // Third condition on the BUY arm only: it must also FIT. A whole render
       // that overruns `renderCeiling` is skipped ENTIRELY a few lines below (the
       // branch refuses to slice a file mid-method), so attempting a buy that
@@ -5158,6 +5187,15 @@ export class ToolHandler {
       }
     }
 
+    // Everything pushed from here on is EPILOGUE — meta-text about the response
+    // rather than the response. Marked so the hard-ceiling cut at the end can
+    // spend it before it spends a rendered file section (CG-31): a section is
+    // source the agent otherwise has to Read, the epilogue is a pointer list and
+    // two reminders. Lines already in `lines` are only MUTATED below (the
+    // verbatim header, the summary sentinel), never re-ordered, so the index
+    // stays valid.
+    const epilogueStart = lines.length;
+
     // The back-reference convention, stated once where the verbatim guarantee is
     // (#1474 does the same for drift). Without it a pointer reads as an
     // apology for missing source rather than as an index into source the agent
@@ -5268,9 +5306,25 @@ export class ToolHandler {
 
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
     let finalText: string;
-    if (output.length > hardCeiling) {
-      // Cut at a FILE-SECTION boundary (the last ``**` `` file header before the
-      // ceiling) so we drop whole trailing file-sections rather than slicing
+    // The epilogue costs less than a file section, so it is cut FIRST (CG-31).
+    // Dropping a trailing section throws away source the render loop had already
+    // set that file's reservation aside for — the exact starvation the
+    // displacement guard exists to prevent, arriving after the guard has done
+    // its work. The epilogue is a pointer list and two reminders; its own
+    // "explore these names" instruction survives in the note below.
+    const epilogueOnlyCut = epilogueStart < lines.length
+      ? flow.text + lines.slice(0, epilogueStart).join('\n')
+      : null;
+    const EPILOGUE_CUT_NOTE = '\n\n> (Trailing notes omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraph_explore with the specific names rather than reading those files.)';
+
+    if (output.length > hardCeiling
+        && epilogueOnlyCut !== null
+        && epilogueOnlyCut.length + EPILOGUE_CUT_NOTE.length <= hardCeiling) {
+      finalText = epilogueOnlyCut + EPILOGUE_CUT_NOTE;
+    } else if (output.length > hardCeiling) {
+      // Still over with the epilogue gone: cut at a FILE-SECTION boundary (the
+      // last ``**` `` file header before the ceiling) so we drop whole trailing
+      // file-sections rather than slicing
       // through a method body — a half-rendered method just forces the Read this
       // tool exists to prevent. Fall back to a line boundary only if no section
       // header sits in the back half (degenerate single-giant-section case).

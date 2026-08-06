@@ -104,12 +104,14 @@ interface FileRecord extends ExploreCandidateMeta {
    */
   spendable: number | null;
   /**
-   * The DISPLACEMENT-GUARDED bound (CG-31): how much this file may render
+   * The DISPLACEMENT-GUARDED ceiling (CG-31): the most this file may render
    * without spending a reservation still owed to a file the loop has not
-   * reached. `spendable` is what the file was promised, this is what is
-   * actually still there to pay it with — when it sits below `spendable`, the
-   * difference is the overshoot the guard refused, and the files below this one
-   * in the table are the reason. `null` until the render loop reaches the file.
+   * reached AND can still pay. `spendable` is what the file was promised, this
+   * is what is actually still there to pay it with — every render path is
+   * bounded by it, so `emittedChars` above it is a bug. Sits ABOVE `spendable`
+   * when the room is there (the bounded overshoot a big cluster member may
+   * take) and BELOW it when the files underneath need the bytes. `null` until
+   * the render loop reaches the file.
    */
   funded: number | null;
   render?: ExploreRenderMode;
@@ -161,7 +163,7 @@ export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   allowance: number | null;
   /** Reservation + inherited slack — the bound the render paths actually use. */
   spendable: number | null;
-  /** Same bound after holding back what is still owed to unreached files. */
+  /** Render ceiling after holding back what is still owed to unreached files. */
   funded: number | null;
   render: ExploreRenderMode | null;
   skipped: ExploreSkipReason | null;
@@ -753,10 +755,10 @@ export function renderTable(report: ExploreDiagnosticReport): string {
       if (f.spendable !== null && f.allowance !== null && f.spendable !== f.allowance) {
         out.push(`        spendable: ${num(f.spendable)} (reservation + inherited slack)`);
       }
-      // Only when the displacement guard actually bit: the gap is what this file
-      // was refused so the files below it could still be paid.
-      if (f.funded !== null && f.spendable !== null && f.funded < f.spendable) {
-        out.push(`        funded: ${num(f.funded)} (capped — ${num(f.spendable - f.funded)} held back for files not yet rendered)`);
+      // Only when the displacement guard actually bit: the gap is the overshoot
+      // this file was refused so the files below it could still be paid.
+      if (f.funded !== null && f.spendable !== null && f.funded < Math.round(f.spendable * 1.5)) {
+        out.push(`        funded: ${num(f.funded)} (held to this so the files below keep their reservations)`);
       }
       if (f.dedupSavedChars > 0) {
         const spans = f.dedupCovered.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(',');
