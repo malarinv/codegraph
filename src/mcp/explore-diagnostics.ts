@@ -89,18 +89,11 @@ interface FileRecord extends ExploreCandidateMeta {
    * it rendered anything. `0` = cliffed; `null` = never reached the allocator.
    * The gap between this and `emittedChars` is the whole story of a budget bug:
    * reserved-but-unspent means the file had nothing to say, spent-over-reserved
-   * means an oversize first cluster or the whole-file grace overshot.
+   * means an oversize first cluster or the whole-file grace overshot — but read
+   * `spendable` before calling it an overshoot, since inherited slack legitimately
+   * lifts a file above its reservation.
    */
   allowance: number | null;
-  /**
-   * What the file could actually SPEND: its reservation plus the slack the
-   * files above it left on the table (bounded by MAX_SHARE). Every render bound
-   * reads this, not `allowance`, so it — not the reservation — is what an
-   * overshoot is measured against. `null` until the render loop reaches the
-   * file. Reporting only `allowance` makes an ordinary carry-forward look like
-   * a file spending over its reservation.
-   */
-  spendable: number | null;
   render?: ExploreRenderMode;
   /**
    * Source chars this call did NOT re-send because an earlier call in the
@@ -148,8 +141,6 @@ interface BudgetShape {
 export interface ExploreDiagnosticFile extends ExploreCandidateMeta {
   path: string;
   allowance: number | null;
-  /** Reservation + inherited slack — the bound the render paths actually use. */
-  spendable: number | null;
   render: ExploreRenderMode | null;
   skipped: ExploreSkipReason | null;
   clipped: boolean;
@@ -373,7 +364,7 @@ export class ExploreDiagnostics {
   /** Record one ranked candidate's scoring inputs, in final sort order. */
   noteCandidate(path: string, meta: ExploreCandidateMeta): void {
     this.files.set(path, {
-      path, ...meta, allowance: null, spendable: null,
+      path, ...meta, allowance: null,
       dedupSavedChars: 0, dedupCovered: [],
       emittedChars: 0, finalChars: 0, share: 0, allocatedShare: 0, clipped: false,
     });
@@ -400,15 +391,6 @@ export class ExploreDiagnostics {
       const rec = this.files.get(path);
       if (rec) rec.allowance = 0;
     }
-  }
-
-  /**
-   * What the render loop will let this file spend — reservation plus inherited
-   * slack. Called once per file, before any of its render paths run.
-   */
-  recordSpendable(path: string, chars: number): void {
-    const rec = this.files.get(path);
-    if (rec) rec.spendable = chars;
   }
 
   /** A candidate rendered source into the response. */
@@ -558,7 +540,6 @@ export class ExploreDiagnostics {
           penalty: round6(r.penalty),
           kinds: r.kinds,
           allowance: r.allowance,
-          spendable: r.spendable,
           render: r.render ?? null,
           skipped: r.skipped ?? null,
           clipped: r.clipped,
@@ -725,11 +706,6 @@ export function renderTable(report: ExploreDiagnosticReport): string {
         f.path,
       );
       out.push('        kinds: ' + (f.kinds || '-'));
-      // Only when it differs: a file that spent over `reserved` but inside
-      // `spendable` took inherited slack, not a budget bug.
-      if (f.spendable !== null && f.allowance !== null && f.spendable !== f.allowance) {
-        out.push(`        spendable: ${num(f.spendable)} (reservation + inherited slack)`);
-      }
       if (f.dedupSavedChars > 0) {
         const spans = f.dedupCovered.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(',');
         const more = f.dedupCovered.length > 6 ? `,+${f.dedupCovered.length - 6}` : '';
