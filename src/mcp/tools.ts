@@ -795,6 +795,34 @@ function fileSectionHeader(filePath: string, suffix: string): string {
     : `${FILE_SECTION_PREFIX}${filePath}\`**`;
 }
 
+/** Header of `codegraph_explore`'s trailing pointer list. */
+const POINTER_HEADER = '**Not shown above — explore these names for their source**';
+/** Most files the pointer list ever names one-per-line; the rest are a count. */
+const POINTER_MAX_FILES = 10;
+/**
+ * One pointer line: the file plus enough symbol names to make it NAMEABLE in a
+ * follow-up explore. Capped — an un-capped list ran to ~1.9K on the #1500
+ * fixture (12 generated CRUD symbols on one line), meta-text bought at the
+ * price of the source bytes this section exists to point away from.
+ */
+function pointerLineFor(filePath: string, nodes: readonly Node[]): string {
+  const POINTER_SYMBOLS = 6;
+  const named = nodes.filter((n) => n.kind !== 'import' && n.kind !== 'export');
+  const pool = named.length > 0 ? named : nodes;
+  const shown = pool.slice(0, POINTER_SYMBOLS);
+  const more = pool.length - shown.length;
+  const symbols = shown.map((n) => `${n.name}:${n.startLine}`).join(', ')
+    + (more > 0 ? `, +${more} more` : '');
+  return `- ${filePath}: ${symbols}`;
+}
+/**
+ * Emitted when the response was too full to carry ANY of its pointer list. It
+ * is the one line the epilogue floor is reserved for: the list itself can be
+ * traded away, but the agent must still be told that an uncovered area exists
+ * and that another explore — not a Read — is how to reach it.
+ */
+const EPILOGUE_LOST_NOTE = '> (Trailing pointer list omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraph_explore with the specific names rather than reading those files.)';
+
 /**
  * Per-file staleness banner emitted at the top of a tool response when the
  * file watcher has pending events for files referenced by the response.
@@ -3989,13 +4017,39 @@ export class ToolHandler {
     lines.push('> The code below is the **verbatim, current on-disk source** of these files — re-read from disk on this call and line-numbered, byte-for-byte identical to what the Read tool returns. It is NOT a summary, outline, or stale cache. Treat each block as a Read you have already performed: do not Read a file shown here.');
     lines.push('');
 
+    // The response's absolute cap. It MUST stay under the host's inline
+    // tool-result limit (~25K chars): above it the result is externalized to a
+    // file the agent Reads back (a 35K vscode explore did exactly this in the
+    // n=4 A/B).
+    const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
+    // What the epilogue is OWED — the part of it the loop must not spend (CG-26).
+    // Not a flat margin: the old 600 was neither the epilogue's size (1,064 on
+    // gin, 2,231 on excalidraw) nor a bound on it, so the loop budgeted for a
+    // thing that did not exist and the response then discarded the whole
+    // epilogue to fit. The floor is what the epilogue owes the AGENT rather
+    // than what it costs us:
+    //   - the one-line note that says an uncovered area exists (always), and
+    //   - a pointer for every file whose source was deliberately WITHHELD.
+    //     A cliffed file's bytes were traded away on the promise that the agent
+    //     can still name it in a follow-up call (CG-12); if the ceiling then
+    //     eats that name the trade was a silent drop.
+    // Everything above the floor — the rest of the pointer list, the reminders
+    // — is elastic and fitted to the room that is actually left, at the end of
+    // this method. Sized from the REAL strings, never tuned: a constant swept
+    // against the suite is what CG-30's record warns about.
+    const cliffPointerFloor = [...cliffedFiles]
+      .slice(0, POINTER_MAX_FILES)
+      .reduce((n, fp) => {
+        const g = fileGroups.get(fp);
+        return g ? n + pointerLineFor(fp, g.nodes).length + 1 : n;
+      }, cliffedFiles.size > 0 ? POINTER_HEADER.length + 2 : 0);
+    const epilogueFloor = EPILOGUE_LOST_NOTE.length + 2 + cliffPointerFloor;
     // Absolute stop for the render loop. Reservations already fit the envelope, so
     // this only catches their bounded overshoot (the whole-file grace, an oversize
     // first cluster) — and catches it HERE, where a file can be skipped cleanly and
     // a later one still render, instead of at the final truncation, which lops off
-    // whichever section happened to land last. Kept in sync with `hardCeiling`
-    // below; the margin covers the drift epilogue and the trailing notes.
-    const renderCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000) - 600;
+    // whichever section happened to land last.
+    const renderCeiling = hardCeiling - epilogueFloor;
     // `flow.text` is PART of the response — it is prepended to `lines` to make
     // the final output — so the render loop has to spend against it, and it
     // never did. Counting it is what makes `renderCeiling` the ceiling it
@@ -4067,6 +4121,33 @@ export class ToolHandler {
       budget.maxOutputChars * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_OVERSHOOT_FRACTION,
     );
     /**
+     * What a file's section costs BESIDES its source, in render space: the
+     * header (path + up to `maxSymbolsInFileHeader` symbol names) plus the code
+     * fence and the blank lines around them (CG-26).
+     *
+     * `EXPLORE_ALLOCATION.FILE_OVERHEAD` is the ALLOCATOR's constant — the flat
+     * 200 it charges each admitted file when it splits the envelope — and using
+     * it here too was a category error worth ~250 chars per pending file: the
+     * render loop then held back a file's reservation but not the header that
+     * reservation has to arrive under, so the last admitted file was left just
+     * short of the room it needed and skipped whole. Estimated from the file's
+     * own candidate symbols, which is what the header is actually built from.
+     */
+    const overheadCache = new Map<string, number>();
+    const sectionOverhead = (filePath: string, nodes: readonly Node[]): number => {
+      const hit = overheadCache.get(filePath);
+      if (hit !== undefined) return hit;
+      const names = [...new Set(
+        nodes.filter((n) => n.kind !== 'import' && n.kind !== 'export')
+          .map((n) => `${n.name}(${n.kind})`),
+      )].slice(0, budget.maxSymbolsInFileHeader);
+      // header + blank, then ```lang / body / ``` / blank around the source.
+      const cost = fileSectionHeader(filePath, names.join(', ')).length + 2
+        + (nodes[0]?.language?.length ?? 0) + 11;
+      overheadCache.set(filePath, cost);
+      return cost;
+    };
+    /**
      * How much of what is still owed BELOW `fileIndex` the response can actually
      * still PAY, in render-space chars (CG-31).
      *
@@ -4088,10 +4169,24 @@ export class ToolHandler {
     const owedPayableBelow = (fileIndex: number, budgetLeft: number): number => {
       let held = 0;
       for (let j = fileIndex + 1; j < sortedFiles.length; j++) {
-        const r = allocation.allowances.get(sortedFiles[j]![0]);
+        const path = sortedFiles[j]![0];
+        const r = allocation.allowances.get(path);
         if (r === undefined) continue;
-        const need = r + EXPLORE_ALLOCATION.FILE_OVERHEAD;
-        if (held + need > budgetLeft) break;
+        const overhead = sectionOverhead(path, sortedFiles[j]![1].nodes);
+        const need = r + overhead;
+        if (held + need > budgetLeft) {
+          // PART of a reservation is still a delivered file (CG-26). Holding
+          // all-or-nothing zeroed the last admitted file whenever its full
+          // reservation no longer fit: on the precise-query fixture the rank-5
+          // file took 4,134 chars against a 2,948 reservation while rank 6 —
+          // admitted, reserved 2,539 — was left 4 chars and skipped. Hold the
+          // remainder instead, but only while it is still worth a section:
+          // under MIN_CHARS a slice cannot hold one complete method, and a
+          // fragment forces the Read this tool exists to prevent.
+          const partial = budgetLeft - held;
+          if (partial >= EXPLORE_ALLOCATION.MIN_CHARS + overhead) held += partial;
+          break;
+        }
         held += need;
       }
       return held;
@@ -4155,7 +4250,7 @@ export class ToolHandler {
       // `totalChars` lower, which raises `headroom` one-for-one, so the
       // carry-forward the `allowance` line grants is exactly the carry-forward
       // this bound funds.
-      const headroom = Math.max(0, renderCeiling - totalChars - EXPLORE_ALLOCATION.FILE_OVERHEAD);
+      const headroom = Math.max(0, renderCeiling - totalChars - sectionOverhead(filePath, group.nodes));
       const fundedHeadroom = Math.max(
         Math.min(reserved, headroom),
         headroom - owedPayableBelow(fileIndex, Math.max(0, headroom - reserved)),
@@ -4244,7 +4339,11 @@ export class ToolHandler {
         ranges: ExploreLineRange[];
         /** Spans replaced by the back-reference. */
         covered: ExploreLineRange[];
-        /** Chars charged to `totalChars` on top of the body (fences, header). */
+        /**
+         * Chars charged on top of the body by the ANTI-ABANDONMENT RESTORE path
+         * only (it re-splices a section after the loop and needs one number for
+         * it). The loop itself charges the real cost — see `sectionCost`.
+         */
         overhead: number;
         mode: 'whole' | 'clusters' | 'focused' | 'skeleton';
         clipped: boolean;
@@ -4260,6 +4359,16 @@ export class ToolHandler {
         const ranges = folded ? [] : opts.ranges;
         const at = lines.length;
         lines.push(opts.header, '');
+        // Charge what the section ACTUALLY costs, not a flat 200 (CG-26). A
+        // header carries the path plus up to `maxSymbolsInFileHeader` symbol
+        // names and routinely runs 300–500 chars, so the flat charge made the
+        // loop believe it had room it did not have: okhttp rendered 26,601
+        // chars against a 24,400 ceiling and the final truncation threw a
+        // fully-rendered section away. Everything downstream is expressed in
+        // these units — `headroom`, `fundedHeadroom`, every fit test — so an
+        // under-count is not a rounding error, it funds a promise out of bytes
+        // that do not exist and starves whoever the loop reaches last.
+        totalChars += opts.header.length + 2;
         if (opts.covered.length > 0) {
           const pointer = formatBackReference(
             filePath,
@@ -4273,7 +4382,8 @@ export class ToolHandler {
         }
         if (body.length > 0) {
           lines.push('```' + lang, body, '```', '');
-          totalChars += body.length + opts.overhead;
+          // ```lang \n body \n ``` \n '' \n — exact, same as the header above.
+          totalChars += body.length + lang.length + 11;
           sourceSpent += body.length;
           newSourceChars += body.length;
           diag?.recordRender(filePath, opts.mode, body.length, opts.clipped || opts.covered.length > 0);
@@ -4288,7 +4398,8 @@ export class ToolHandler {
         // bytes) because the record means "source the agent HAS", not "bytes
         // this call spent" — refreshing them keeps a long session from ageing
         // them out of the retained window and re-serving them for nothing.
-        totalChars += opts.overhead;
+        // (The header is already charged above; a fully-held section is the
+        // header plus the pointer and nothing else.)
         diag?.recordRender(filePath, 'backref', 0, false);
         diag?.recordDedup(filePath, coveredChars(opts.covered), opts.covered);
         noteEmitted(filePath, opts.covered, 0, fingerprint);
@@ -4512,27 +4623,38 @@ export class ToolHandler {
       // `fundedHeadroom` / `owedPayableBelow` (CG-31).
       const owedBelow = Math.max(0, reservedTotal - reservedSoFar);
       // Third condition on the BUY arm only: it must also FIT. A whole render
-      // that overruns `renderCeiling` is skipped ENTIRELY a few lines below (the
-      // branch refuses to slice a file mid-method), so attempting a buy that
-      // cannot fit trades a clustered section for NO section — the same trade
-      // the funding pool exists to refuse, arriving by a different route.
-      // Failing the test here instead drops through to the cluster path, which
-      // is bounded by `headroom` and always renders something.
+      // that overruns the ceiling is skipped ENTIRELY (the branch refuses to
+      // slice a file mid-method), so attempting a buy that cannot fit trades a
+      // clustered section for NO section — the same trade the funding pool
+      // exists to refuse, arriving by a different route. Failing the test here
+      // instead drops through to the cluster path, which is bounded by
+      // `fundedHeadroom` and always renders something.
       //
-      // Only reachable on the 24K tiers, which is why the small-tier fixtures
-      // cannot see it: the funding line is `reservedTotal + 0.15 * envelope`
-      // (~27.2K when a medium repo saturates) while `renderCeiling` is
-      // `min(1.5 * envelope, 25000) - 600` = 24.4K — so funding can approve
-      // ~2.8K that the ceiling then refuses. At 13K the line is ~14.4K against a
-      // ceiling of 18.9K and the two cannot cross.
+      // Measured against `fundedHeadroom`, not against `renderCeiling - totalChars`
+      // (CG-26). The two differ by exactly the displacement term: room before
+      // the ceiling belongs to every file the loop has not reached yet, and
+      // this arm used to read the raw room while its source-space sibling
+      // (`owedBelow`, above) refused the same trade. Source-space alone was not
+      // enough — the funding line is `reservedTotal + 0.15 * envelope` (~27.2K
+      // when a medium repo saturates) while the render ceiling is ~24.2K, so a
+      // buy can clear `sourceCeiling` and still take its bytes out of a
+      // lower-ranked file's reservation on the way to the ceiling. Now both
+      // arms enforce the same inequality in their own units, and the invariant
+      // holds on every path.
       //
-      // The GRACE arm is deliberately left alone: a file within a sliver of its
-      // reservation that still does not fit is genuinely at the end of a full
-      // response, and that behaviour predates this fix.
+      // The GRACE arm keeps its own bound (a file within a sliver of its
+      // reservation) but is fit-tested on the render it actually produces, at
+      // the emission site below, so it cannot displace either.
       const buysWhole = fileContent.length <= graceBound
         || (reserved >= fileContent.length * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_FRACTION
             && sourceSpent + fileContent.length + owedBelow <= sourceCeiling
-            && totalChars + fileContent.length + EXPLORE_ALLOCATION.FILE_OVERHEAD <= renderCeiling);
+            && fileContent.length <= fundedHeadroom);
+      // Set by the whole-file arm when it actually emits. A whole render that
+      // does not FIT no longer ends the file's turn (CG-26) — it falls through
+      // to the cluster path below, which is bounded by `fundedHeadroom` and
+      // renders something. Skipping outright was the trade the funding pool
+      // exists to refuse: a clustered section traded for no section at all.
+      let renderedWhole = false;
       if (fileLines.length <= WHOLE_FILE_MAX_LINES && buysWhole) {
         const body = fileContent.replace(/\n+$/, '');
         const wholeRange: ExploreLineRange = { start: 1, end: body.split('\n').length };
@@ -4556,28 +4678,41 @@ export class ToolHandler {
         const staleSuffix = fileStale ? ' · ⚠ changed since last index sync — source below is current; the symbol list may be outdated' : '';
         const wholeHeader = fileSectionHeader(filePath, (omitted > 0 ? `${headerNames.join(', ')}, +${omitted} more` : headerNames.join(', ')) + staleSuffix);
 
-        if (totalChars + wholeSection.length + 200 > renderCeiling) {
-          // Don't slice a whole file mid-method — a file that doesn't fit is
-          // skipped whole. Half a file forces the Read this is meant to prevent.
+        // The fit test, on the bytes this render ACTUALLY costs (the numbered
+        // body, after dedup) rather than on the raw file — and against
+        // `fundedHeadroom`, so a whole render can no more spend a pending
+        // file's reservation than a clustered one can (CG-26). Both whole-file
+        // arms come through here, which is what closes the invariant on the
+        // GRACE path: grace is measured against this file's own allowance and
+        // says nothing about whether the bytes are still there to spend.
+        // Two tests, and they are different questions. `fundedHeadroom` is the
+        // DISPLACEMENT bound — may these bytes be spent without taking a
+        // pending file's reservation. `sectionCost` is the CEILING bound — do
+        // the header, fences and body actually fit what is left. The second one
+        // is exact now that the loop charges real section costs.
+        const wholeCost = wholeHeader.length + 2 + wholeSection.length + lang.length + 11;
+        if (wholeSection.length <= fundedHeadroom && totalChars + wholeCost <= renderCeiling) {
+          emitFileSection({
+            header: wholeHeader,
+            body: wholeSection,
+            // The whole file, minus any trailing blank lines the render trimmed.
+            ranges: ddWhole.parts.map((p) => p.range),
+            covered: ddWhole.covered,
+            overhead: 200,
+            mode: 'whole',
+            clipped: false,
+            fullBody: fullSection,
+            fullRanges: [wholeRange],
+          });
+          if (fileStale) staleRendered.push(filePath);
+          renderedWhole = true;
+        } else {
+          // Doesn't fit whole — don't slice a whole file mid-method here; fall
+          // through and let the cluster path pick body-shaped pieces of it.
           anyFileTrimmed = true;
-          diag?.recordSkip(filePath, 'budget-whole-file');
-          continue;
         }
-        emitFileSection({
-          header: wholeHeader,
-          body: wholeSection,
-          // The whole file, minus any trailing blank lines the render trimmed.
-          ranges: ddWhole.parts.map((p) => p.range),
-          covered: ddWhole.covered,
-          overhead: 200,
-          mode: 'whole',
-          clipped: false,
-          fullBody: fullSection,
-          fullRanges: [wholeRange],
-        });
-        if (fileStale) staleRendered.push(filePath);
-        continue;
       }
+      if (renderedWhole) continue;
 
       // Drifted file too big for the whole-file window (#1474): the cluster /
       // skeleton renders below would slice current bytes at indexed ranges —
@@ -4586,11 +4721,9 @@ export class ToolHandler {
       // never render a possibly-wrong slice.
       if (fileStale) {
         staleOmitted.push(filePath);
-        lines.push(
-          fileSectionHeader(filePath, '⚠ changed on disk after the last index sync — source omitted (indexed line ranges no longer match, so a slice could show the wrong code). Read this file directly for current content; the change is picked up on that project\'s next index sync.'),
-          '',
-        );
-        totalChars += 260;
+        const staleHeader = fileSectionHeader(filePath, '⚠ changed on disk after the last index sync — source omitted (indexed line ranges no longer match, so a slice could show the wrong code). Read this file directly for current content; the change is picked up on that project\'s next index sync.');
+        lines.push(staleHeader, '');
+        totalChars += staleHeader.length + 2;
         diag?.recordRender(filePath, 'stale-omitted', 0, true);
         continue;
       }
@@ -5072,23 +5205,30 @@ export class ToolHandler {
       }
 
       // Emit chosen clusters in source order so the file reads top-to-bottom.
-      let fileSection = '';
-      const allSymbols: string[] = [];
-      const sectionRanges: ExploreLineRange[] = [];
-      const coveredRanges: ExploreLineRange[] = [];
-      for (let i = 0; i < clusters.length; i++) {
-        if (!chosenIndices.has(i)) continue;
-        const cluster = clusters[i]!;
-        const section = renderedClusters.get(i)!;
-        const text = sectionText(section.parts);
-        if (text.length > 0) {
-          if (fileSection.length > 0) fileSection += GAP_MARKER;
-          fileSection += text;
+      // Assembled through a function because it may have to run more than once:
+      // the fit test below trims the weakest cluster and re-assembles rather
+      // than skipping the file (CG-26).
+      const assembleSection = (chosen: ReadonlySet<number>) => {
+        let text = '';
+        const symbols: string[] = [];
+        const ranges: ExploreLineRange[] = [];
+        const covered: ExploreLineRange[] = [];
+        for (let i = 0; i < clusters.length; i++) {
+          if (!chosen.has(i)) continue;
+          const cluster = clusters[i]!;
+          const section = renderedClusters.get(i)!;
+          const part = sectionText(section.parts);
+          if (part.length > 0) {
+            if (text.length > 0) text += GAP_MARKER;
+            text += part;
+          }
+          ranges.push(...section.parts.map((p) => p.range));
+          covered.push(...section.covered);
+          symbols.push(...cluster.symbols);
         }
-        sectionRanges.push(...section.parts.map((p) => p.range));
-        coveredRanges.push(...section.covered);
-        allSymbols.push(...cluster.symbols);
-      }
+        return { text, symbols, ranges, covered };
+      };
+      let assembled = assembleSection(chosenIndices);
 
       // A chosen cluster is a COMPLETE method-range — we never cut through a body,
       // and a shrunk cluster drops WHOLE members for the same reason. An oversize
@@ -5105,42 +5245,86 @@ export class ToolHandler {
       // files (Session.swift in Alamofire) produced 3.4KB symbol lists
       // from cluster scoring + edge-source lines, dwarfing the per-file
       // body cap. Show top names by frequency, with a "+N more" tail.
-      const symbolCounts = new Map<string, number>();
-      for (const s of allSymbols) {
-        symbolCounts.set(s, (symbolCounts.get(s) ?? 0) + 1);
-      }
-      const sortedSymbols = [...symbolCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([name]) => name);
-      const headerCap = budget.maxSymbolsInFileHeader;
-      const headerSymbols = sortedSymbols.slice(0, headerCap);
-      const omittedCount = sortedSymbols.length - headerSymbols.length;
-      const headerSuffix = omittedCount > 0
-        ? `${headerSymbols.join(', ')}, +${omittedCount} more`
-        : headerSymbols.join(', ');
-      const fileHeader = fileSectionHeader(filePath, headerSuffix);
+      const headerFor = (symbols: readonly string[]): string => {
+        const symbolCounts = new Map<string, number>();
+        for (const s of symbols) symbolCounts.set(s, (symbolCounts.get(s) ?? 0) + 1);
+        const sortedSymbols = [...symbolCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([name]) => name);
+        const headerSymbols = sortedSymbols.slice(0, budget.maxSymbolsInFileHeader);
+        const omittedCount = sortedSymbols.length - headerSymbols.length;
+        return fileSectionHeader(filePath, omittedCount > 0
+          ? `${headerSymbols.join(', ')}, +${omittedCount} more`
+          : headerSymbols.join(', '));
+      };
 
       // Last stop before the hard ceiling. The reservation already bounded cluster
       // selection above, so reaching this means the bounded overshoot (an oversize
       // first cluster, taken whole rather than sliced mid-method) ran the response
-      // out of room. Skip the file whole and keep scanning — never slice mid-method.
-      // This used to compare against `maxOutputChars` and exempt "necessary" files,
-      // which is how arrival order decided the answer: whichever files ranked first
-      // spent the envelope, and everything after them was dropped on a cap they had
-      // no say in. Reservations replace that exemption — a file that earned bytes
-      // was already given them.
-      if (totalChars + fileSection.length + 200 > renderCeiling) {
+      // out of room.
+      //
+      // Exact, like the whole-file arm above (CG-26): header + fences + body,
+      // not body + a flat 200. The displacement half of the invariant is
+      // already enforced on the body itself (`bodyCap` / `SPINE_CEILING` read
+      // `fundedHeadroom`); this is the ceiling half. And because it is exact it
+      // now bites at the margin — a header runs 300–500 chars where the body
+      // budget assumed 200 — so an overrun TRIMS the weakest cluster and
+      // re-assembles instead of skipping the file whole. Skipping a file over a
+      // ~300-char accounting difference is starvation by rounding: the file was
+      // admitted, reserved and rendered, and would have delivered nothing.
+      // Only when the top-ranked cluster alone cannot fit is the file skipped —
+      // that one is never sliced mid-method.
+      let fileHeader = headerFor(assembled.symbols);
+      let chosenNow = chosenIndices;
+      const costOfSection = (header: string, body: string) =>
+        header.length + 2 + (body.length > 0 ? body.length + lang.length + 11 : 0);
+      while (totalChars + costOfSection(fileHeader, assembled.text) > renderCeiling
+             && chosenNow.size > 1) {
+        // Weakest first: `rankedClusters` is best-first, so walk it backwards.
+        const trimmed = new Set(chosenNow);
+        for (let i = rankedClusters.length - 1; i >= 0; i--) {
+          const idx = rankedClusters[i]!.idx;
+          if (trimmed.has(idx)) { trimmed.delete(idx); break; }
+        }
+        chosenNow = trimmed;
+        assembled = assembleSection(chosenNow);
+        fileHeader = headerFor(assembled.symbols);
+        anyFileTrimmed = true;
+      }
+      // One cluster left and still over — by the header estimate's error, at
+      // most a few hundred chars. Re-render it INTO the room that is actually
+      // left rather than skip the file: the same whole-line windowing an
+      // oversize cluster already gets (CG-30), just against an exact bound.
+      // The header is built from the cluster's symbols, not its text, so
+      // re-rendering cannot move the target.
+      if (totalChars + costOfSection(fileHeader, assembled.text) > renderCeiling
+          && chosenNow.size === 1) {
+        const idx = [...chosenNow][0]!;
+        const room = renderCeiling - totalChars
+          - (fileHeader.length + 2 + lang.length + 11);
+        if (room > 0) {
+          const reshrunk = renderCluster(clusters[idx]!, room, room);
+          renderedClusters.set(idx, reshrunk);
+          anyClusterShrunk = anyClusterShrunk || reshrunk.shrunk;
+          assembled = assembleSection(chosenNow);
+          anyFileTrimmed = true;
+        }
+      }
+      if (totalChars + costOfSection(fileHeader, assembled.text) > renderCeiling) {
         anyFileTrimmed = true;
         diag?.recordSkip(filePath, 'budget-clusters');
         continue;
       }
+      const fileSection = assembled.text;
+      const sectionRanges = assembled.ranges;
+      const coveredRanges = assembled.covered;
 
       // The undeduped render of the same clusters, needed only if this file ends
       // up fully back-referenced AND the whole call finds nothing new to say —
       // see `suppressedFallback`. Built lazily: on every other call it is dead
       // weight.
       const fullClusterParts = fileSection.length === 0
-        ? clusters.flatMap((c, i) => (chosenIndices.has(i) ? buildSection(c) : []))
+        ? clusters.flatMap((c, i) => (chosenNow.has(i) ? buildSection(c) : []))
         : [];
       emitFileSection({
         header: fileHeader,
@@ -5151,7 +5335,7 @@ export class ToolHandler {
         mode: 'clusters',
         // Windowing an oversize member elides source too — reporting it as
         // unclipped would hide exactly the cut the diagnostic exists to show.
-        clipped: chosenIndices.size < clusters.length || anyClusterShrunk,
+        clipped: chosenNow.size < clusters.length || anyClusterShrunk,
         fullBody: sectionText(fullClusterParts),
         fullRanges: fullClusterParts.map((p) => p.range),
       });
@@ -5236,6 +5420,14 @@ export class ToolHandler {
     // CLIFFED file is source we deliberately withheld, so the list is forced on
     // whenever there is one: withholding a file's bytes is only cheap if the agent
     // can still name it in a follow-up call (CG-12).
+    // The epilogue's three blocks are BUILT here and FITTED below (CG-26) —
+    // they are not pushed straight into `lines` any more. The render loop
+    // budgets for the epilogue floor it committed to (`EPILOGUE_FLOOR`); what
+    // the response can afford above that floor is only known now, so the
+    // blocks are assembled against the room that actually remains, in priority
+    // order, instead of being emitted whole and then discarded whole.
+    const pointerEntries: string[] = [];
+    let pointerOmitted = 0;
     if (budget.includeAdditionalFiles || cliffedFiles.size > 0) {
       // Everything ranked that didn't render, in rank order — cliffed files first,
       // since they outrank whatever the file cap cut. (Indexing by `filesIncluded`
@@ -5251,64 +5443,91 @@ export class ToolHandler {
         .filter(([fp, group]) => group.score < scoreFloor && !rankedPaths.has(fp))
         .sort((a, b) => b[1].score - a[1].score);
       const remainingFiles = [...remainingRelevant, ...peripheralFiles];
-      if (remainingFiles.length > 0) {
-        lines.push('**Not shown above — explore these names for their source**');
-        lines.push('');
-        // A pointer only has to make the file NAMEABLE in a follow-up call, so cap
-        // the symbols per line: an un-capped list ran to ~1.9K on the #1500 fixture
-        // (12 generated CRUD symbols on one line), meta-text bought at the price of
-        // the source bytes this section exists to point away from.
-        const POINTER_SYMBOLS = 6;
-        for (const [filePath, group] of remainingFiles.slice(0, 10)) {
-          const named = group.nodes.filter(n => n.kind !== 'import' && n.kind !== 'export');
-          const shown = (named.length > 0 ? named : group.nodes).slice(0, POINTER_SYMBOLS);
-          const more = (named.length > 0 ? named : group.nodes).length - shown.length;
-          const symbols = shown.map(n => `${n.name}:${n.startLine}`).join(', ')
-            + (more > 0 ? `, +${more} more` : '');
-          lines.push(`- ${filePath}: ${symbols}`);
-        }
-        if (remainingFiles.length > 10) {
-          lines.push(`- ... and ${remainingFiles.length - 10} more files`);
-        }
+      for (const [filePath, group] of remainingFiles.slice(0, POINTER_MAX_FILES)) {
+        pointerEntries.push(pointerLineFor(filePath, group.nodes));
       }
+      pointerOmitted = Math.max(0, remainingFiles.length - pointerEntries.length);
     }
 
-    // Add completeness signal so agents know they don't need to re-read these files.
+    // Completeness signal so agents know they don't need to re-read these files.
     // On small projects the budget gates this off — but if we actually had to
     // trim or drop clusters, surface a brief note so the agent knows it can
     // still Read for more detail.
-    if (budget.includeCompletenessSignal) {
-      lines.push('');
-      lines.push('---');
-      lines.push(`> **Complete source for ${filesIncluded} files is included above — do NOT re-read them.** If your question also needs files/symbols listed under "Not shown above" (or any area this call didn't cover), make ANOTHER codegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading. Reserve Read for a single specific line range explore can't surface.`);
-    } else if (anyFileTrimmed) {
-      lines.push('');
-      lines.push(`> Some file sections were trimmed for size. For a specific symbol you still need, run another \`codegraph_explore\` (or \`codegraph_node\`) with its exact name — line-numbered source, cheaper and more complete than Read.`);
-    }
+    const completenessBlock: string[] = budget.includeCompletenessSignal
+      ? ['', '---', `> **Complete source for ${filesIncluded} files is included above — do NOT re-read them.** If your question also needs files/symbols listed under "Not shown above" (or any area this call didn't cover), make ANOTHER codegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading. Reserve Read for a single specific line range explore can't surface.`]
+      : anyFileTrimmed
+        ? ['', `> Some file sections were trimmed for size. For a specific symbol you still need, run another \`codegraph_explore\` (or \`codegraph_node\`) with its exact name — line-numbered source, cheaper and more complete than Read.`]
+        : [];
 
-    // Add explore budget note based on project size
+    // Explore budget note based on project size.
+    let budgetBlock: string[] = [];
     if (budget.includeBudgetNote) {
       try {
         const stats = cg.getStats();
         const callBudget = getExploreBudget(stats.fileCount);
-        lines.push('');
-        lines.push(`> **Explore budget: ${callBudget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).** Each call covers ~6 files; if your question spans more, spend your remaining calls on the uncovered area BEFORE falling back to Read — another explore is cheaper and more complete than reading those files. Synthesize once you've used ${callBudget}.`);
+        budgetBlock = ['', `> **Explore budget: ${callBudget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).** Each call covers ~6 files; if your question spans more, spend your remaining calls on the uncovered area BEFORE falling back to Read — another explore is cheaper and more complete than reading those files. Synthesize once you've used ${callBudget}.`];
       } catch {
         // Stats unavailable — skip budget note
       }
     }
 
-    // Final ceiling — an ABSOLUTE inline cap, not a multiple of the budget. The
-    // render loop renders necessary (named/spine) files even a bit past
-    // maxOutputChars and caps only incidental ones, so this is the last safety.
-    // It MUST stay under the host's inline tool-result limit (~25K chars): above
-    // that the result is externalized to a file the agent Reads back (a 35K
-    // vscode explore did exactly this in the n=4 A/B). So allow a little
-    // necessary overflow above the 24K budget, but hard-stop at 25K — never into
-    // externalize territory.
-    const output = flow.text + lines.join('\n');
+    // FIT THE EPILOGUE (CG-26). Before this, the epilogue was emitted whole and
+    // then, on a saturated response, discarded whole by the hard ceiling — four
+    // of six suite repos shipped with no pointer list and no reminders at all,
+    // and the render loop had "budgeted" 600 chars for something that measures
+    // 1,064–2,231. Neither number was the real one, because the epilogue is not
+    // one thing: a fixed floor the loop reserves for (the cut note, plus a
+    // pointer for every file whose bytes were deliberately WITHHELD — CG-12
+    // makes those names load-bearing) and an elastic tail that takes what is
+    // left. Assembled in priority order — the do-not-re-read reminder first,
+    // then pointers in rank order, then the budget note — and emitted in
+    // document order.
+    const roomFor = (block: readonly string[]): number =>
+      block.reduce((n, s) => n + s.length + 1, 0);
+    let room = hardCeiling - (flow.text.length + lines.join('\n').length);
 
-    const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
+    const keepCompleteness = completenessBlock.length > 0
+      && roomFor(completenessBlock) <= room;
+    if (keepCompleteness) room -= roomFor(completenessBlock);
+
+    const pointerBlock: string[] = [];
+    if (pointerEntries.length > 0) {
+      const head = [POINTER_HEADER, ''];
+      let left = room - roomFor(head);
+      if (left >= 0) {
+        let taken = 0;
+        for (const entry of pointerEntries) {
+          // Every entry we do NOT take has to be confessed by the tail line, so
+          // the tail's cost is part of taking one less than all of them.
+          const dropped = pointerEntries.length - taken - 1 + pointerOmitted;
+          const tail = dropped > 0 ? roomFor([`- ... and ${dropped} more files`]) : 0;
+          if (entry.length + 1 + tail > left) break;
+          left -= entry.length + 1;
+          taken++;
+        }
+        if (taken > 0) {
+          pointerBlock.push(...head, ...pointerEntries.slice(0, taken));
+          const dropped = pointerEntries.length - taken + pointerOmitted;
+          if (dropped > 0) pointerBlock.push(`- ... and ${dropped} more files`);
+          room -= roomFor(pointerBlock);
+        }
+      }
+    }
+    // Nothing of the pointer list survived, but there WAS one — say so, in the
+    // one line that carries its instruction forward.
+    const pointersLost = pointerEntries.length > 0 && pointerBlock.length === 0;
+
+    const keepBudgetNote = budgetBlock.length > 0 && roomFor(budgetBlock) <= room;
+    if (keepBudgetNote) room -= roomFor(budgetBlock);
+
+    lines.push(...pointerBlock);
+    if (keepCompleteness) lines.push(...completenessBlock);
+    if (keepBudgetNote) lines.push(...budgetBlock);
+    if (pointersLost && roomFor([EPILOGUE_LOST_NOTE, '']) <= room) {
+      lines.push('', EPILOGUE_LOST_NOTE);
+    }
+
+    const output = flow.text + lines.join('\n');
     let finalText: string;
     // The epilogue costs less than a file section, so it is cut FIRST (CG-31).
     // Dropping a trailing section throws away source the render loop had already

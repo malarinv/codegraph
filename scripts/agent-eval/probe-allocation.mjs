@@ -150,6 +150,28 @@ function evaluate(fixture, report, text) {
       `answer ${pct(share('answer'))} delivered (${pct(allocated.get('answer') ?? 0)} allocated)`,
     );
   }
+  // Same question against the SOURCE the response delivered rather than the
+  // whole envelope (CG-26). The envelope-denominated gate above moves whenever
+  // the response's prose does — the epilogue surviving instead of being
+  // discarded costs it a point, and every additional admitted file that gets
+  // paid dilutes it further — so it cannot tell "the answer was starved" from
+  // "everything else was also delivered". Allocation is about source bytes;
+  // measure it in source bytes.
+  if (want.answerShareOfSourceAtLeast !== undefined) {
+    const sourceBy = new Map();
+    let totalSource = 0;
+    for (const f of report.files) {
+      const g = groupOf(f.path, groups);
+      sourceBy.set(g, (sourceBy.get(g) ?? 0) + f.finalChars);
+      totalSource += f.finalChars;
+    }
+    const answerSource = totalSource > 0 ? (sourceBy.get('answer') ?? 0) / totalSource : 0;
+    add(
+      `answer group takes >= ${pct(want.answerShareOfSourceAtLeast)} of DELIVERED SOURCE`,
+      answerSource >= want.answerShareOfSourceAtLeast,
+      `answer ${num(sourceBy.get('answer') ?? 0)} of ${num(totalSource)} source chars (${pct(answerSource)})`,
+    );
+  }
   if (want.incidentalShareAtMost !== undefined) {
     add(
       `incidental group takes <= ${pct(want.incidentalShareAtMost)} of the envelope`,
