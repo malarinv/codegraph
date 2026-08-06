@@ -4093,6 +4093,7 @@ export class ToolHandler {
         Math.max(reserved, Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE)),
       );
       reservedSoFar += reserved;
+      diag?.recordSpendable(filePath, allowance);
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) {
         diag?.recordSkip(filePath, 'unreadable');
@@ -4731,7 +4732,9 @@ export class ToolHandler {
         for (const r of byImportance) {
           const sz = sizeOf(r) + GAP_MARKER.length;
           // Always keep the most important range, even if it alone is oversize —
-          // an empty section sends the agent to Read, which costs far more.
+          // an empty section sends the agent to Read, which costs far more. How
+          // far it may overshoot is bounded by the caller's ceiling (CG-30), which
+          // windows a runaway member instead of dropping it.
           if (keep.length > 0 && kept + sz > cap) continue;
           keep.push(r);
           kept += sz;
@@ -4750,6 +4753,117 @@ export class ToolHandler {
       };
 
       /**
+       * Bounded overshoot for one cluster's render (CG-30).
+       *
+       * `shrinkCluster` keeps the highest-importance member whole even when that
+       * member alone is oversize — an empty file section sends the agent to Read,
+       * which is exactly what explore exists to prevent. But "never empty" is not
+       * "any size": with nothing bounding it, one 22K member rendered against a
+       * 9K reservation (2.4x), which collapses the headroom every file ranked
+       * below it draws from. Past the ceiling the member is WINDOWED rather than
+       * dropped — a leading window (signature + head of the body), plus a window
+       * on the spine's call site when the head misses it, since on a flow cluster
+       * the call path IS the answer.
+       */
+      const MIN_WINDOW_LINES = 12;
+      /** Rendered cost of one source line, line numbering included. */
+      const lineCost = (ln: number): number =>
+        (fileLines[ln - 1] ?? '').length + 1 + (withLineNumbers ? String(ln).length + 1 : 0);
+      /**
+       * Longest prefix of `r` that fits `room`. `minLines` is the never-empty
+       * floor — it may overrun `room`, so it is only ever asked for when nothing
+       * else has been emitted and the alternative is an empty section.
+       */
+      const headWindowOf = (
+        r: ExploreLineRange, room: number, minLines = 0,
+      ): ExploreLineRange | null => {
+        let end = r.start - 1;
+        let chars = 0;
+        for (let ln = r.start; ln <= r.end; ln++) {
+          const cost = lineCost(ln);
+          if (chars + cost > room && end - r.start + 1 >= minLines) break;
+          chars += cost;
+          end = ln;
+        }
+        return end >= r.start ? { start: r.start, end } : null;
+      };
+      /** Widest window around `line` inside [lo, hi] that fits `room`. */
+      const centeredWindowOf = (
+        line: number, lo: number, hi: number, room: number,
+      ): ExploreLineRange | null => {
+        if (line < lo || line > hi) return null;
+        let start = line, end = line, chars = lineCost(line);
+        for (let grown = true; grown;) {
+          grown = false;
+          if (end + 1 <= hi && chars + lineCost(end + 1) <= room) { end += 1; chars += lineCost(end); grown = true; }
+          if (start - 1 >= lo && chars + lineCost(start - 1) <= room) { start -= 1; chars += lineCost(start); grown = true; }
+        }
+        return { start, end };
+      };
+      /**
+       * Reduce rendered parts to fit `ceiling`, never to nothing. Whole parts are
+       * kept while they fit; the first part that overruns is cut to a leading
+       * window on whole lines (a body is never cut mid-line), and everything past
+       * it is dropped. The GAP_MARKER between surviving parts — and the line-number
+       * jump — is what tells the agent the cut happened.
+       *
+       * A partial window shorter than MIN_WINDOW_LINES is not worth emitting, and
+       * emitting one is actively harmful: the session record then claims a 4-line
+       * sliver, and the NEXT call's dedup has to either shred a whole block around
+       * it or re-send it. Below that floor the part is simply dropped — unless
+       * nothing has been emitted at all, where the floor wins over the ceiling
+       * because an empty section is the one outcome worse than an oversize one.
+       */
+      const windowToCeiling = (
+        parts: ReadonlyArray<SectionPart>,
+        ceiling: number,
+        focusLine?: number,
+      ): SectionPart[] => {
+        const emit: ExploreLineRange[] = [];
+        const inParts = (line: number) =>
+          parts.some((p) => line >= p.range.start && line <= p.range.end);
+        const needFocus = typeof focusLine === 'number' && focusLine > 0 && inParts(focusLine);
+        // Hold room back for the call site so the head window can't eat all of it.
+        const headRoom = needFocus ? Math.floor(ceiling * 0.6) : ceiling;
+        let used = 0;
+        for (const p of parts) {
+          const join = emit.length > 0 ? GAP_MARKER.length : 0;
+          if (used + join + p.text.length <= headRoom) {
+            emit.push(p.range);
+            used += join + p.text.length;
+            continue;
+          }
+          const first = emit.length === 0;
+          const win = headWindowOf(
+            p.range, Math.max(0, headRoom - used - join), first ? MIN_WINDOW_LINES : 0);
+          if (win && (first || win.end - win.start + 1 >= MIN_WINDOW_LINES)) {
+            emit.push(win);
+            used += join + renderSpan(win).length;
+          }
+          break;
+        }
+        const last = emit[emit.length - 1];
+        if (needFocus && (!last || focusLine! > last.end)) {
+          const host = parts.find((p) => focusLine! >= p.range.start && focusLine! <= p.range.end)!;
+          const lo = Math.max(host.range.start, focusLine! - SPINE_WINDOW, last ? last.end + 1 : 0);
+          const hi = Math.min(host.range.end, focusLine! + SPINE_WINDOW);
+          const win = centeredWindowOf(
+            focusLine!, lo, hi, Math.max(0, ceiling - used - GAP_MARKER.length));
+          // Same sliver floor as the head window — a two-line peek at the call
+          // site teaches the next call's dedup to shred the block around it.
+          if (win && win.end - win.start + 1 >= MIN_WINDOW_LINES) emit.push(win);
+        }
+        // Never empty: a section with no source sends the agent to Read.
+        if (emit.length === 0 && parts.length > 0) {
+          const first = headWindowOf(parts[0]!.range, ceiling, MIN_WINDOW_LINES);
+          if (first) emit.push(first);
+        }
+        return emit
+          .sort((a, b) => a.start - b.start)
+          .map((r) => ({ range: r, text: renderSpan(r) }));
+      };
+
+      /**
        * One cluster's final parts: built, shrunk if it overruns `cap`, then
        * passed through the session history (CG-18).
        *
@@ -4761,15 +4875,33 @@ export class ToolHandler {
       const renderCluster = (
         c: ExploreCluster,
         cap: number,
+        /**
+         * Hard bound on the rendered result (CG-30). `cap` is what selection asks
+         * for; this is how far a single oversize member is allowed to overshoot it
+         * before being windowed. Always >= `cap`, so a cluster that already fits is
+         * never touched.
+         */
+        ceiling: number = Infinity,
       ): { parts: SectionPart[]; covered: ExploreLineRange[]; shrunk: boolean } => {
         const base = dedupeSpans(buildSection(c));
+        const bound = (
+          r: { parts: SectionPart[]; covered: ExploreLineRange[]; shrunk: boolean },
+        ) => {
+          if (!Number.isFinite(ceiling) || sectionText(r.parts).length <= ceiling) return r;
+          // Windows are subsets of spans dedupeSpans already cleared, so the record
+          // still only ever claims source that was actually sent.
+          const parts = windowToCeiling(r.parts, ceiling, c.spineCallLine);
+          return { parts, covered: r.covered, shrunk: true };
+        };
         if (sectionText(base.parts).length <= cap) {
           return { parts: base.parts, covered: base.covered, shrunk: false };
         }
         const shrunk = shrinkCluster(c, cap);
-        if (shrunk === null) return { parts: base.parts, covered: base.covered, shrunk: false };
+        if (shrunk === null) {
+          return bound({ parts: base.parts, covered: base.covered, shrunk: false });
+        }
         const dd = dedupeSpans(shrunk);
-        return { parts: dd.parts, covered: dd.covered, shrunk: true };
+        return bound({ parts: dd.parts, covered: dd.covered, shrunk: true });
       };
 
       // Rank clusters for inclusion under the per-file cap. Entry-point
@@ -4830,7 +4962,13 @@ export class ToolHandler {
         // clusters are never shrunk — they either fit or wait for another call.
         const first = chosenIndices.size === 0;
         const cap = rc.c.hasSpine ? SPINE_CEILING : fileBudget;
-        const section = renderCluster(rc.c, first ? cap : Infinity);
+        // CG-30: shrinking keeps the top member whole however big it is, so bound
+        // how far that member may overshoot — the same 1.5x-of-reservation bound
+        // SPINE_CEILING already draws, never below `cap` (a cluster that fits its
+        // cap is never windowed). A spine cluster's cap already IS that bound, so
+        // this holds it to it rather than letting the member rule walk past it.
+        const ceiling = Math.max(cap, SPINE_CEILING);
+        const section = renderCluster(rc.c, first ? cap : Infinity, first ? ceiling : Infinity);
         const text = sectionText(section.parts);
         const sectionLen = text.length + (!first && text.length > 0 ? GAP_MARKER.length : 0);
         if (first) {
@@ -4872,10 +5010,11 @@ export class ToolHandler {
 
       // A chosen cluster is a COMPLETE method-range — we never cut through a body,
       // and a shrunk cluster drops WHOLE members for the same reason. An oversize
-      // single MEMBER (one long monolithic function) still renders in full: half a
-      // method is useless (the agent just Reads the rest for the other half), which
-      // is the very fallback explore exists to prevent. A pathological file is
-      // bounded by the cluster SELECTION above + the total hard ceiling.
+      // single MEMBER (one long monolithic function) is kept whole for as long as
+      // it fits the bounded overshoot (half a method is useless — the agent just
+      // Reads the rest, the fallback explore exists to prevent); past that bound it
+      // is WINDOWED on whole lines rather than dropped (CG-30), so a god-method
+      // can neither be silently lost nor spend the response's whole envelope.
       if (chosenIndices.size < clusters.length || anyClusterShrunk) {
         anyFileTrimmed = true;
       }
@@ -4928,7 +5067,9 @@ export class ToolHandler {
         covered: mergeRanges(coveredRanges),
         overhead: 200,
         mode: 'clusters',
-        clipped: chosenIndices.size < clusters.length,
+        // Windowing an oversize member elides source too — reporting it as
+        // unclipped would hide exactly the cut the diagnostic exists to show.
+        clipped: chosenIndices.size < clusters.length || anyClusterShrunk,
         fullBody: sectionText(fullClusterParts),
         fullRanges: fullClusterParts.map((p) => p.range),
       });
