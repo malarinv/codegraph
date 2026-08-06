@@ -1194,11 +1194,11 @@ impl Describe for Reg {
 `;
     const result = extractFromSource('reg.rs', code);
 
-    // A union is a type definition, not an alias — it must be a node, or the
-    // impl below has no source endpoint to hang off.
+    // A union is a first-class type definition, not an alias — it must be a
+    // node, or the impl below has no source endpoint to hang off.
     const reg = result.nodes.find((n) => n.name === 'Reg');
     expect(reg).toBeDefined();
-    expect(reg?.kind).toBe('struct');
+    expect(reg?.kind).toBe('union');
 
     const implRef = result.unresolvedReferences.find(
       (r) => r.referenceKind === 'implements' && r.referenceName === 'Describe'
@@ -5704,7 +5704,7 @@ static unsigned int hdr_raw(union packet_hdr *h) { return h->raw; }
 
     const hdr = result.nodes.find((n) => n.name === 'packet_hdr');
     expect(hdr).toBeDefined();
-    expect(hdr?.kind).toBe('struct');
+    expect(hdr?.kind).toBe('union');
 
     // Same rule as `struct Foo;`: bodiless is a forward declaration, so it must
     // not mint a phantom node beside the real definition.
@@ -5725,7 +5725,7 @@ typedef union {
     const result = extractFromSource('word.c', code);
 
     const word = result.nodes.find((n) => n.name === 'word_t');
-    expect(word?.kind).toBe('struct');
+    expect(word?.kind).toBe('union');
     // Resolved through the typedef the same way `typedef struct { … } X;` is,
     // so the anonymous union body does not become its own node.
     expect(result.nodes.some((n) => n.name === '<anonymous>')).toBe(false);
@@ -5742,7 +5742,7 @@ union Value {
     const result = extractFromSource('value.cpp', code);
 
     const value = result.nodes.find((n) => n.name === 'Value');
-    expect(value?.kind).toBe('struct');
+    expect(value?.kind).toBe('union');
 
     const asInt = result.nodes.find((n) => n.name === 'as_int');
     expect(asInt).toBeDefined();
@@ -8444,6 +8444,22 @@ void helperFunction(int count) {
     const imports = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
     expect(imports).toContain('Foundation/Foundation.h');
     expect(imports).toContain('MyClass.h');
+  });
+
+  it('extracts union declarations as first-class union nodes', () => {
+    const code = `
+typedef union {
+  unsigned int raw;
+  float value;
+} NumberBits;
+
+union opaque_bits;
+`;
+    const result = extractFromSource('NumberBits.m', code);
+
+    const numberBits = result.nodes.find((n) => n.name === 'NumberBits');
+    expect(numberBits?.kind).toBe('union');
+    expect(result.nodes.some((n) => n.name === 'opaque_bits')).toBe(false);
   });
 
   it('should record inheritance and protocol conformance', () => {

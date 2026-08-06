@@ -41,10 +41,10 @@ export const rustExtractor: LanguageExtractor = {
   classTypes: [], // Rust has impl blocks
   methodTypes: ['function_item', 'function_signature_item'],
   interfaceTypes: ['trait_item'],
-  // `union U { … }` is a definition like `struct U { … }` — same `body:`
-  // (`field_declaration_list`) and the same `impl Trait for U` attachment
-  // point. Extracted with kind `struct` because NodeKind has no `union`.
-  structTypes: ['struct_item', 'union_item'],
+  structTypes: ['struct_item'],
+  // Unions share struct member syntax and impl attachment, but retain their
+  // distinct semantic kind in the graph.
+  unionTypes: ['union_item'],
   enumTypes: ['enum_item'],
   enumMemberTypes: ['enum_variant'],
   typeAliasTypes: ['type_item'], // Rust type aliases
