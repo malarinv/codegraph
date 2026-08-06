@@ -26,7 +26,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '../..');
 const FIXTURE = join(REPO_ROOT, '__tests__/fixtures/factory-closure-ts');
-const TARGET = 'src/stores/dashboard-store.ts';
+const targetAt = process.argv.indexOf('--target');
+const TARGET = targetAt >= 0 ? process.argv[targetAt + 1] : 'src/stores/dashboard-store.ts';
+const factoryAt = process.argv.indexOf('--factory');
+const FACTORY = factoryAt >= 0 ? process.argv[factoryAt + 1] : 'createDashboardStore';
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -60,10 +63,10 @@ try {
   // Inner function definitions, straight from the index — the symbols the file's
   // enclosing factory range would otherwise swallow.
   const nodes = cg.getNodesInFile(TARGET);
-  const factory = nodes.find((n) => n.name === 'createDashboardStore');
+  const factory = nodes.find((n) => n.name === FACTORY);
   const inner = nodes
     .filter((n) => (n.kind === 'function' || n.kind === 'method')
-      && n.name !== 'createDashboardStore'
+      && n.name !== FACTORY
       && factory && n.startLine > factory.startLine && n.endLine <= factory.endLine)
     .sort((a, b) => a.startLine - b.startLine);
   cg.close?.();
