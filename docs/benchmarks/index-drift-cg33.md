@@ -46,19 +46,98 @@ no duplicate nodes, no orphan edges, no nodes referencing a missing file row.
 
 Nothing accumulates. Cross-file **resolution** goes stale.
 
-## Likely mechanism
+## Mechanism — two causes, both confirmed
 
-`ReferenceResolver` resolves calls and imports by name-matching and the import
-graph across the **whole** project. Incremental sync re-parses and re-resolves
-only the changed file, so:
+`ReferenceResolver` binds a reference to one of the same-named definitions
+**project-wide**. Two things follow, and the drift needed both to be fixed.
 
-- edges from *other* files into changed symbols are never recomputed → stale
-  edges retained (the 476);
-- edges that should newly form from unchanged files into changed symbols are
-  never created → missing edges (the 751).
+**1. Scope.** Incremental sync re-resolves only the references *in* the changed
+files. Adding or removing a definition of `pct` changes the correct answer for
+every `pct(...)` reference in the repo, including references in files the sync
+never touches — and those references resolved successfully once, which *deletes*
+their `unresolved_refs` row, so nothing existed to revisit them with. (The #1240
+retry only revisits refs parked as `status='failed'`.) The index kept an answer
+that was correct against an older graph.
 
-Start in `src/sync/` and `src/resolution/` — specifically what scope is
-re-resolved on a single-file change.
+**2. Tie-break.** When nothing disambiguated the candidates, `findBestMatch`
+kept the first one, and `getNodesByName` had no `ORDER BY` — so the winner was
+decided by rowid, i.e. by the order files happened to be **written**. A full
+index writes in scan order; a sync appends each file as it changes. The same
+tree therefore resolved to different edges depending on how the index was built,
+and no amount of re-resolution could converge, because re-resolving against the
+identical graph still picked a different candidate.
+
+### The fix
+
+- `getNodesByName` orders by `(file_path, start_line)` — a property of the code,
+  not of the write order (`src/db/queries.ts`).
+- `sync` returns a `definitionDelta`: the names whose set of definitions the sync
+  changed, computed as the symmetric difference of `file\0name` pairs sampled
+  before and after the store phase (`ExtractionOrchestrator.sync`).
+- For each delta name, `resurrectStaleResolutionEdges` deletes the resolution
+  edges targeting a symbol of that name whose source is in an *unchanged* file,
+  and re-inserts each as the reference that created it (the `metadata.refName`
+  stamp). The existing orphan sweep then resolves them against the post-sync
+  graph — the same input a rebuild resolves from. Kill switch:
+  `CODEGRAPH_NO_REBIND=1`.
+
+The delta is compared **per file**, not as one name set over the whole batch: a
+commit that adds `collect` to a new file while an unrelated changed file already
+defines `collect` cancels out of a batch-wide name set, and that miss was the
+largest residual class in the first measurement of this fix.
+
+Conservative by construction, because a wrong deletion is a permanent edge loss
+while a missed rebind is only residual drift: an edge with no `refName` stamp
+(synthesized, or built by an older engine) is never touched, edges whose source
+file the sync already re-extracted are skipped, and a per-name ceiling of 500
+edges declines the generic names.
+
+### Result
+
+Replaying real commits of this repo through `sync` one at a time, then diffing
+against a clean rebuild of the final tree:
+
+| replay | baseline (`main`) | + ORDER BY only | + rebind pass (shipped) |
+|---|---|---|---|
+| 16 commits | 48 (24 missing / 24 stale) | 20 | **0 — converged** |
+| 80 commits | 1,634 (963 / 671) | 890 | **361 (359 / 2)** |
+
+The direction that actively misleads — **stale** edges the index keeps asserting
+— drops from 671 to **2** over 80 commits, a 99.7% reduction.
+
+Index and sync wall-clock are unchanged (392-file repo: index 1.88–2.02s in both
+arms, single-file sync 0.183s in both). The `ORDER BY` costs 18% per *uncached*
+name lookup in a tight loop (237ms → 280ms over 10,127 lookups), which does not
+reach wall-clock because `ReferenceResolver` memoizes the lookup per name. A
+composite `(name, file_path, start_line)` index would make the sort free, but it
+would widen every node index entry with a full path string on the write-heavy
+indexing path — not worth 43ms.
+
+### The residual, and why it is not chased
+
+At 80 commits, 357 of the 361 remaining edges are a single pre-existing class:
+references to very generic names (`push` 260, `join` 97) that failed at index
+time and stay parked because `getRetryableFailedReferences` declines any name
+with more than 500 failed refs (1,412 for `push`, 2,346 for `join`). That
+ceiling is #1240/#999 policy, it is present on `main`, and what it declines to
+create is cross-language garbage: a TypeScript test file "calling" an R method
+named `push`, or a Rust method named `join`. **The full rebuild is the wrong one
+here** — converging would mean teaching sync to manufacture thousands of wrong
+edges. Left as is, deliberately.
+
+### `codegraph status` — decided: no drift metric
+
+The issue asked whether `status` should surface divergence. Decision: **no**.
+
+A drift number cannot be computed without the full rebuild it would be
+recommending, so anything cheap enough to run on `status` would be an estimate —
+and an honest estimate is not available. Shipping a proxy would violate the
+product rule that a screen must not overclaim, and post-fix it would fire on the
+generic-name residual above, training users to ignore it. (`status` already
+refuses to warn on parked failed refs for the same reason: every repo with
+external-library imports has them, so the warning would be permanent noise.)
+
+The check that *is* exact stays available and is documented below.
 
 ## Why it degrades retrieval
 
@@ -92,6 +171,13 @@ node scripts/agent-eval/diff-index-drift.mjs /tmp/live.db .codegraph/codegraph.d
 
 Exit code is 0 when converged, 1 when drifted. To re-confirm determinism, diff
 two consecutive rebuilds — that must report 0.
+
+To reproduce the *regression* rather than measure a live index, replay real
+commits through `sync`: clone the repo, check out `HEAD~N`, index, then
+`git checkout <sha> && codegraph sync` for each commit in order, snapshot the
+database, and diff it against a rebuild of the final tree. That is what produced
+the table above, and the unit-scale version of it is
+`__tests__/sync-rebuild-convergence.test.ts`.
 
 ## Note on probing an index
 
