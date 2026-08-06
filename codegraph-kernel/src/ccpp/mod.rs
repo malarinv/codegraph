@@ -812,7 +812,10 @@ impl<'t> Walker<'t> {
         } else if self.variant == Variant::Cpp && kind == "class_specifier" {
             self.extract_class(node);
             skip_children = true;
-        } else if kind == "struct_specifier" {
+        } else if matches!(kind, "struct_specifier" | "union_specifier") {
+            // `union_specifier` mirrors structTypes on the TS side: a named
+            // `union U { … };` is a definition, extracted with kind "struct"
+            // (NodeKind has no "union"). Bodiless stays a forward declaration.
             self.extract_struct(node);
             skip_children = true;
         } else if kind == "enum_specifier" {
@@ -1041,7 +1044,9 @@ impl<'t> Walker<'t> {
                 resolved = Some("enum");
                 break;
             }
-            if child.kind() == "struct_specifier" && child.child_by_field_name("body").is_some() {
+            if matches!(child.kind(), "struct_specifier" | "union_specifier")
+                && child.child_by_field_name("body").is_some()
+            {
                 resolved = Some("struct");
                 break;
             }
@@ -1059,7 +1064,8 @@ impl<'t> Walker<'t> {
             self.stack.push(Scope { row, kind: "struct", name });
             let type_child = node
                 .child_by_field_name("type")
-                .or_else(|| self.find_child_by_kind(node, "struct_specifier"));
+                .or_else(|| self.find_child_by_kind(node, "struct_specifier"))
+                .or_else(|| self.find_child_by_kind(node, "union_specifier"));
             if let Some(tc) = type_child {
                 self.extract_inheritance(tc, row);
                 let body = tc.child_by_field_name("body").unwrap_or(tc);
@@ -1556,7 +1562,7 @@ impl<'t> Walker<'t> {
             self.extract_class(node);
             return;
         }
-        if kind == "struct_specifier" {
+        if matches!(kind, "struct_specifier" | "union_specifier") {
             self.extract_struct(node);
             return;
         }

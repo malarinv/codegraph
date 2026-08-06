@@ -446,7 +446,9 @@ impl<'t> Walker<'t> {
         } else if kind == "trait_item" {
             self.extract_interface(node);
             skip_children = true;
-        } else if kind == "struct_item" {
+        } else if matches!(kind, "struct_item" | "union_item") {
+            // `union_item` mirrors structTypes on the TS side: same `body:`
+            // field, same extractor, kind "struct" (NodeKind has no "union").
             self.extract_struct(node);
             skip_children = true;
         } else if kind == "enum_item" {
@@ -1130,7 +1132,7 @@ impl<'t> Walker<'t> {
         }
 
         // Structural nodes inside bodies.
-        if kind == "struct_item" {
+        if matches!(kind, "struct_item" | "union_item") {
             self.extract_struct(node);
             return;
         }

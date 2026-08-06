@@ -102,7 +102,9 @@ export const objcExtractor: LanguageExtractor = {
   methodTypes: ['method_definition'],
   interfaceTypes: ['protocol_declaration'],
   interfaceKind: 'protocol',
-  structTypes: ['struct_specifier'],
+  // Objective-C is a C superset: `union U { … };` is a definition, same as in
+  // the C extractor.
+  structTypes: ['struct_specifier', 'union_specifier'],
   enumTypes: ['enum_specifier'],
   enumMemberTypes: ['enumerator'],
   typeAliasTypes: ['type_definition'],
@@ -128,7 +130,12 @@ export const objcExtractor: LanguageExtractor = {
       const child = node.namedChild(i);
       if (!child) continue;
       if (child.type === 'enum_specifier' && getChildByField(child, 'body')) return 'enum';
-      if (child.type === 'struct_specifier' && getChildByField(child, 'body')) return 'struct';
+      // `typedef union { … } name;` resolves like `typedef struct` — see the C extractor.
+      if (
+        (child.type === 'struct_specifier' || child.type === 'union_specifier') &&
+        getChildByField(child, 'body')
+      )
+        return 'struct';
     }
     return undefined;
   },
