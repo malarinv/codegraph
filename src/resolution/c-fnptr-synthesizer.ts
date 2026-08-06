@@ -703,7 +703,7 @@ export async function cFnPointerDispatchEdges(
       if (prof) { prof.nodesMs += Date.now() - tN; prof.nodesN++; }
       const structs: CfnptrFileIn['structs'] = [];
       for (const st of fileNodes) {
-        if (st.kind !== 'struct') continue;
+        if (st.kind !== 'struct' && st.kind !== 'union') continue;
         // sliceLinesPre semantics ride along: falsy startLine never parses,
         // and `endLine ?? startLine` is applied here so the kernel sees the
         // exact slice bounds the JS sweep would use.
@@ -740,7 +740,7 @@ export async function cFnPointerDispatchEdges(
     if (prof) { prof.nodesMs += Date.now() - tN; prof.nodesN++; }
     let lines: string[] | null = null;
     for (const st of fileNodes) {
-      if (st.kind !== 'struct') continue;
+      if (st.kind !== 'struct' && st.kind !== 'union') continue;
       lines ??= s.split('\n');
       const body = sliceLinesPre(lines, st.startLine, st.endLine);
       const open = body.indexOf('{');

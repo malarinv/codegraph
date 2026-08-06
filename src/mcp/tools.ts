@@ -343,7 +343,7 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
  */
 export const RELEVANCE_KIND_WEIGHT: Readonly<Record<string, number>> = {
   // Callables and types: the answer lives in one of these.
-  function: 1, method: 1, class: 1, struct: 1, interface: 1, trait: 1,
+  function: 1, method: 1, class: 1, struct: 1, union: 1, interface: 1, trait: 1,
   protocol: 1, component: 1, route: 1, enum: 1, type_alias: 1, constructor: 1,
   // Containers: real structure, but a whole namespace/module matching a term is
   // a coarser signal than a callable matching it.
@@ -3968,7 +3968,7 @@ export class ToolHandler {
     const superMany = new Map<string, boolean>();
     const definesPolymorphicSupertype = (nodes: Node[]): boolean => {
       for (const n of nodes) {
-        if (n.kind !== 'class' && n.kind !== 'interface' && n.kind !== 'struct'
+        if (n.kind !== 'class' && n.kind !== 'interface' && n.kind !== 'struct' && n.kind !== 'union'
             && n.kind !== 'trait' && n.kind !== 'protocol' && n.kind !== 'type_alias') continue;
         let many = superMany.get(n.id);
         if (many === undefined) {

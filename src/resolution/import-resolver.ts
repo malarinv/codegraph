@@ -1827,6 +1827,7 @@ function resolveRustPathReference(
       n.name === leaf &&
       (n.kind === 'function' ||
         n.kind === 'struct' ||
+        n.kind === 'union' ||
         n.kind === 'enum' ||
         n.kind === 'trait' ||
         n.kind === 'type_alias' ||

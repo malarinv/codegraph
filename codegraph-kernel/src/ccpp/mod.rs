@@ -455,7 +455,7 @@ impl<'t> Walker<'t> {
     fn inside_class_like(&self) -> bool {
         self.stack
             .last()
-            .map(|s| matches!(s.kind, "class" | "struct" | "interface" | "trait" | "enum" | "module"))
+            .map(|s| matches!(s.kind, "class" | "struct" | "union" | "interface" | "trait" | "enum" | "module"))
             .unwrap_or(false)
     }
 
@@ -561,7 +561,7 @@ impl<'t> Walker<'t> {
             let parent_ok = self
                 .stack
                 .last()
-                .map(|s| matches!(s.kind, "file" | "class" | "module" | "struct" | "enum"))
+                .map(|s| matches!(s.kind, "file" | "class" | "module" | "struct" | "union" | "enum"))
                 .unwrap_or(false);
             if parent_ok {
                 self.fs_values.insert(name.to_string(), row);
@@ -812,11 +812,11 @@ impl<'t> Walker<'t> {
         } else if self.variant == Variant::Cpp && kind == "class_specifier" {
             self.extract_class(node);
             skip_children = true;
-        } else if matches!(kind, "struct_specifier" | "union_specifier") {
-            // `union_specifier` mirrors structTypes on the TS side: a named
-            // `union U { … };` is a definition, extracted with kind "struct"
-            // (NodeKind has no "union"). Bodiless stays a forward declaration.
-            self.extract_struct(node);
+        } else if kind == "struct_specifier" {
+            self.extract_aggregate(node, "struct");
+            skip_children = true;
+        } else if kind == "union_specifier" {
+            self.extract_aggregate(node, "union");
             skip_children = true;
         } else if kind == "enum_specifier" {
             self.extract_enum(node);
@@ -928,7 +928,7 @@ impl<'t> Walker<'t> {
                     .iter()
                     .position(|m| {
                         m.name == *receiver_type
-                            && matches!(m.kind, "struct" | "class" | "enum" | "trait")
+                            && matches!(m.kind, "struct" | "union" | "class" | "enum" | "trait")
                     })
                     .map(|i| i as u32);
                 if let Some(owner_row) = owner_row {
@@ -974,8 +974,8 @@ impl<'t> Walker<'t> {
         self.stack.pop();
     }
 
-    /// extractStruct: bodiless specifiers (fwd decls / elaborated refs) skip.
-    fn extract_struct(&mut self, node: Node<'t>) {
+    /// Extract a struct-like declaration while preserving its semantic kind.
+    fn extract_aggregate(&mut self, node: Node<'t>, kind: &'static str) {
         let Some(body) = node.child_by_field_name("body") else { return };
         let name = self.extract_name(node);
         let extra = Extra {
@@ -983,9 +983,9 @@ impl<'t> Walker<'t> {
             visibility: if self.variant == Variant::Cpp { self.visibility_of(node) } else { None },
             ..Extra::default()
         };
-        let Some(row) = self.create_node("struct", &name, node, extra) else { return };
+        let Some(row) = self.create_node(kind, &name, node, extra) else { return };
         self.extract_inheritance(node, row);
-        self.stack.push(Scope { row, kind: "struct", name });
+        self.stack.push(Scope { row, kind, name });
         for i in 0..body.named_child_count() {
             if let Some(c) = body.named_child(i) {
                 self.visit_node(c);
@@ -1044,24 +1044,27 @@ impl<'t> Walker<'t> {
                 resolved = Some("enum");
                 break;
             }
-            if matches!(child.kind(), "struct_specifier" | "union_specifier")
-                && child.child_by_field_name("body").is_some()
-            {
+            if child.kind() == "struct_specifier" && child.child_by_field_name("body").is_some() {
                 resolved = Some("struct");
+                break;
+            }
+            if child.kind() == "union_specifier" && child.child_by_field_name("body").is_some() {
+                resolved = Some("union");
                 break;
             }
         }
 
-        if resolved == Some("struct") {
+        if matches!(resolved, Some("struct") | Some("union")) {
+            let kind = resolved.unwrap();
             let Some(row) = self.create_node(
-                "struct",
+                kind,
                 &name,
                 node,
                 Extra { docstring, ..Extra::default() },
             ) else {
                 return true;
             };
-            self.stack.push(Scope { row, kind: "struct", name });
+            self.stack.push(Scope { row, kind, name });
             let type_child = node
                 .child_by_field_name("type")
                 .or_else(|| self.find_child_by_kind(node, "struct_specifier"))
@@ -1562,8 +1565,12 @@ impl<'t> Walker<'t> {
             self.extract_class(node);
             return;
         }
-        if matches!(kind, "struct_specifier" | "union_specifier") {
-            self.extract_struct(node);
+        if kind == "struct_specifier" {
+            self.extract_aggregate(node, "struct");
+            return;
+        }
+        if kind == "union_specifier" {
+            self.extract_aggregate(node, "union");
             return;
         }
         if kind == "enum_specifier" {

@@ -559,7 +559,7 @@ export class ContextBuilder {
         // but are almost never what exploration queries want.
         const searchKinds = opts.nodeKinds && opts.nodeKinds.length > 0
           ? opts.nodeKinds
-          : ['file', 'module', 'class', 'struct', 'interface', 'trait', 'protocol',
+          : ['file', 'module', 'class', 'struct', 'union', 'interface', 'trait', 'protocol',
              'function', 'method', 'property', 'field', 'variable', 'constant',
              'enum', 'enum_member', 'type_alias', 'namespace', 'export',
              'route', 'component'] as NodeKind[];
