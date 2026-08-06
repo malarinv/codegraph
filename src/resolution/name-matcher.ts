@@ -2107,6 +2107,7 @@ function findBestMatch(
       if (
         candidate.kind === 'class' ||
         candidate.kind === 'struct' ||
+        candidate.kind === 'union' ||
         candidate.kind === 'interface'
       ) {
         score += 25;
