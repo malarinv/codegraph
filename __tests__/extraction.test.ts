@@ -1174,6 +1174,51 @@ impl Counter {
     );
     expect(implRefs).toHaveLength(0);
   });
+
+  it('should extract union declarations and their impl edges', () => {
+    const code = `
+pub union Reg {
+    pub raw: u32,
+    pub halves: [u16; 2],
+}
+
+pub trait Describe {
+    fn describe(&self) -> u32;
+}
+
+impl Describe for Reg {
+    fn describe(&self) -> u32 {
+        unsafe { self.raw }
+    }
+}
+`;
+    const result = extractFromSource('reg.rs', code);
+
+    // A union is a type definition, not an alias — it must be a node, or the
+    // impl below has no source endpoint to hang off.
+    const reg = result.nodes.find((n) => n.name === 'Reg');
+    expect(reg).toBeDefined();
+    expect(reg?.kind).toBe('struct');
+
+    const implRef = result.unresolvedReferences.find(
+      (r) => r.referenceKind === 'implements' && r.referenceName === 'Describe'
+    );
+    expect(implRef).toBeDefined();
+    expect(implRef?.fromNodeId).toBe(reg?.id);
+
+    // The impl's method attaches to the union, not to the file — without a Reg
+    // node it was an orphan whose qualifiedName pointed at a type that did not
+    // exist in the graph.
+    const implMethod = result.nodes.find(
+      (n) => n.kind === 'method' && n.qualifiedName?.includes('Reg')
+    );
+    expect(implMethod).toBeDefined();
+    expect(
+      result.edges.some(
+        (e) => e.kind === 'contains' && e.source === reg?.id && e.target === implMethod?.id
+      )
+    ).toBe(true);
+  });
 });
 
 describe('Java Extraction', () => {
@@ -5639,6 +5684,71 @@ std::string use() {
       const reached = [...cg.getImpactRadius(fn.id, 3).nodes.values()].map((n) => n.filePath ?? '');
       expect(reached.some((p) => p.endsWith('user.cc')), `${fn.name} should be called from user.cc`).toBe(true);
     }
+  });
+});
+
+describe('C/C++ union declarations', () => {
+  it('extracts a named union as a type node, but not a forward declaration', () => {
+    const code = `
+union packet_hdr {
+  unsigned int raw;
+  unsigned short port;
+};
+
+/* forward declaration — not a definition */
+union opaque_hdr;
+
+static unsigned int hdr_raw(union packet_hdr *h) { return h->raw; }
+`;
+    const result = extractFromSource('packet.c', code);
+
+    const hdr = result.nodes.find((n) => n.name === 'packet_hdr');
+    expect(hdr).toBeDefined();
+    expect(hdr?.kind).toBe('struct');
+
+    // Same rule as `struct Foo;`: bodiless is a forward declaration, so it must
+    // not mint a phantom node beside the real definition.
+    expect(result.nodes.some((n) => n.name === 'opaque_hdr')).toBe(false);
+
+    // Exactly one node for the type — the definition — so a call site or a
+    // `union packet_hdr *` parameter has a single resolution target.
+    expect(result.nodes.filter((n) => n.name === 'packet_hdr')).toHaveLength(1);
+  });
+
+  it('gives a typedef union the typedef name, not a second <anonymous> node', () => {
+    const code = `
+typedef union {
+  unsigned int u;
+  float f;
+} word_t;
+`;
+    const result = extractFromSource('word.c', code);
+
+    const word = result.nodes.find((n) => n.name === 'word_t');
+    expect(word?.kind).toBe('struct');
+    // Resolved through the typedef the same way `typedef struct { … } X;` is,
+    // so the anonymous union body does not become its own node.
+    expect(result.nodes.some((n) => n.name === '<anonymous>')).toBe(false);
+  });
+
+  it('extracts a C++ union with member functions', () => {
+    const code = `
+union Value {
+  int i;
+  double d;
+  int as_int() const { return i; }
+};
+`;
+    const result = extractFromSource('value.cpp', code);
+
+    const value = result.nodes.find((n) => n.name === 'Value');
+    expect(value?.kind).toBe('struct');
+
+    const asInt = result.nodes.find((n) => n.name === 'as_int');
+    expect(asInt).toBeDefined();
+    expect(
+      result.edges.some((e) => e.kind === 'contains' && e.source === value?.id && e.target === asInt?.id)
+    ).toBe(true);
   });
 });
 
