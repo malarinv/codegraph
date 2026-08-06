@@ -22,7 +22,14 @@
     "actually about) and `incidental` (what wins the envelope today on name collisions).",
     "Assertions are on the DELIVERED envelope unless suffixed `Allocated`; delivered is",
     "what the agent got, allocated is what the render loop chose before the hard ceiling.",
-    "Shares are fractions of the whole response, meta-text included, so they never sum to 1."
+    "Shares are fractions of the whole response, meta-text included, so they never sum to 1.",
+    "",
+    "CG-36 adds two more fixtures and a per-file `spendShareAtLeast` gate. The share gates",
+    "above ask which files WON the envelope; that one asks whether a file that won its share",
+    "then spent it. `starved-cluster` and `dense-header` are the two halves of the same",
+    "tradeoff and must be read together — one fails if a trivial cluster starves the",
+    "answer-bearing one, the other fails if the fix for that buries a query's own methods",
+    "under a dense declaration block."
   ],
   "fixtures": [
     {
@@ -103,6 +110,124 @@
           "internal/gen/fkit/payroll/payslip.go": 0.0
         },
         "verdict": "ALL GATES PASS. Answer group 78.7% (from 25.6% at baseline), generated layer 0.0% (from 57.4%). All four hand-written files deliver source, including payslip_builder.go — `func (s *Service) BuildPayslip`, the 'calculate' half of the question, finally reaches the agent. The generated files are still NAMED with their symbols and line numbers under 'Not shown above', so withholding their bytes costs ~100 chars each instead of ~4,500 and stays one follow-up explore away."
+      }
+    },
+    {
+      "id": "starved-cluster",
+      "title": "CG-36 — a trivial top-ranked cluster starving the answer-bearing one",
+      "kind": "fixture",
+      "path": "__tests__/fixtures/starved-cluster-ts",
+      "query": "how does a request travel from sendRequest to the socket",
+      "rationale": [
+        "django's `db/models/sql/query.py` and okhttp's `RealInterceptorChain.kt`, reduced",
+        "to a fixture. `chain.ts` holds a one-line `describeChain` helper at the top —",
+        "trivial, but a direct callee of the query's entry point, so its cluster carries",
+        "the file's highest per-symbol importance — and, past the cluster gap, the",
+        "`RequestChain` class that actually answers the question. The helper's cluster wins",
+        "the one guaranteed-and-shrinkable slot; the class then does not fit the remainder.",
+        "",
+        "Before CG-36 the class was dropped WHOLE and the file delivered 1,985 of a 6,904",
+        "reservation. That is not merely unspent budget: the slack carries forward to",
+        "lower-ranked files, so the response stays full and every envelope-share gate",
+        "passes while the answer is missing. Hence `spendShareAtLeast`."
+      ],
+      "groups": {
+        "answer": [
+          "src/pipeline/chain.ts",
+          "src/transport/**",
+          "src/app/client.ts"
+        ],
+        "incidental": [
+          "src/app/config.ts",
+          "src/pipeline/framing.ts"
+        ]
+      },
+      "assert": {
+        "topFileGroup": "answer",
+        "spendShareAtLeast": {
+          "src/pipeline/chain.ts": 0.6
+        },
+        "mustDeliverBytes": [
+          "src/pipeline/chain.ts"
+        ],
+        "$mustContainComment": "The two ends of the in-file flow: the chain hop and the transport hop it terminates in. Both live in the cluster that used to be dropped whole.",
+        "mustContain": [
+          "async proceed(request: PipelineRequest)",
+          "private async writeAndRead(request: PipelineRequest)"
+        ]
+      },
+      "baseline": {
+        "measuredOn": "2026-08-06",
+        "note": "The CG-24 epic tip (76ab1fe), before CG-36. 3,725 chars of source delivered in total.",
+        "delivered": {
+          "src/pipeline/chain.ts": 1985,
+          "src/app/client.ts": 997,
+          "src/pipeline/types.ts": 743
+        },
+        "verdict": "FAILS spendShareAtLeast and both needles. chain.ts spends 1,985 of its 6,904 reservation (28.8%) — it keeps the `describeChain` cluster and drops the `RequestChain` cluster whole, so neither `proceed` nor `writeAndRead` reaches the agent. Nothing else in the response is wrong: the file still ranks #1 by score and is still reserved the largest slice."
+      },
+      "afterCG36": {
+        "measuredOn": "2026-08-06",
+        "note": "10,802 chars of source delivered in total, nothing truncated.",
+        "delivered": {
+          "src/pipeline/chain.ts": 9062,
+          "src/app/client.ts": 997,
+          "src/pipeline/types.ts": 743
+        },
+        "verdict": "ALL GATES PASS. The `RequestChain` cluster is now SHRUNK into the remainder by the same whole-member rule the first cluster already used, instead of being dropped whole, so chain.ts delivers 9,062 chars including `proceed`, `advance` and `writeAndRead` — the whole in-file flow the question asks for."
+      }
+    },
+    {
+      "id": "dense-header",
+      "title": "CG-36 — the Session.swift shape density-first ranking exists for",
+      "kind": "fixture",
+      "path": "__tests__/fixtures/dense-header-ts",
+      "query": "how does perform create a URLRequest and start the task",
+      "rationale": [
+        "The counterweight to `starved-cluster`, and the reason CG-36 did NOT touch cluster",
+        "ranking. `session.ts` opens with a 60-line property list and a run of trivial",
+        "accessors — many adjacent, individually worthless declarations, i.e. the densest",
+        "block in the file — while `perform`, `didCreateURLRequest` and `task`, which the",
+        "query names, sit ~200 lines below it.",
+        "",
+        "Ranked on density alone the header block takes the file's whole budget and the",
+        "methods are buried; that is Alamofire's Session.swift, the case the",
+        "importance-then-density order was built for. Any future change to selection or",
+        "shrinking has to keep this passing as well as `starved-cluster` — they pull in",
+        "opposite directions, which is exactly why both are here."
+      ],
+      "groups": {
+        "answer": [
+          "src/net/**",
+          "src/core/request-builder.ts",
+          "src/core/task-factory.ts"
+        ],
+        "incidental": [
+          "src/core/queue.ts"
+        ]
+      },
+      "assert": {
+        "topFileGroup": "answer",
+        "answerShareOfSourceAtLeast": 0.8,
+        "spendShareAtLeast": {
+          "src/net/session.ts": 0.6
+        },
+        "$mustContainComment": "All three named symbols are deep in the file, past the dense header block. If density ever outranks importance again, these are the first thing to go.",
+        "mustContain": [
+          "async perform(url: string, method: string",
+          "didCreateURLRequest(request: URLRequest)",
+          "task(request: URLRequest, identifier: number)"
+        ]
+      },
+      "afterCG36": {
+        "measuredOn": "2026-08-06",
+        "note": "11,695 chars of source delivered, BYTE-IDENTICAL to the CG-24 epic tip (76ab1fe) — this fixture pins behaviour CG-36 deliberately left alone.",
+        "delivered": {
+          "src/net/session.ts": 9007,
+          "src/core/types.ts": 1957,
+          "src/core/task-factory.ts": 731
+        },
+        "verdict": "ALL GATES PASS, on the epic tip and on CG-36 alike. session.ts spends 9,007 of its 9,009 reservation and the response carries all three named methods from the bottom of the file. The dense header block is not what won the budget."
       }
     },
     {

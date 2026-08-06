@@ -199,6 +199,23 @@ function evaluate(fixture, report, text) {
         : 'not among the ranked candidates',
     );
   }
+  // Reservation-vs-delivered, per file (CG-36). The share gates above ask which
+  // files won the envelope; this asks whether a file that WON its share then
+  // actually spent it. A file can rank #1, be reserved the largest slice, and
+  // still deliver a quarter of it because the cluster carrying the answer was
+  // dropped whole instead of shrunk — and the share gates read that as a pass,
+  // since the unspent bytes carry forward and the envelope stays full.
+  for (const [path, floor] of Object.entries(want.spendShareAtLeast ?? {})) {
+    const rec = report.files.find((f) => f.path === path);
+    const spent = rec && rec.allowance ? rec.finalChars / rec.allowance : 0;
+    add(
+      `${path} spends >= ${pct(floor)} of its reservation`,
+      !!rec && rec.allowance > 0 && spent >= floor,
+      rec
+        ? `${num(rec.finalChars)} delivered of a ${num(rec.allowance ?? 0)} reservation (${pct(spent)})`
+        : 'not among the ranked candidates',
+    );
+  }
   for (const needle of want.mustContain ?? []) {
     add(`response contains "${needle}"`, text.includes(needle), text.includes(needle) ? 'present' : 'absent');
   }
