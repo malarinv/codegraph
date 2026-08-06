@@ -139,10 +139,9 @@ walker mirrors, with file:line anchors (as of `705e501`). Read WITH
 ## Extractor configs (languages/c-cpp.ts — read the whole file when porting)
 
 **cExtractor (line 180):** functionTypes=[function_definition]; NO
-class/method/interface types; structTypes=[struct_specifier]
-(superseded: `union_specifier` joined structTypes — a named `union U { … };`
-is a definition, extracted with kind `struct`, and `typedef union { … } N;`
-resolves through resolveTypeAliasKind like `typedef struct`);
+class/method/interface types; structTypes=[struct_specifier];
+unionTypes=[union_specifier] (a named `union U { … };` is a definition, and
+`typedef union { … } N;` resolves to a first-class `union` node);
 enumTypes=[enum_specifier]; enumMemberTypes=[enumerator];
 typeAliasTypes=[type_definition]; importTypes=[preproc_include];
 callTypes=[call_expression]; variableTypes=[declaration];

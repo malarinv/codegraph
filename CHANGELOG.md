@@ -17,7 +17,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
-- Unions are now indexed in C, C++, Objective-C and Rust. A `union` declaration previously produced no symbol at all, so it never appeared in search or `codegraph_explore`, and anything attached to it disappeared with it — in Rust, every `impl SomeTrait for MyUnion` lost its edge, and the methods from that impl were left pointing at a type the graph did not contain. A `typedef union { … } Name;` in C now carries the typedef's name like `typedef struct` already did. Re-index after upgrading to pick up the new symbols.
+- C, C++, Objective-C and Rust unions are now indexed as first-class `union` nodes. A `union` declaration previously produced no symbol at all, so it never appeared in search or `codegraph_explore`, and anything attached to it disappeared with it — in Rust, every `impl SomeTrait for MyUnion` lost its edge, and the methods from that impl were left pointing at a type the graph did not contain. A `typedef union { … } Name;` in C now carries the typedef's name and remains distinguishable from a struct. Re-index after upgrading to replace the earlier struct-shaped union nodes.
 
 - `codegraph_explore` now concentrates its answer on the code that actually answers your question instead of spreading it across files that merely share a word with it, so more of the answer arrives in a single call. Thanks @LeDuyViet for the detailed measurements and reproduction. (#1500)
 - Files only weakly related to your question now come back as a name, symbol and line number instead of spending the answer on their source — name one of them in a follow-up `codegraph_explore` to get it back in full. (#1500)
