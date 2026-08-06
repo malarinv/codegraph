@@ -5240,9 +5240,11 @@ export class ToolHandler {
         // agent to Read, negating the savings. But "always taken" is not "taken at
         // any size": when it overruns the reservation it is SHRUNK to the
         // highest-importance whole symbol ranges inside it, so a single-cluster
-        // god-file spends its allotment instead of the whole response's. Later
-        // clusters are never shrunk — they either fit or wait for another call.
+        // god-file spends its allotment instead of the whole response's.
         const first = chosenIndices.size === 0;
+        // A spine cluster (the rendered call path) is the flow answer — it may run
+        // past the per-file budget up to the spine ceiling; non-spine clusters obey
+        // the normal per-file budget.
         const cap = rc.c.hasSpine ? SPINE_CEILING : fileBudget;
         // CG-30: shrinking keeps the top member whole however big it is, so bound
         // how far that member may overshoot — the same 1.5x-of-reservation bound
@@ -5250,25 +5252,45 @@ export class ToolHandler {
         // cap is never windowed). A spine cluster's cap already IS that bound, so
         // this holds it to it rather than letting the member rule walk past it.
         const ceiling = Math.max(cap, SPINE_CEILING);
-        const section = renderCluster(rc.c, first ? cap : Infinity, first ? ceiling : Infinity);
-        const text = sectionText(section.parts);
-        const sectionLen = text.length + (!first && text.length > 0 ? GAP_MARKER.length : 0);
         if (first) {
+          const section = renderCluster(rc.c, cap, ceiling);
           renderedClusters.set(rc.idx, section);
           anyClusterShrunk = anyClusterShrunk || section.shrunk;
           chosenIndices.add(rc.idx);
-          projectedChars += sectionLen;
+          projectedChars += sectionText(section.parts).length;
           continue;
         }
-        // A spine cluster (the rendered call path) is the flow answer — include it
-        // past the per-file budget up to the spine ceiling; non-spine clusters obey
-        // the normal per-file budget.
-        const fits = projectedChars + sectionLen <= fileBudget;
-        const spineFits = rc.c.hasSpine && projectedChars + sectionLen <= SPINE_CEILING;
-        if (!fits && !spineFits) continue;
+        // Later clusters used to be all-or-nothing: rendered whole, then taken
+        // only if the whole thing fit the remainder. On a file whose top-ranked
+        // cluster is TRIVIAL that discards the answer and leaves the reservation
+        // unspent — django's `sql/query.py` keeps a 22-line glue cluster (one
+        // importance-6 bridging symbol) and drops the 624-line `Query` body
+        // beneath it whole, spending 1,923 of 7,947; the slack then carries
+        // forward to a file scoring a fifth as much (CG-36). Same shape in
+        // okhttp's `RealInterceptorChain.kt`, where an import header displaces
+        // the chain itself.
+        //
+        // So a later cluster is shrunk INTO the remainder by the same whole-member
+        // rule the first one already uses — CG-26's between-FILES lesson ("hold the
+        // remainder while it is still worth a section; zeroing it delivers
+        // nothing") applied between CLUSTERS. Below `MIN_CHARS` the remainder can't
+        // hold one readable block, so it stays a drop rather than a stutter of
+        // fragments the next call's dedup then has to shred around.
+        const room = cap - projectedChars - GAP_MARKER.length;
+        if (room < EXPLORE_ALLOCATION.MIN_CHARS) continue;
+        const section = renderCluster(rc.c, room, room);
+        const text = sectionText(section.parts);
+        if (text.length === 0) continue;
+        // The never-empty floors inside the windowing may overrun `room` (a
+        // 12-line minimum window on a file of very long lines). The first cluster
+        // is allowed that overshoot — an empty section is worse — but a later one
+        // is not: it would be spending a lower-ranked FILE's reservation for a
+        // fragment. Drop it, exactly as before.
+        if (projectedChars + text.length + GAP_MARKER.length > cap) continue;
         renderedClusters.set(rc.idx, section);
+        anyClusterShrunk = anyClusterShrunk || section.shrunk;
         chosenIndices.add(rc.idx);
-        projectedChars += sectionLen;
+        projectedChars += text.length + GAP_MARKER.length;
       }
 
       // Emit chosen clusters in source order so the file reads top-to-bottom.
@@ -5345,15 +5367,47 @@ export class ToolHandler {
       let chosenNow = chosenIndices;
       const costOfSection = (header: string, body: string) =>
         header.length + 2 + (body.length > 0 ? body.length + lang.length + 11 : 0);
+      // The weakest cluster is SHRUNK into the room that is left before it is
+      // dropped (CG-36). Dropping it whole makes this loop as all-or-nothing as
+      // the selection above it was, and at the same cost: on excalidraw's
+      // `typeChecks.ts` the estimate missed by 13 chars and a 1,512-char cluster
+      // — the file's highest-SCORING one, last only because rank breaks ties on
+      // density — was thrown away to pay for it. Below MIN_CHARS the remainder
+      // cannot hold a readable block, and only then is the cluster dropped.
+      const reshrunkOnce = new Set<number>();
       while (totalChars + costOfSection(fileHeader, assembled.text) > renderCeiling
              && chosenNow.size > 1) {
         // Weakest first: `rankedClusters` is best-first, so walk it backwards.
-        const trimmed = new Set(chosenNow);
+        let weakest = -1;
         for (let i = rankedClusters.length - 1; i >= 0; i--) {
           const idx = rankedClusters[i]!.idx;
-          if (trimmed.has(idx)) { trimmed.delete(idx); break; }
+          if (chosenNow.has(idx)) { weakest = idx; break; }
         }
-        chosenNow = trimmed;
+        if (weakest < 0) break;
+        const over = totalChars + costOfSection(fileHeader, assembled.text) - renderCeiling;
+        const current = renderedClusters.get(weakest)!;
+        const currentLen = sectionText(current.parts).length;
+        const room = currentLen - over;
+        let reduced = false;
+        // One attempt per cluster: a second pass means the first re-render did
+        // not buy enough (the header moved with it), and the cluster is then
+        // dropped rather than whittled a few chars at a time.
+        if (room >= EXPLORE_ALLOCATION.MIN_CHARS && !reshrunkOnce.has(weakest)) {
+          reshrunkOnce.add(weakest);
+          const reshrunk = renderCluster(clusters[weakest]!, room, room);
+          const reshrunkLen = sectionText(reshrunk.parts).length;
+          // Strictly smaller, or this loop cannot make progress and would spin.
+          if (reshrunkLen > 0 && reshrunkLen < currentLen) {
+            renderedClusters.set(weakest, reshrunk);
+            anyClusterShrunk = true;
+            reduced = true;
+          }
+        }
+        if (!reduced) {
+          const trimmed = new Set(chosenNow);
+          trimmed.delete(weakest);
+          chosenNow = trimmed;
+        }
         assembled = assembleSection(chosenNow);
         fileHeader = headerFor(assembled.symbols);
         anyFileTrimmed = true;
