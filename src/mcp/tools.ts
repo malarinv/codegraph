@@ -409,6 +409,36 @@ const GENERATED_RANK_PENALTY = 0.3;
  * that case: down-weighted rather than removed.
  */
 const LOW_VALUE_RANK_PENALTY = 0.5;
+/**
+ * Ambient declaration files — a hand-written `.d.ts` of global shims, vendored
+ * typings, module augmentation (CG-28). Declares nothing but types, and nothing
+ * in the index depends on it.
+ *
+ * Such a file cannot answer a FLOW question no matter how much its identifiers
+ * overlap the query: no bodies, no call edges, no behaviour, and nothing typed
+ * by it. Its ceiling of usefulness is a type signature, and one follow-up
+ * explore fetches that. But the identifiers it declares are exactly the generic
+ * ones a prose question uses (`Body`, `Message`, `ImageMetadata`,
+ * `ReadableStream`), so on term overlap it out-scores the implementation and
+ * takes the envelope — measured at rank #1 and 51% of delivered source, with
+ * the flow's own entry file getting none.
+ *
+ * Softer than {@link GENERATED_RANK_PENALTY} on purpose: "generated" is a claim
+ * about provenance the file itself makes, while this is an inference about what
+ * a file can be USEFUL for. A demoted declaration file that is still the best
+ * candidate should keep its place; the penalty only has to stop it beating real
+ * implementation. It does NOT stack with the generated penalty (see rankPenalty)
+ * — penalising twice for the same property is how a file gets cliffed out of
+ * answers where it is genuinely relevant.
+ */
+const AMBIENT_DECLARATION_RANK_PENALTY = 0.5;
+/**
+ * The type-level NodeKinds. Must stay in step with the kind list in
+ * `QueryBuilder.getAmbientDeclarationPathsAmong` — that query decides which
+ * files are ambient declarations, this set decides which symbols in them the
+ * agent can name to lift the penalty back off.
+ */
+const DECLARATION_KINDS = new Set(['interface', 'type_alias', 'enum', 'enum_member', 'namespace']);
 
 /**
  * Score floor: `clamp(topScore * FRACTION, ABSOLUTE, MAX)`.
@@ -3275,6 +3305,9 @@ export class ToolHandler {
     // and crowd out the real answer file (grpc's `dialoptions.go`). Corroborated
     // overloads (the query also named the type) all earn it. (#1064)
     const tierSeedIds = new Set<string>();
+    // Files declaring a TYPE the query named by name — the counter-case guard
+    // for the declaration-only penalty (CG-28). Populated in the token loop.
+    const namedTypeFiles = new Set<string>();
     {
       const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro|erl|hrl)$/i;
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
@@ -3341,6 +3374,21 @@ export class ToolHandler {
         // codegraph_node's findSymbolMatches.) Qualified tokens keep findAllSymbols.
         const isQual = /[.\/]|::/.test(t);
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
+        // A query that NAMES a declared type is a question ABOUT that type, and
+        // must still reach its declaration file at full weight — so record the
+        // files those declarations live in and exempt them from the
+        // declaration-only penalty below (CG-28). Only PRECISE tokens count, by
+        // the same NL-stopword reasoning as the seeding above: "…the file body…"
+        // must not exempt a `Body` interface it never meant to name. Kept
+        // separate from `namedSeedIds`, which is callable-only by construction —
+        // a type never becomes a named seed, so it cannot be the guard here.
+        if (isPreciseToken(t)) {
+          for (const n of raw) {
+            if (DECLARATION_KINDS.has(n.kind) && n.name.toLowerCase() === t.toLowerCase()) {
+              namedTypeFiles.add(n.filePath);
+            }
+          }
+        }
         let cands = raw
           .filter((n) => CALLABLE.has(n.kind) && !isTestPath(n.filePath))
           .sort((a, b) => (bodyLines(b) > 1 ? 1 : 0) - (bodyLines(a) > 1 ? 1 : 0) || bodyLines(b) - bodyLines(a));
@@ -3572,10 +3620,18 @@ export class ToolHandler {
     // DO-NOT-EDIT banner and nothing in its name) down-ranks the same way
     // `.pb.go` always has (#1500). Covers the whole subgraph, not just the
     // grouped files, because the graph-mass penalty below is keyed on it too.
-    const isGeneratedCandidate = cg.generatedFilePredicate(new Set([
+    const penaltyCandidates = new Set([
       ...fileGroups.keys(),
       ...[...subgraph.nodes.values()].map((n) => n.filePath),
-    ]));
+    ]);
+    const isGeneratedCandidate = cg.generatedFilePredicate(penaltyCandidates);
+    // Second bounded probe over the same set: files declaring nothing but types
+    // that nothing in the index depends on (CG-28). A query that NAMED one of
+    // those types is asking about the declaration, so its file is exempt and
+    // ranks at full weight.
+    const isAmbientDeclaration = cg.ambientDeclarationFilePredicate(penaltyCandidates);
+    const isDampedDeclaration = (filePath: string): boolean =>
+      isAmbientDeclaration(filePath) && !namedTypeFiles.has(filePath);
 
     /**
      * Rank penalty for a file, applied to its relevance score AND (below) to its
@@ -3583,9 +3639,19 @@ export class ToolHandler {
      * score alone would leave the #1500 case unfixed: the generated CRUD carries
      * MORE graph mass than the hand-written use-case, and graph mass outranks
      * score in the comparator.
+     *
+     * Generated and ambient-declaration are taken as the STRONGER of the two,
+     * never multiplied: a generated `.d.ts` has one property — "not the
+     * implementation" — that both signals happen to see, and charging it twice is
+     * how a file gets cliffed out of answers where it is genuinely relevant
+     * (CG-28). The low-value multiplier is orthogonal (a test file that is also
+     * generated is two independent reasons) and still compounds.
      */
     const rankPenalty = (filePath: string): number =>
-      (isGeneratedCandidate(filePath) ? GENERATED_RANK_PENALTY : 1)
+      Math.min(
+        isGeneratedCandidate(filePath) ? GENERATED_RANK_PENALTY : 1,
+        isDampedDeclaration(filePath) ? AMBIENT_DECLARATION_RANK_PENALTY : 1,
+      )
       * (isLowValue(filePath) ? LOW_VALUE_RANK_PENALTY : 1);
 
     for (const [filePath, group] of fileGroups) {
@@ -3931,6 +3997,7 @@ export class ToolHandler {
           spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id)),
           lowValue: isLowValue(fp),
           generated: isGeneratedCandidate(fp),
+          ambientDeclaration: isAmbientDeclaration(fp),
           penalty: rankPenalty(fp),
           kinds: kindMix(group.nodes),
         });
