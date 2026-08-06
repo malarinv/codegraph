@@ -1045,6 +1045,34 @@ void initialize() { Packet(); }
       expect(outgoing.some((e) => e.kind === 'calls' && e.target === packet!.id)).toBe(false);
     });
 
+    it('resolves a static call through an imported C++ union to its member', async () => {
+      fs.writeFileSync(
+        path.join(tempDir, 'ops.hpp'),
+        `union Ops {
+  static int run() { return 1; }
+};
+`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'main.cpp'),
+        `#include "ops.hpp"
+
+int invoke() { return Ops::run(); }
+`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const invoke = cg.getNodesByKind('function').find((n) => n.name === 'invoke');
+      const run = cg.getNodesByKind('method').find((n) => n.name === 'run');
+      expect(invoke).toBeDefined();
+      expect(run).toBeDefined();
+
+      const outgoing = cg.getOutgoingEdges(invoke!.id);
+      expect(outgoing.some((e) => e.kind === 'calls' && e.target === run!.id)).toBe(true);
+    });
+
     it('records instantiates for C++ stack/brace construction, targeting the class (#1035)', async () => {
       // `Calculator calc(0)` (direct-init) and `Widget w{1, 2}` (brace-init)
       // carry the constructor args directly on the declarator — there's no
