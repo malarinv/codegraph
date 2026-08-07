@@ -54,9 +54,30 @@ okhttp gains one, every repo lands at or under the 25,000 hard ceiling.
 
 ## Open
 
-Nothing. CG-36, the last one, shipped 2026-08-06.
+**CG-38** — agent-named symbols in the tail of a large file never render. On the
+motivating repo, `queueMessage` (line 1087) and `flushQueuedMessages` (1102) in a
+1,414-line file are absent from the response on both prose and symbol-bag
+queries, even when that file wins rank #1 with 67% of the envelope. The response
+returns the `QueuedMessage` *interface* at line 70 — a fuzzy near-match on the
+query token — instead of the function.
 
-Its own measurement is worth carrying forward, because the issue named the wrong
+**Pre-existing, not caused by this epic.** A controlled bisect (index held fixed,
+engine varied across every merge point) shows the pre-epic engine rendering 12
+lines here and CG-36 rendering 463; the symbols render at neither. The epic
+strictly improves the case. An earlier claim that the epic regressed it was
+wrong — it compared runs across two different indexes.
+
+Sharpest lead: an earlier index of the same repo with the `.d.ts` **not** flagged
+generated rendered 581 lines including both symbols on the pre-epic engine, where
+the current flagged index renders 12. A penalty on one file should not shrink an
+unrelated top-ranked file's render; `rankPenalty` scales `fileGraphScore`, which
+moves the relevance gate and reshuffles the admitted set.
+
+This epic's probes measure envelope share, starvation, source totals and file
+counts. **None measures "did the agent-named symbol render"** — which is why this
+survived the whole epic. CG-38 requires the fixture that closes that gap.
+
+CG-36's own measurement is worth carrying forward, because the issue named the wrong
 fix point: both real cases (`query.py`, `RealInterceptorChain.kt`) lost on
 `maxImportance`, **not** on the density tiebreak the issue suspected. Ranking was
 left alone; the never-shrink rule was the lever. Full numbers and the one cost
