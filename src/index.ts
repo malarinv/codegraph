@@ -1576,6 +1576,19 @@ export class CodeGraph {
     return this.queries.generatedPredicateFor(filePaths);
   }
 
+  /**
+   * A `(path) => boolean` ambient-declaration test over a BOUNDED candidate
+   * list: true for a file that declares nothing but types, originates no call
+   * edge, and that nothing in the index depends on — an ambient `.d.ts` of
+   * global shims, vendored typings, module augmentation (CG-28). Structural
+   * rather than extension-based, and deliberately narrow: see
+   * `QueryBuilder.getAmbientDeclarationPathsAmong` for why each condition is
+   * there, in particular why a `types.ts` the codebase imports is NOT flagged.
+   */
+  ambientDeclarationFilePredicate(filePaths: Iterable<string>): (filePath: string) => boolean {
+    return this.queries.ambientDeclarationPredicateFor(filePaths);
+  }
+
   /** How many indexed files are flagged tool-generated. Reported by `status`. */
   getGeneratedFileCount(): number {
     return this.queries.countGeneratedFiles();
