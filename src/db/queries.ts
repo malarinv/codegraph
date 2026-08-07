@@ -1113,11 +1113,28 @@ export class QueryBuilder {
   }
 
   /**
-   * Get nodes by exact name match (uses idx_nodes_name index)
+   * Get nodes by exact name match (uses idx_nodes_name index).
+   *
+   * This is resolution's candidate list, and the ORDER BY is load-bearing for
+   * index correctness, not cosmetic (CG-33). When a reference names a symbol
+   * that several files define and nothing disambiguates them, resolution binds
+   * to the first candidate — so without an ORDER BY the winner was decided by
+   * rowid, i.e. by the order files happened to be WRITTEN. A full index writes
+   * them in scan order; an incremental sync appends each file as it changes, so
+   * the same tree resolved to different edges depending on how the index was
+   * built, and a long-lived synced index drifted away from a rebuild of itself
+   * (measured at 4.3% of distinct edges, mostly `calls`).
+   *
+   * `(file_path, start_line)` is a property of the CODE, so both paths now pick
+   * the same candidate. The sort is paid once per distinct name per resolution
+   * run — ReferenceResolver memoizes this in its nameCache — and the population
+   * is capped by AMBIGUOUS_NAME_CEILING (#999).
    */
   getNodesByName(name: string): Node[] {
     if (!this.stmts.getNodesByName) {
-      this.stmts.getNodesByName = this.db.prepare('SELECT * FROM nodes WHERE name = ?');
+      this.stmts.getNodesByName = this.db.prepare(
+        'SELECT * FROM nodes WHERE name = ? ORDER BY file_path, start_line'
+      );
     }
     const rows = this.stmts.getNodesByName.all(name) as NodeRow[];
     return rows.map(rowToNode);
@@ -2541,6 +2558,99 @@ export class QueryBuilder {
   }
 
   /**
+   * Resolution edges whose TARGET symbol is named one of `names` — the edges a
+   * sync must re-resolve after `names` gained or lost a definition (CG-33).
+   *
+   * Resolution binds a reference to a node whose name matches the reference's
+   * tail, and it picks among ALL same-named definitions project-wide. So adding
+   * or removing one definition of `pct` changes the answer for every `pct(...)`
+   * reference in the repo — including references in files this sync never
+   * touches, whose edges nothing else revisits. Those edges' current target is,
+   * by that same rule, a node named `pct`, which is why the target's name is a
+   * sufficient (and index-backed, via idx_nodes_name) way to find them without
+   * a schema change or a scan of edge metadata.
+   *
+   * Returns the source file/language alongside each edge so the caller can
+   * resurrect it as its original reference. Excludes `provenance='heuristic'`
+   * (synthesized dispatch edges are not resolution output and carry no refName
+   * stamp to resurrect from — deleting one would be a permanent loss).
+   *
+   * Names matching more than `perNameCeiling` edges are skipped entirely, same
+   * rationale and same default as {@link getRetryableFailedReferences}: at that
+   * population the name is generic (`get`, `clear`, …), one definition changing
+   * won't flip most of them, and rebinding an arbitrary subset is both wasted
+   * work and incoherent coverage.
+   */
+  getResolutionEdgesByTargetName(
+    names: string[],
+    perNameCeiling: number = 500
+  ): Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> {
+    if (names.length === 0) return [];
+
+    // Pass 1: per-name edge counts, chunked under the SQLite parameter limit.
+    const keep: string[] = [];
+    for (let i = 0; i < names.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = names.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const counts = this.db
+        .prepare(
+          `SELECT tgt.name AS name, COUNT(*) AS count
+             FROM edges e
+             JOIN nodes tgt ON tgt.id = e.target
+            WHERE tgt.name IN (${placeholders})
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+            GROUP BY tgt.name`
+        )
+        .all(...chunk) as Array<{ name: string; count: number }>;
+      for (const row of counts) {
+        if (row.count <= perNameCeiling) keep.push(row.name);
+      }
+    }
+    if (keep.length === 0) return [];
+
+    // Pass 2: load the surviving edges with the source file context a
+    // resurrection needs.
+    const out: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> = [];
+    for (let i = 0; i < keep.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = keep.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
+             FROM edges e
+             JOIN nodes tgt ON tgt.id = e.target
+             JOIN nodes src ON src.id = e.source
+            WHERE tgt.name IN (${placeholders})
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')`
+        )
+        .all(...chunk) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
+      for (const row of rows) {
+        out.push({
+          ...rowToEdge(row),
+          edgeId: row.id,
+          sourceFilePath: row.source_file_path,
+          sourceLanguage: row.source_language,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Delete edges by primary key — the rebind pass's half of a re-resolution. */
+  deleteEdgesByIds(edgeIds: number[]): number {
+    if (edgeIds.length === 0) return 0;
+    let changed = 0;
+    this.db.transaction(() => {
+      for (let i = 0; i < edgeIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+        const chunk = edgeIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+        const placeholders = chunk.map(() => '?').join(',');
+        changed += this.db.prepare(`DELETE FROM edges WHERE id IN (${placeholders})`).run(...chunk).changes;
+      }
+    })();
+    return changed;
+  }
+
+  /**
    * Distinct node names present in the given files — the symbol names a sync
    * pass uses to look up retryable failed refs after those files changed.
    */
@@ -2556,6 +2666,33 @@ export class QueryBuilder {
       for (const row of rows) names.add(row.name);
     }
     return [...names];
+  }
+
+  /**
+   * Distinct `file\0name` pairs defined by the given files — the shape sync's
+   * definition delta needs (CG-33).
+   *
+   * Deliberately NOT `getNodeNamesByFiles`: a bare name set is taken over the
+   * WHOLE changed batch, so a name that moves between two files in one commit
+   * (or exists in one changed file and is newly added to another) appears on
+   * both sides and cancels out of the symmetric difference — even though a
+   * definition genuinely appeared or vanished and every reference to that name
+   * repo-wide may now bind elsewhere. Keying by file makes each definition its
+   * own fact, so the move is seen as one removal plus one addition.
+   */
+  getNodeNamePairsByFiles(filePaths: string[]): Set<string> {
+    const pairs = new Set<string>();
+    if (filePaths.length === 0) return pairs;
+    for (let i = 0; i < filePaths.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = filePaths.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT DISTINCT file_path, name FROM nodes WHERE file_path IN (${placeholders})`)
+        .all(...chunk) as Array<{ file_path: string; name: string }>;
+      // NUL-joined: a path or a symbol name can contain a space, never a NUL.
+      for (const row of rows) pairs.add(`${row.file_path}\0${row.name}`);
+    }
+    return pairs;
   }
 
   // ===========================================================================
