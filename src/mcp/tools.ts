@@ -2542,6 +2542,14 @@ export class ToolHandler {
       // fed only to the dynamic-dispatch-links scan below.
       const dynNamed = new Map<string, Node>();
       const DYN_KINDS = new Set(['constant', 'variable', 'field', 'property']);
+      // Nodes resolved from a SHAPE-PRECISE token (camelCase / PascalCase /
+      // snake_case / qualified) — the same test the gather path uses. It is the
+      // difference between "the agent named this symbol" and "an ordinary English
+      // word in a prose question collided with a callable", and it is what makes
+      // the narrative-less return below safe (see `identityOnly`).
+      const isPreciseToken = (x: string) =>
+        /[._$]|::|\//.test(x) || /[a-z][A-Z]/.test(x) || /^[A-Z]/.test(x);
+      const preciseNamedIds = new Set<string>();
       const hasHeuristicEdge = (id: string): boolean =>
         [...cg.getCallers(id), ...cg.getCallees(id)].some(({ edge }) => edge.provenance === 'heuristic');
       for (const t of tokens) {
@@ -2560,9 +2568,11 @@ export class ToolHandler {
             });
         const kept = pick.slice(0, 6);
         tokenNodes.set(t, kept.map((n) => n.id));
+        const precise = isPreciseToken(t);
         for (const n of kept) {
           named.set(n.id, n);
           if (specific) uniqueNamedNodeIds.add(n.id);
+          if (precise) preciseNamedIds.add(n.id);
         }
         // Same token, non-callable synth endpoints (capped, precision-gated on an
         // actual heuristic edge so plain config constants never qualify).
@@ -2575,6 +2585,7 @@ export class ToolHandler {
             if (CALLABLE.has(n.kind) || !DYN_KINDS.has(n.kind) || dynNamed.has(n.id)) continue;
             if (hasHeuristicEdge(n.id)) {
               dynNamed.set(n.id, n);
+              if (precise) preciseNamedIds.add(n.id);
               tokenDyn++;
             }
             if (dynNamed.size >= 12 || tokenDyn >= 4) break;
@@ -2606,6 +2617,35 @@ export class ToolHandler {
         }
         return synthLines;
       };
+      /**
+       * No narrative to print — but the agent still NAMED symbols, and their
+       * identity is a separate output from the prose (CG-38).
+       *
+       * `namedNodeIds` is not decoration: downstream it injects the named def into
+       * the file's cluster ranges and ranks it importance 9, which is the whole
+       * mechanism behind "a symbol the agent named renders" (the assembler's
+       * named-def injection). Returning EMPTY here threw that away whenever the
+       * named symbols happened not to form a call chain — two sibling closures in
+       * one factory (`queueMessage` / `flushQueuedMessages`, neither calling the
+       * other) produce no chain, no synth hop and no dispatch boundary, so BOTH
+       * defs lost importance 9 and the file rendered from its head instead: the
+       * agent got the `QueuedMessage` interface at L70 and had to Read the file
+       * for the functions at L1087/L1102 it had asked for by name.
+       *
+       * Restricted to SHAPE-PRECISE tokens. With a narrative present the prose is
+       * itself corroboration that the resolution was right, so that path keeps
+       * every named id as before; with nothing corroborating it, only an
+       * unambiguous symbol reference may promote — an English word in a prose
+       * question that happens to exact-match a callable must not earn importance 9.
+       * Same distinction, same test, as the gather path's `isPreciseToken`.
+       */
+      const identityOnly = () => (preciseNamedIds.size === 0 ? EMPTY : {
+        text: '',
+        pathNodeIds: new Set<string>(),
+        namedNodeIds: new Set<string>(preciseNamedIds),
+        uniqueNamedNodeIds: new Set<string>([...uniqueNamedNodeIds].filter((id) => preciseNamedIds.has(id))),
+        spineCallSites: new Map<string, number>(),
+      });
       if (named.size < 2) {
         // <2 CALLABLES resolved. Two recoveries before giving up: (1) synthesized
         // edges among named CONSTANT/VARIABLE endpoints — RTK thunk→thunk is
@@ -2614,7 +2654,7 @@ export class ToolHandler {
         // dynamic-dispatch site that EXPLAINS a half-connected flow.
         const synthLines = collectSynthLinks(null);
         const boundaries = named.size === 0 ? '' : (this.buildDynamicBoundaries(cg, [...named.values()], named) || '');
-        if (synthLines.length === 0 && !boundaries) return EMPTY;
+        if (synthLines.length === 0 && !boundaries) return identityOnly();
         const out: string[] = [];
         if (synthLines.length) out.push(
           '**Dynamic-dispatch links among your symbols**',
@@ -2729,7 +2769,7 @@ export class ToolHandler {
         hasMain ? (e: Edge) => pathIds.has(e.source) && pathIds.has(e.target) : null
       );
 
-      if (!hasMain && synthLines.length === 0 && !boundaryText && !polyText) return EMPTY;
+      if (!hasMain && synthLines.length === 0 && !boundaryText && !polyText) return identityOnly();
       const out: string[] = [];
       if (hasMain) {
         out.push('**Flow (call path among the symbols you queried)**', '');
@@ -4996,6 +5036,19 @@ export class ToolHandler {
        * keeps every rule that matters: only whole symbol ranges are emitted, so a
        * body is never cut, and the members are chosen by the same importance the
        * cluster ranking uses. Returns null when nothing needed shrinking.
+       *
+       * `sizeOf` measures the RAW source span, while the render adds
+       * `contextPadding` around every block and a line-number prefix to every
+       * line — so this over-keeps (measured ~60% under on a 1,414-line file:
+       * 16.5K accounted, 26.3K rendered). That is deliberate, not an oversight:
+       * `bound()` clamps the result to the ceiling exactly, so the slack costs no
+       * bytes, and making the estimate exact instead measured WORSE — it stops at
+       * the last member that fits whole, and the released bytes carry forward to
+       * lower-ranked files (payroll-go's `runPayrollCycleAll` body lost its
+       * `s.store.Upsert` call to a rank-5 file). What the slack must NOT do is
+       * decide WHICH members survive: that is the ceiling trim's job, and CG-38 is
+       * why that trim now protects the named spans instead of cutting in source
+       * order. See `docs/benchmarks/explore-tail-render-cg38.md`.
        */
       const shrinkCluster = (c: ExploreCluster, cap: number): SectionPart[] | null => {
         if (c.members.length < 2) return null;
@@ -5088,45 +5141,81 @@ export class ToolHandler {
        * it or re-send it. Below that floor the part is simply dropped — unless
        * nothing has been emitted at all, where the floor wins over the ceiling
        * because an empty section is the one outcome worse than an oversize one.
+       *
+       * `focusLines` are the lines this trim must not lose: the spine's next-hop
+       * call site (CG-30) and every definition the agent NAMED inside the cluster
+       * (CG-38). The head fill is source-ordered, so a named def in the TAIL of a
+       * large file is otherwise always the first thing an over-ceiling render
+       * drops — the one span the agent asked for by name, cut in favour of
+       * head-of-file filler it did not ask for. The full-ceiling fill is tried
+       * FIRST and the 60% hold-back applies only when a focus line is actually
+       * left uncovered, so a cluster whose head already reaches its focus keeps
+       * the whole ceiling for source.
        */
       const windowToCeiling = (
         parts: ReadonlyArray<SectionPart>,
         ceiling: number,
-        focusLine?: number,
+        focusLines: ReadonlyArray<number> = [],
       ): SectionPart[] => {
-        const emit: ExploreLineRange[] = [];
         const inParts = (line: number) =>
           parts.some((p) => line >= p.range.start && line <= p.range.end);
-        const needFocus = typeof focusLine === 'number' && focusLine > 0 && inParts(focusLine);
-        // Hold room back for the call site so the head window can't eat all of it.
-        const headRoom = needFocus ? Math.floor(ceiling * 0.6) : ceiling;
-        let used = 0;
-        for (const p of parts) {
-          const join = emit.length > 0 ? GAP_MARKER.length : 0;
-          if (used + join + p.text.length <= headRoom) {
-            emit.push(p.range);
-            used += join + p.text.length;
-            continue;
+        const focus = [...new Set(focusLines)]
+          .filter((l) => typeof l === 'number' && l > 0 && inParts(l))
+          .sort((a, b) => a - b);
+        /** Source-ordered fill of whole parts, the overrunning one cut to a head window. */
+        const fill = (room: number): { emit: ExploreLineRange[]; used: number } => {
+          const emit: ExploreLineRange[] = [];
+          let used = 0;
+          for (const p of parts) {
+            const join = emit.length > 0 ? GAP_MARKER.length : 0;
+            if (used + join + p.text.length <= room) {
+              emit.push(p.range);
+              used += join + p.text.length;
+              continue;
+            }
+            const first = emit.length === 0;
+            const win = headWindowOf(
+              p.range, Math.max(0, room - used - join), first ? MIN_WINDOW_LINES : 0);
+            if (win && (first || win.end - win.start + 1 >= MIN_WINDOW_LINES)) {
+              emit.push(win);
+              used += join + renderSpan(win).length;
+            }
+            break;
           }
-          const first = emit.length === 0;
-          const win = headWindowOf(
-            p.range, Math.max(0, headRoom - used - join), first ? MIN_WINDOW_LINES : 0);
-          if (win && (first || win.end - win.start + 1 >= MIN_WINDOW_LINES)) {
-            emit.push(win);
-            used += join + renderSpan(win).length;
-          }
-          break;
+          return { emit, used };
+        };
+        let { emit, used } = fill(ceiling);
+        const reached = () => (emit.length ? emit[emit.length - 1]!.end : 0);
+        if (focus.some((l) => l > reached())) {
+          // Hold room back for the focus windows so the head can't eat all of it.
+          ({ emit, used } = fill(Math.floor(ceiling * 0.6)));
         }
-        const last = emit[emit.length - 1];
-        if (needFocus && (!last || focusLine! > last.end)) {
-          const host = parts.find((p) => focusLine! >= p.range.start && focusLine! <= p.range.end)!;
-          const lo = Math.max(host.range.start, focusLine! - SPINE_WINDOW, last ? last.end + 1 : 0);
-          const hi = Math.min(host.range.end, focusLine! + SPINE_WINDOW);
-          const win = centeredWindowOf(
-            focusLine!, lo, hi, Math.max(0, ceiling - used - GAP_MARKER.length));
+        // What is left is SPLIT between the uncovered focus lines rather than
+        // handed to them in order. Greedy-in-source-order reproduces the very bug
+        // this guards: on a prose query resolving four focus lines, the two
+        // earliest took the whole reserve and `flushQueuedMessages` at L1102 —
+        // named in the question — was dropped again. A skipped or undersized
+        // window returns its share to the pool for the ones after it.
+        let covered = reached();
+        let room = Math.max(0, ceiling - used);
+        const pending = focus.filter((l) => l > covered);
+        for (let i = 0; i < pending.length; i++) {
+          const line = pending[i]!;
+          if (line <= covered) continue; // an earlier window already reached it
+          const share = Math.floor(room / (pending.length - i)) - GAP_MARKER.length;
+          if (share <= 0) continue;
+          const host = parts.find((p) => line >= p.range.start && line <= p.range.end)!;
+          const lo = Math.max(host.range.start, line - SPINE_WINDOW, covered + 1);
+          const hi = Math.min(host.range.end, line + SPINE_WINDOW);
+          const win = centeredWindowOf(line, lo, hi, share);
           // Same sliver floor as the head window — a two-line peek at the call
           // site teaches the next call's dedup to shred the block around it.
-          if (win && win.end - win.start + 1 >= MIN_WINDOW_LINES) emit.push(win);
+          if (!win || win.end - win.start + 1 < MIN_WINDOW_LINES) continue;
+          emit.push(win);
+          const cost = GAP_MARKER.length + renderSpan(win).length;
+          used += cost;
+          room -= cost;
+          covered = win.end;
         }
         // Never empty: a section with no source sends the agent to Read.
         if (emit.length === 0 && parts.length > 0) {
@@ -5136,6 +5225,24 @@ export class ToolHandler {
         return emit
           .sort((a, b) => a.start - b.start)
           .map((r) => ({ range: r, text: renderSpan(r) }));
+      };
+
+      /**
+       * The lines a ceiling trim of this cluster must not lose: the spine's
+       * next-hop call site, and the definition line of every member the agent
+       * NAMED or that is a query entry point (importance >= 9). Capped, because
+       * each one costs a window and too many turn a section into confetti; the
+       * most important come first, source order within a tier so the windows read
+       * top-down.
+       */
+      const MAX_FOCUS_LINES = 6;
+      const focusLinesOf = (c: ExploreCluster): number[] => {
+        const named = c.members
+          .filter((m) => m.importance >= 9)
+          .sort((a, b) => b.importance - a.importance || a.start - b.start)
+          .slice(0, MAX_FOCUS_LINES)
+          .map((m) => m.start);
+        return c.spineCallLine ? [c.spineCallLine, ...named] : named;
       };
 
       /**
@@ -5165,7 +5272,7 @@ export class ToolHandler {
           if (!Number.isFinite(ceiling) || sectionText(r.parts).length <= ceiling) return r;
           // Windows are subsets of spans dedupeSpans already cleared, so the record
           // still only ever claims source that was actually sent.
-          const parts = windowToCeiling(r.parts, ceiling, c.spineCallLine);
+          const parts = windowToCeiling(r.parts, ceiling, focusLinesOf(c));
           return { parts, covered: r.covered, shrunk: true };
         };
         if (sectionText(base.parts).length <= cap) {
