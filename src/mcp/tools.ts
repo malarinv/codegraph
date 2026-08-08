@@ -118,7 +118,7 @@ const RUST_PATH_PREFIXES = new Set(['crate', 'super', 'self']);
  * multi-thousand-character wall of source that bloats the agent's context.
  */
 const CONTAINER_NODE_KINDS = new Set<NodeKind>([
-  'class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
+  'class', 'struct', 'union', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
 ]);
 
 /** Last `::` / `.` / `/`-separated segment of a qualified symbol. */
@@ -343,7 +343,7 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
  */
 export const RELEVANCE_KIND_WEIGHT: Readonly<Record<string, number>> = {
   // Callables and types: the answer lives in one of these.
-  function: 1, method: 1, class: 1, struct: 1, interface: 1, trait: 1,
+  function: 1, method: 1, class: 1, struct: 1, union: 1, interface: 1, trait: 1,
   protocol: 1, component: 1, route: 1, enum: 1, type_alias: 1, constructor: 1,
   // Containers: real structure, but a whole namespace/module matching a term is
   // a coarser signal than a callable matching it.
@@ -3025,7 +3025,7 @@ export class ToolHandler {
     const ROOT_CAP = 5; // only the symbols the query actually targeted
     const FILE_CAP = 4; // caller files listed per symbol before "+N more"
     const MEANINGFUL = new Set<string>([
-      'function', 'method', 'class', 'interface', 'struct', 'trait', 'protocol',
+      'function', 'method', 'class', 'interface', 'struct', 'union', 'trait', 'protocol',
       'enum', 'type_alias', 'component', 'constant', 'variable', 'property', 'field',
     ]);
     const rel = (p: string) => p.replace(/\\/g, '/');
@@ -3568,7 +3568,7 @@ export class ToolHandler {
     // displaces a flow-central file. Bounded: only the few named seeds, only the
     // types in their signatures.
     const CALLABLE_KINDS = new Set(['method', 'function', 'component', 'constructor']);
-    const TYPE_KINDS = new Set(['class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'type_alias']);
+    const TYPE_KINDS = new Set(['class', 'struct', 'union', 'interface', 'trait', 'protocol', 'enum', 'type_alias']);
     const SIG_EDGE = new Set(['references', 'type_of', 'returns']);
     const changeSurfaceCandidates: Node[] = [];
     const seenChangeSurface = new Set<string>();
@@ -4103,7 +4103,7 @@ export class ToolHandler {
     const superMany = new Map<string, boolean>();
     const definesPolymorphicSupertype = (nodes: Node[]): boolean => {
       for (const n of nodes) {
-        if (n.kind !== 'class' && n.kind !== 'interface' && n.kind !== 'struct'
+        if (n.kind !== 'class' && n.kind !== 'interface' && n.kind !== 'struct' && n.kind !== 'union'
             && n.kind !== 'trait' && n.kind !== 'protocol' && n.kind !== 'type_alias') continue;
         let many = superMany.get(n.id);
         if (many === undefined) {
@@ -4854,7 +4854,7 @@ export class ToolHandler {
       // query actually asked about (#185 follow-up — Session.swift in
       // Alamofire is the canonical case: the `Session` class spans ~1,400
       // lines). We want the granular symbols inside, not the envelope.
-      const ENVELOPE_KINDS = new Set(['file', 'module', 'class', 'struct', 'interface', 'enum', 'namespace', 'protocol', 'trait', 'component']);
+      const ENVELOPE_KINDS = new Set(['file', 'module', 'class', 'struct', 'union', 'interface', 'enum', 'namespace', 'protocol', 'trait', 'component']);
       // Cluster from this file's gathered nodes PLUS any callable the agent NAMED that
       // lives here. Explore's relevance gather can miss a named method def in a huge
       // non-sibling file — Django's query.py is 3,040 lines and `_fetch_all` (L2237)
