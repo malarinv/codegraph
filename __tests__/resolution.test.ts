@@ -1073,6 +1073,52 @@ int invoke() { return Ops::run(); }
       expect(outgoing.some((e) => e.kind === 'calls' && e.target === run!.id)).toBe(true);
     });
 
+    it('bridges a Rust trait method to a union implementor (interface-impl)', async () => {
+      // A Rust union can `impl Trait` exactly as a struct can. Trait-dispatch
+      // synthesis enumerates concrete kinds explicitly, so a union implementor
+      // only becomes a candidate if `union` is in that list. Making unions
+      // first-class nodes is not enough on its own: without this, `Reg` has an
+      // `implements` edge and is still silently dropped from the fan-out, so
+      // "who implements this trait" answers wrongly rather than incompletely
+      // — the struct beside it resolves and the union does not (#1515).
+      fs.writeFileSync(
+        path.join(tempDir, 'lib.rs'),
+        `pub union Reg { pub raw: u32 }
+pub struct Ctl { pub n: u32 }
+
+pub trait Describe { fn describe(&self) -> String; }
+
+impl Describe for Reg { fn describe(&self) -> String { "reg".into() } }
+impl Describe for Ctl { fn describe(&self) -> String { "ctl".into() } }
+`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+
+      const methods = cg.getNodesByKind('method');
+      const traitMethod = methods.find((n) => n.qualifiedName === 'Describe::describe');
+      const unionImpl = methods.find((n) => n.qualifiedName === 'Reg::describe');
+      const structImpl = methods.find((n) => n.qualifiedName === 'Ctl::describe');
+      expect(traitMethod, 'trait method should be in the graph').toBeDefined();
+      expect(unionImpl, 'union impl method should be in the graph').toBeDefined();
+      expect(structImpl, 'struct impl method should be in the graph').toBeDefined();
+
+      const synth = cg
+        .getOutgoingEdges(traitMethod!.id)
+        .filter((e) => e.kind === 'calls' && e.provenance === 'heuristic');
+      const targets = new Set(synth.map((e) => e.target));
+
+      // The struct implementor bridged before unions were nodes at all; it is
+      // the control that proves the synthesizer ran for this trait.
+      expect(targets.has(structImpl!.id), 'struct implementor should bridge').toBe(true);
+      expect(targets.has(unionImpl!.id), 'union implementor should bridge').toBe(true);
+
+      const unionEdge = synth.find((e) => e.target === unionImpl!.id);
+      expect(
+        (unionEdge!.metadata as { synthesizedBy?: string } | undefined)?.synthesizedBy
+      ).toBe('interface-impl');
+    });
+
     it('records instantiates for C++ stack/brace construction, targeting the class (#1035)', async () => {
       // `Calculator calc(0)` (direct-init) and `Widget w{1, 2}` (brace-init)
       // carry the constructor args directly on the declarator — there's no
