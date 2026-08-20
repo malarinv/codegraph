@@ -1714,7 +1714,7 @@ export class ExtractionOrchestrator {
     const inFlight = new Set<Promise<void>>();
     const completed = new Map<number,
       | { ok: true; filePath: string; content: string; stats: fs.Stats; result: ExtractionResult }
-      | { ok: false; filePath: string; err: unknown }>();
+      | { ok: false; filePath: string; content: string; stats: fs.Stats; err: unknown }>();
     let nextSeq = 0;       // file-order sequence assigned at dispatch
     let nextToStore = 0;   // cursor: next sequence to commit
     let aborted = false;
@@ -1742,27 +1742,25 @@ export class ExtractionOrchestrator {
       // Store: on the writer thread when active (fresh DB — bundles applied
       // in the same file order this chain dispatches them), else on the main
       // thread (SQLite connections are per-thread).
-      if (nodeCount > 0 || result.errors.length === 0) {
-        const language = detectLanguage(filePath, content, overrides);
-        if (storeWriter) {
-          if (result.kernelBuffers) {
-            // Buffers go to the writer as-is; the worker decodes + finalizes.
-            // The main thread's only per-file work stays O(1) + the content hash.
-            storeWriter.send({
-              kernel: true,
-              filePath,
-              language,
-              buffers: result.kernelBuffers,
-              file: this.buildFileRecord(filePath, content, language, stats, nodeCount, result.errors),
-            });
-          } else {
-            storeWriter.send(this.buildFreshStoreBundle(filePath, content, language, stats, result));
-          }
-          await storeWriter.waitBelow(STORE_WRITER_WINDOW);
+      const language = detectLanguage(filePath, content, overrides);
+      if (storeWriter) {
+        if (result.kernelBuffers) {
+          // Buffers go to the writer as-is; the worker decodes + finalizes.
+          // The main thread's only per-file work stays O(1) + the content hash.
+          storeWriter.send({
+            kernel: true,
+            filePath,
+            language,
+            buffers: result.kernelBuffers,
+            file: this.buildFileRecord(filePath, content, language, stats, nodeCount, result.errors),
+          });
         } else {
-          const materialized = materializeKernelResult(result, filePath, language);
-          await this.storeExtractionResult(filePath, content, language, stats, materialized, commitYield);
+          storeWriter.send(this.buildFreshStoreBundle(filePath, content, language, stats, result));
         }
+        await storeWriter.waitBelow(STORE_WRITER_WINDOW);
+      } else {
+        const materialized = materializeKernelResult(result, filePath, language);
+        await this.storeExtractionResult(filePath, content, language, stats, materialized, commitYield);
       }
 
       if (result.errors.length > 0) {
@@ -1793,16 +1791,19 @@ export class ExtractionOrchestrator {
       onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
     };
 
-    const recordParseFailure = (filePath: string, err: unknown): void => {
-      processed++;
-      filesErrored++;
-      errors.push({
-        message: err instanceof Error ? err.message : String(err),
-        filePath,
-        severity: 'error',
-        code: 'parse_error',
+    const recordParseFailure = async (filePath: string, content: string, stats: fs.Stats, err: unknown): Promise<void> => {
+      await storeResult(filePath, content, stats, {
+        nodes: [],
+        edges: [],
+        unresolvedReferences: [],
+        errors: [{
+          message: err instanceof Error ? err.message : String(err),
+          filePath,
+          severity: 'error',
+          code: 'parse_error',
+        }],
+        durationMs: 0,
       });
-      onProgress?.({ phase: 'parsing', current: processed, total });
     };
 
     // Commit buffered parses to the DB in file order, advancing the cursor over
@@ -1825,7 +1826,7 @@ export class ExtractionOrchestrator {
             completed.delete(nextToStore);
             nextToStore++;
             if (item.ok) await storeResult(item.filePath, item.content, item.stats, item.result);
-            else recordParseFailure(item.filePath, item.err);
+            else await recordParseFailure(item.filePath, item.content, item.stats, item.err);
           }
         } catch (err) {
           flushError = err;
@@ -1844,7 +1845,7 @@ export class ExtractionOrchestrator {
           const result = await parseFile(filePath, content);
           completed.set(seq, { ok: true, filePath, content, stats, result });
         } catch (parseErr) {
-          completed.set(seq, { ok: false, filePath, err: parseErr });
+          completed.set(seq, { ok: false, filePath, content, stats, err: parseErr });
         }
         flushOrdered();
       })();
@@ -1915,15 +1916,18 @@ export class ExtractionOrchestrator {
         // useful symbols. The single-file extractFile path already enforces
         // this; the bulk path used to silently skip the check.
         if (stats.size > MAX_FILE_SIZE) {
-          processed++;
-          filesSkipped++;
-          errors.push({
-            message: `File exceeds max size (${stats.size} > ${MAX_FILE_SIZE})`,
-            filePath,
-            severity: 'warning',
-            code: 'size_exceeded',
+          await storeResult(filePath, content, stats, {
+            nodes: [],
+            edges: [],
+            unresolvedReferences: [],
+            errors: [{
+              message: `File exceeds max size (${stats.size} > ${MAX_FILE_SIZE})`,
+              filePath,
+              severity: 'warning',
+              code: 'size_exceeded',
+            }],
+            durationMs: 0,
           });
-          onProgress?.({ phase: 'parsing', current: processed, total });
           continue;
         }
 
@@ -2242,9 +2246,11 @@ export class ExtractionOrchestrator {
       };
     }
 
+    const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
+
     // Check file size
     if (stats.size > MAX_FILE_SIZE) {
-      return {
+      const result: ExtractionResult = {
         nodes: [],
         edges: [],
         unresolvedReferences: [],
@@ -2258,10 +2264,11 @@ export class ExtractionOrchestrator {
         ],
         durationMs: 0,
       };
+      await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
+      return result;
     }
 
     // Detect language (honoring the project's codegraph.json extension overrides)
-    const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
     if (!isLanguageSupported(language)) {
       return {
         nodes: [],
@@ -2279,9 +2286,7 @@ export class ExtractionOrchestrator {
     const result = extractFromSource(relativePath, content, language, frameworkNames);
 
     // Store in database
-    if (result.nodes.length > 0 || result.errors.length === 0) {
-      await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
-    }
+    await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
 
     return result;
   }
@@ -2303,7 +2308,15 @@ export class ExtractionOrchestrator {
    */
   private healZeroNodeRows(): void {
     for (const f of this.queries.getAllFiles()) {
-      if (f.nodeCount === 0 && !isFileLevelOnlyLanguage(f.language)) {
+      // A zero-node row WITH recorded errors is a deliberate skip marker
+      // (#1557: oversized / repeatedly-unparseable files are persisted with
+      // their reason so syncs stop retrying them) — leave those alone. The
+      // #1541 wipe rows are the error-FREE zero-node rows.
+      if (
+        f.nodeCount === 0 &&
+        !isFileLevelOnlyLanguage(f.language) &&
+        (f.errors === undefined || f.errors.length === 0)
+      ) {
         this.queries.deleteFile(f.path);
       }
     }
@@ -2332,10 +2345,20 @@ export class ExtractionOrchestrator {
     const STORE_CHUNK = 2000;
     const contentHash = hashContent(content);
 
-    // Check if file already exists and hasn't changed
+    // Check if file already exists and hasn't changed. A skip/failure MARKER
+    // row (zero nodes + recorded errors, #1557) never blocks a store carrying
+    // real content: markers are written BEFORE the retry pass under the same
+    // content hash, so treating them as "no changes" would silently discard a
+    // successful retry's symbols — a permanent empty file presented as
+    // recovered (the #1541 wipe, reintroduced through the marker path).
     const existingFile = this.queries.getFileByPath(filePath);
     if (existingFile && existingFile.contentHash === contentHash) {
-      return; // No changes
+      const existingIsMarker =
+        existingFile.nodeCount === 0 && (existingFile.errors?.length ?? 0) > 0;
+      const incomingHasContent = result.nodes.length > 0;
+      if (!existingIsMarker || !incomingHasContent) {
+        return; // No changes
+      }
     }
 
     // Re-decided on every re-index of a changed file, so a banner added (or
