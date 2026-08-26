@@ -10366,7 +10366,81 @@ helper() -> ok.
       const ns = result.nodes.find((n) => n.kind === 'namespace');
       expect(ns?.name).toBe('my_server');
       const start = result.nodes.find((n) => n.kind === 'function' && n.name === 'start');
-      expect(start?.qualifiedName).toBe('my_server::start');
+      // Arity is part of an Erlang function's identity — qualifiedName carries it (#1610).
+      expect(start?.qualifiedName).toBe('my_server::start/0');
+    });
+
+    it('should give same-name different-arity functions separate arity-qualified nodes (#1610)', () => {
+      const code = `-module(gap).
+-export([f/1, f/2]).
+
+f(X)    -> X + 1.
+f(X, Y) -> X + Y.
+`;
+      const result = extractFromSource('src/gap.erl', code);
+      const fns = result.nodes.filter((n) => n.kind === 'function' && n.name === 'f');
+      expect(fns).toHaveLength(2);
+      expect(fns.map((n) => n.qualifiedName).sort()).toEqual(['gap::f/1', 'gap::f/2']);
+      const f1 = fns.find((n) => n.qualifiedName === 'gap::f/1')!;
+      const f2 = fns.find((n) => n.qualifiedName === 'gap::f/2')!;
+      expect([f1.startLine, f1.endLine]).toEqual([4, 4]);
+      expect([f2.startLine, f2.endLine]).toEqual([5, 5]);
+      expect(f1.signature).toBe('f(X)');
+      expect(f2.signature).toBe('f(X, Y)');
+    });
+
+    it('should split interleaved same-name defs by arity with distinct qualified names', () => {
+      const code = `-module(inter).
+
+f(X)    -> X + 1;
+f(Y)    -> Y.
+g()     -> ok.
+f(X, Y) -> X + Y.
+`;
+      const result = extractFromSource('src/inter.erl', code);
+      const fs = result.nodes.filter((n) => n.kind === 'function' && n.name === 'f');
+      expect(fs).toHaveLength(2);
+      expect(fs.map((n) => n.qualifiedName).sort()).toEqual(['inter::f/1', 'inter::f/2']);
+      // Clauses of the same arity still merge into one span.
+      const f1 = fs.find((n) => n.qualifiedName === 'inter::f/1')!;
+      expect([f1.startLine, f1.endLine]).toEqual([3, 4]);
+    });
+
+    it('should flag exported per arity (#1610)', () => {
+      const code = `-module(m).
+-export([f/1]).
+
+f(X) -> X.
+f(X, Y) -> {X, Y}.
+`;
+      const result = extractFromSource('src/m.erl', code);
+      expect(result.nodes.find((n) => n.qualifiedName === 'm::f/1')?.isExported).toBe(true);
+      expect(result.nodes.find((n) => n.qualifiedName === 'm::f/2')?.isExported).toBe(false);
+    });
+
+    it('should attach a -spec sitting between two arities to the arity it names (#1610)', () => {
+      const code = `-module(deleg).
+-export([header/2, header/3]).
+
+header(Name, Req) ->
+    header(Name, Req, undefined).
+
+-spec header(binary(), map(), any()) -> any().
+header(Name, Headers, Default) ->
+    maps:get(Name, Headers, Default).
+`;
+      const result = extractFromSource('src/deleg.erl', code);
+      const h2 = result.nodes.find((n) => n.qualifiedName === 'deleg::header/2')!;
+      const h3 = result.nodes.find((n) => n.qualifiedName === 'deleg::header/3')!;
+      expect(h2.signature).toBe('header(Name, Req)');
+      expect(h3.signature).toBe('-spec header(binary(), map(), any()) -> any().');
+      expect([h2.startLine, h2.endLine]).toEqual([4, 5]);
+      expect(h3.startLine).toBe(8);
+      // The delegation call carries the callee's arity — no more self-loop.
+      const calls = result.unresolvedReferences
+        .filter((r) => r.referenceKind === 'calls')
+        .map((r) => r.referenceName);
+      expect(calls).toContain('header/3');
     });
 
     it('should flag exported functions and honor -compile(export_all)', () => {
@@ -10501,11 +10575,31 @@ prepare(X) -> X.
 `;
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
-      expect(calls).toContain('prepare');
-      // `mod:fn(...)` is emitted as `mod::fn` — the same shape the module
-      // namespace gives every function's qualifiedName, so it resolves via
-      // the qualified-name matcher.
-      expect(calls).toContain('other_mod::process');
+      expect(calls).toContain('prepare/1');
+      // `mod:fn(...)` is emitted as `mod::fn/arity` — the same shape the
+      // module namespace + arity suffix gives every function's qualifiedName,
+      // so it resolves via the qualified-name matcher (#1610).
+      expect(calls).toContain('other_mod::process/1');
+    });
+
+    it('should carry written arity on fun references and static MFA lists (#1610)', () => {
+      const code = `-module(m).
+-export([go/0]).
+
+go() ->
+    lists:map(fun bump/1, [1]),
+    Prod = fun other_mod:produce/2,
+    proc_lib:spawn_link(?MODULE, work, [a, b]),
+    Prod.
+
+bump(X) -> X + 1.
+work(_A, _B) -> ok.
+`;
+      const result = extractFromSource('src/m.erl', code);
+      const refs = result.unresolvedReferences;
+      expect(refs.some((r) => r.referenceKind === 'references' && r.referenceName === 'bump/1')).toBe(true);
+      expect(refs.some((r) => r.referenceKind === 'references' && r.referenceName === 'other_mod::produce/2')).toBe(true);
+      expect(refs.some((r) => r.referenceKind === 'calls' && r.referenceName === 'work/2')).toBe(true);
     });
 
     it('should not emit calls for dynamic dispatch (var module / var fun)', () => {
@@ -10518,9 +10612,9 @@ run(Mod, F) ->
 `;
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
-      expect(calls).not.toContain('handle');
-      expect(calls).not.toContain('Mod::handle');
-      expect(calls).not.toContain('F');
+      expect(calls.some((c) => c.startsWith('handle'))).toBe(false);
+      expect(calls.some((c) => c.startsWith('Mod::'))).toBe(false);
+      expect(calls.some((c) => c === 'F' || c.startsWith('F/'))).toBe(false);
     });
 
     it('should connect gen_server self-calls to the module handlers', () => {
@@ -10548,9 +10642,10 @@ handle_cast({put, K, V}, S) -> {noreply, maps:put(K, V, S)}.
       const result = extractFromSource('src/kv_store.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
       // ?SERVER (defined as ?MODULE), ?MODULE, and the module's own atom all
-      // count as self — public API wrappers connect to their handlers.
-      expect(calls.filter((c) => c === 'kv_store::handle_call')).toHaveLength(2);
-      expect(calls).toContain('kv_store::handle_cast');
+      // count as self — public API wrappers connect to their handlers, at
+      // OTP's fixed handler arities (#1610).
+      expect(calls.filter((c) => c === 'kv_store::handle_call/3')).toHaveLength(2);
+      expect(calls).toContain('kv_store::handle_cast/2');
     });
 
     it('should connect gen_server calls to a registered-name module, directly or via an atom macro', () => {
@@ -10570,8 +10665,8 @@ evict(Key) ->
       // OTP's {local, ?MODULE} convention names a server after its module —
       // a cross-module registered name targets that module's handlers. A name
       // matching no module simply never resolves downstream.
-      expect(calls).toContain('kv_store::handle_call');
-      expect(calls).toContain('kv_store::handle_cast');
+      expect(calls).toContain('kv_store::handle_call/3');
+      expect(calls).toContain('kv_store::handle_cast/2');
     });
 
     it('should not connect gen_server calls with dynamic targets', () => {
@@ -10604,10 +10699,10 @@ monitor_loop(_P) -> ok.
 `;
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
-      expect(calls).toContain('request_process'); // ?MODULE → bare, same-file resolution
-      expect(calls).toContain('monitor_loop');
-      expect(calls).toContain('other_mod::handle');
-      expect(calls).toContain('other_mod::tick');
+      expect(calls).toContain('request_process/2'); // ?MODULE → bare-with-arity, same-file resolution
+      expect(calls).toContain('monitor_loop/1');
+      expect(calls).toContain('other_mod::handle/1');
+      expect(calls).toContain('other_mod::tick/0');
     });
 
     it('should stay silent on dynamic spawn/apply (var module, fun value, or plain fun)', () => {
@@ -10624,8 +10719,8 @@ helper() -> ok.
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
       // The fun body's call is still walked; no phantom MFA targets appear.
-      expect(calls).toContain('helper');
-      expect(calls.filter((c) => c !== 'spawn' && c !== 'apply' && c !== 'helper')).toHaveLength(0);
+      expect(calls).toContain('helper/0');
+      expect(calls.filter((c) => !['spawn/3', 'spawn/1', 'apply/3', 'helper/0'].includes(c))).toHaveLength(0);
     });
 
     it('should treat ?MODULE:fn calls as local calls', () => {
@@ -10639,7 +10734,7 @@ work() -> ok.
 `;
       const result = extractFromSource('src/m.erl', code);
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
-      expect(calls).toContain('work');
+      expect(calls).toContain('work/0');
     });
 
     it('should capture fun name/arity values as function references', () => {
@@ -10654,8 +10749,8 @@ notify(_P) -> ok.
 `;
       const result = extractFromSource('src/m.erl', code);
       const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references').map((r) => r.referenceName);
-      expect(refs).toContain('notify');
-      expect(refs).toContain('m::notify');
+      expect(refs).toContain('notify/1');
+      expect(refs).toContain('m::notify/1');
     });
 
     it('should reference records used in bodies and argument patterns', () => {
@@ -10691,8 +10786,8 @@ second(X) -> X.
       const calls = result.unresolvedReferences.filter(
         (r) => r.referenceKind === 'calls' && r.fromNodeId === handle?.id
       ).map((r) => r.referenceName);
-      expect(calls).toContain('first');
-      expect(calls).toContain('second');
+      expect(calls).toContain('first/1');
+      expect(calls).toContain('second/1');
     });
   });
 
@@ -10714,8 +10809,8 @@ analyze(Path) ->
       expect(fns).toContain('main');
       expect(fns).toContain('analyze');
       const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
-      expect(calls).toContain('analyze');
-      expect(calls).toContain('io::format');
+      expect(calls).toContain('analyze/1');
+      expect(calls).toContain('io::format/2');
     });
 
     it('should link an app resource file to its callback module and dependency apps', () => {
@@ -10761,7 +10856,7 @@ do_thing(X) ->
       const refsFrom = (id?: string) =>
         result.unresolvedReferences.filter((r) => r.fromNodeId === id).map((r) => `${r.referenceKind}:${r.referenceName}`);
       // The body's remote call belongs to the macro node — true exactly once.
-      expect(refsFrom(macro?.id)).toContain('calls:audit_logger::log');
+      expect(refsFrom(macro?.id)).toContain('calls:audit_logger::log/2');
       // The use site joins the call chain: do_thing -calls→ LOG_AUDIT.
       expect(refsFrom(doThing?.id)).toContain('calls:LOG_AUDIT');
     });
@@ -10794,7 +10889,7 @@ prepare() -> ok.
       const result = extractFromSource('src/m.erl', code);
       const refs = result.unresolvedReferences.map((r) => r.referenceName);
       // The nested call inside the macro's arguments still attributes to check/0.
-      expect(refs).toContain('prepare');
+      expect(refs).toContain('prepare/0');
       // ?assertEqual (an OTP header macro) is emitted and simply never resolves…
       expect(refs).toContain('assertEqual');
       // …but predefined macros have no definition to link.
@@ -10814,7 +10909,7 @@ prepare() -> ok.
       const alias = result.nodes.find((n) => n.kind === 'constant' && n.name === 'ALIAS');
       const refsFrom = (id?: string) =>
         result.unresolvedReferences.filter((r) => r.fromNodeId === id).map((r) => `${r.referenceKind}:${r.referenceName}`);
-      expect(refsFrom(target?.id)).toContain('calls:target_fn');
+      expect(refsFrom(target?.id)).toContain('calls:target_fn/0');
       expect(refsFrom(alias?.id)).toContain('references:TARGET');
     });
   });

@@ -3008,6 +3008,10 @@ const ERLANG_BEHAVIOUR_FANOUT_CAP = 24;
  */
 function erlangArityAt(src: string, openIdx: number): number {
   let depth = 1;
+  // `<<1,2,3>>` binary literals: commas inside are element separators, not
+  // argument separators. Tracked separately from bracket depth because the
+  // single-char `<`/`>` comparison operators must stay inert (#1358).
+  let binDepth = 0;
   let commas = 0;
   let sawArg = false;
   const limit = Math.min(src.length, openIdx + 4000);
@@ -3028,13 +3032,15 @@ function erlangArityAt(src: string, openIdx: number): number {
       sawArg = true;
       continue;
     }
+    if (ch === '<' && src[i + 1] === '<') { binDepth++; i++; sawArg = true; continue; }
+    if (ch === '>' && src[i + 1] === '>' && binDepth > 0) { binDepth--; i++; continue; }
     if (ch === '(' || ch === '[' || ch === '{') { depth++; sawArg = true; continue; }
     if (ch === ')' || ch === ']' || ch === '}') {
       depth--;
       if (depth === 0) return sawArg ? commas + 1 : 0;
       continue;
     }
-    if (ch === ',' && depth === 1) { commas++; continue; }
+    if (ch === ',' && depth === 1 && binDepth === 0) { commas++; continue; }
     if (!/\s/.test(ch)) sawArg = true;
   }
   return -1;
@@ -3265,12 +3271,18 @@ async function erlangBehaviourDispatchEdges(queries: QueryBuilder, ctx: Resoluti
   }
   if (declaringBehaviours.size === 0) return [];
 
-  // Implementer target lookup, lazy per (behaviour, fn): implementers come
-  // from the `implements` edges extraction resolved, and the target is the
-  // implementer module's own exported `fn` function node.
+  // Implementer target lookup, lazy per (behaviour, fn, arity): implementers
+  // come from the `implements` edges extraction resolved, and the target is
+  // the implementer module's own exported `fn` node OF THE SITE'S ARITY —
+  // function qualifiedNames carry arity (`mod::fn/2`, #1610), so the arity the
+  // dispatch site used selects among same-named definitions.
   const targetCache = new Map<string, Node[]>();
-  const targetsOf = (behaviour: Node, fn: string): Node[] => {
-    const cacheKey = `${behaviour.id}#${fn}`;
+  const qnArity = (qn: string): number => {
+    const m = /\/(\d{1,3})$/.exec(qn);
+    return m ? Number(m[1]) : -1;
+  };
+  const targetsOf = (behaviour: Node, fn: string, arity: number): Node[] => {
+    const cacheKey = `${behaviour.id}#${fn}/${arity}`;
     let targets = targetCache.get(cacheKey);
     if (targets) return targets;
     targets = [];
@@ -3279,7 +3291,13 @@ async function erlangBehaviourDispatchEdges(queries: QueryBuilder, ctx: Resoluti
       if (!impl || impl.language !== 'erlang' || impl.kind !== 'namespace') continue;
       const fnNode = ctx
         .getNodesInFile(impl.filePath)
-        .find((n) => n.kind === 'function' && n.name === fn && n.isExported !== false);
+        .find(
+          (n) =>
+            n.kind === 'function' &&
+            n.name === fn &&
+            qnArity(n.qualifiedName) === arity &&
+            n.isExported !== false,
+        );
       if (fnNode) targets.push(fnNode);
     }
     targetCache.set(cacheKey, targets);
@@ -3308,7 +3326,7 @@ async function erlangBehaviourDispatchEdges(queries: QueryBuilder, ctx: Resoluti
       const behaviours = declaringBehaviours.get(`${fn}/${arity}`);
       if (!behaviours || behaviours.length !== 1) continue; // unknown or ambiguous
       const behaviour = behaviours[0]!;
-      const targets = targetsOf(behaviour, fn);
+      const targets = targetsOf(behaviour, fn, arity);
       if (targets.length === 0 || targets.length > ERLANG_BEHAVIOUR_FANOUT_CAP) continue;
       const line = safe.slice(0, m.index).split('\n').length;
       const disp = enclosingFn(nodesInFile, line);

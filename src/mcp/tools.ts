@@ -122,9 +122,14 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
   'class', 'struct', 'union', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
 ]);
 
-/** Last `::` / `.` / `/`-separated segment of a qualified symbol. */
+/**
+ * Last `::` / `.` / `/`-separated segment of a qualified symbol. An Erlang
+ * arity tail (`mod::fn/3`, `fn/3`) is stripped first — the useful last segment
+ * is the function name, never the digits (#1610).
+ */
 function lastQualifierPart(symbol: string): string {
-  const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
+  const noArity = symbol.replace(/\/\d{1,3}$/, '') || symbol;
+  const parts = noArity.split(/::|[./]/).filter((p) => p.length > 0);
   return parts[parts.length - 1] ?? symbol;
 }
 
@@ -6723,6 +6728,19 @@ export class ToolHandler {
    *      Python — `stage_apply::run` matches a `run` in `stage_apply.rs`)
    */
   private matchesSymbol(node: Node, symbol: string): boolean {
+    // Erlang arity spelling (`fn/3`, `mod:fn/3` → normalized `mod.fn/3`): when
+    // the node's qualifiedName carries an arity (`mod::fn/3`, #1610), the
+    // written arity must match it exactly; the remaining comparison then runs
+    // on the arity-less spelling. A node with no arity in its qualifiedName
+    // keeps the original symbol (a `/` there means a path-ish name instead).
+    const aritySpelling = /^(.+)\/(\d{1,3})$/.exec(symbol);
+    if (aritySpelling) {
+      const nodeArity = /\/(\d{1,3})$/.exec(node.qualifiedName ?? '')?.[1];
+      if (nodeArity !== undefined) {
+        if (nodeArity !== aritySpelling[2]) return false;
+        symbol = aritySpelling[1]!;
+      }
+    }
     // Simple name match
     if (node.name === symbol) return true;
     // File basename match (e.g., "product-card" matches "product-card.liquid")

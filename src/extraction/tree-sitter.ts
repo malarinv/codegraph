@@ -3760,15 +3760,18 @@ export class TreeSitterExtractor {
 
     // Erlang: a local call is `call(expr: atom, args)`; a remote call nests it
     // under `remote(module: remote_module, fun: call)` — the module qualifier
-    // lives on the PARENT. Remote calls are emitted as `mod::fn`, which is
-    // byte-identical to the qualifiedName the module namespace gives every
-    // function (see packageTypes in languages/erlang.ts), so they resolve via
-    // matchByQualifiedName. A var/macro callee or module (`F(X)`, `?M(X)`,
-    // `Mod:handle(X)`) has no static target — except `?MODULE:fn(X)`, which the
-    // bare name + same-file preference resolves correctly. `fun name/1` /
-    // `fun mod:name/1` values are function REFERENCES (callback registration),
-    // and record construction/update/index/field-access are `references` to the
-    // record's struct node.
+    // lives on the PARENT. Arity is part of a function's identity (#1610), so
+    // refs carry the call-site arity: remote calls are emitted as `mod::fn/2`,
+    // byte-identical to the qualifiedName the module namespace + arity suffix
+    // gives every function (see languages/erlang.ts), so they resolve via
+    // matchByQualifiedName; local calls are emitted `fn/2` and resolved by the
+    // erlang arity step in matchReference (same-file first). A var/macro callee
+    // or module (`F(X)`, `?M(X)`, `Mod:handle(X)`) has no static target —
+    // except `?MODULE:fn(X)`, which the bare-name-with-arity + same-file
+    // preference resolves correctly. `fun name/1` / `fun mod:name/1` values
+    // are function REFERENCES (callback registration) carrying their own
+    // written arity, and record construction/update/index/field-access are
+    // `references` to the record's struct node.
     if (this.language === 'erlang') {
       const line = node.startPosition.row + 1;
       const column = node.startPosition.column;
@@ -3800,9 +3803,13 @@ export class TreeSitterExtractor {
               moduleExpr.type === 'macro_call_expr' ? getChildByField(moduleExpr, 'name') : null;
             if (!macroName || getNodeText(macroName, this.source) !== 'MODULE') return;
           }
+          // Arity from the call site's own argument list — part of the callee's
+          // identity, and what disambiguates `f/1` from `f/2` (#1610).
+          const callArgsNode = getChildByField(node, 'args');
+          const callArity = callArgsNode ? callArgsNode.namedChildCount : 0;
           this.unresolvedReferences.push({
             fromNodeId: callerId,
-            referenceName: calleeName,
+            referenceName: `${calleeName}/${callArity}`,
             referenceKind: 'calls',
             line,
             column,
@@ -3825,9 +3832,10 @@ export class TreeSitterExtractor {
             const target = argsNode?.namedChild(0) ?? null;
             const targetModule = target ? this.resolveErlangGenServerTarget(target) : null;
             if (targetModule) {
+              // OTP fixes the handler arities: handle_call/3, handle_cast/2.
               this.unresolvedReferences.push({
                 fromNodeId: callerId,
-                referenceName: `${targetModule}::${fnBare === 'cast' ? 'handle_cast' : 'handle_call'}`,
+                referenceName: `${targetModule}::${fnBare === 'cast' ? 'handle_cast/2' : 'handle_call/3'}`,
                 referenceKind: 'calls',
                 line,
                 column,
@@ -3858,9 +3866,17 @@ export class TreeSitterExtractor {
                 getChildByField(m, 'name') !== null &&
                 getNodeText(getChildByField(m, 'name')!, this.source) === 'MODULE';
               if (m.type !== 'atom' && !isLocalModule) continue;
+              // Arity of the spawned/applied function = the length of the
+              // static args-list literal directly after the (M, F) pair, when
+              // present (`spawn_link(?MODULE, request_process, [Req, Env])` →
+              // /2). A var/absent list leaves the ref arity-less; the
+              // qualified matcher then resolves it only when the module
+              // defines exactly one arity of that name.
+              const mfaList = argExprs[i + 2];
+              const arityTail = mfaList?.type === 'list' ? `/${mfaList.namedChildCount}` : '';
               this.unresolvedReferences.push({
                 fromNodeId: callerId,
-                referenceName: isLocalModule ? erlAtom(f) : `${erlAtom(m)}::${erlAtom(f)}`,
+                referenceName: (isLocalModule ? erlAtom(f) : `${erlAtom(m)}::${erlAtom(f)}`) + arityTail,
                 referenceKind: 'calls',
                 line: f.startPosition.row + 1,
                 column: f.startPosition.column,
@@ -3881,6 +3897,11 @@ export class TreeSitterExtractor {
           if (moduleAtom?.type !== 'atom') return;
           refName = `${erlAtom(moduleAtom)}::${refName}`;
         }
+        // `fun f/1` writes its arity — carry it so the ref lands on the
+        // matching arity's node (#1610).
+        const funArityNode = getChildByField(node, 'arity');
+        const funArityValue = funArityNode ? getChildByField(funArityNode, 'value') : null;
+        if (funArityValue) refName = `${refName}/${getNodeText(funArityValue, this.source)}`;
         this.unresolvedReferences.push({
           fromNodeId: callerId,
           referenceName: refName,

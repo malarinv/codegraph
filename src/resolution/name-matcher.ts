@@ -503,6 +503,35 @@ export function matchByQualifiedName(
     }
   }
 
+  // Erlang qualified refs (#1610): every erlang function's qualifiedName
+  // carries its arity (`mod::f/2`), and refs carry the call-site arity when it
+  // is statically known.
+  if (ref.language === 'erlang' && ref.referenceName.includes('::')) {
+    // A ref WITH arity that missed the exact lookup names an arity that isn't
+    // defined (or a module out of repo). Never fall through to the partial
+    // match — its "last segment" would be the arity digits — and never settle
+    // for a sibling arity: silent beats wrong.
+    if (/\/\d{1,3}$/.test(ref.referenceName)) return null;
+    // An arity-LESS qualified ref (dynamic MFA whose args list wasn't a
+    // static literal): resolve only when the module defines exactly ONE arity
+    // of that function; several arities with no signal is a guess.
+    const base = ref.referenceName.slice(ref.referenceName.lastIndexOf('::') + 2);
+    const prefix = `${ref.referenceName}/`;
+    const arityCands = keepForRef(context.getNodesByName(base)).filter(
+      (n) =>
+        n.qualifiedName.startsWith(prefix) && /^\d{1,3}$/.test(n.qualifiedName.slice(prefix.length)),
+    );
+    if (arityCands.length === 1) {
+      return {
+        original: ref,
+        targetNodeId: arityCands[0]!.id,
+        confidence: 0.85,
+        resolvedBy: 'qualified-name',
+      };
+    }
+    return null;
+  }
+
   // Try partial qualified name match — again preferring the call site's own
   // file when more than one symbol's qualifiedName ends with the reference.
   const parts = ref.referenceName.split(/[:.]/);
@@ -2517,6 +2546,52 @@ export function matchReference(
       confidence: 0.9,
       resolvedBy: 'exact-match',
     };
+  }
+
+  // Erlang call/fun refs carry the call-site arity (`f/1` — #1610) because
+  // arity is part of the function's identity and every erlang function's
+  // qualifiedName carries it (`mod::f/1`). Resolve ONLY to a definition of
+  // that exact arity: the call site's own file first (a local call targets its
+  // own module by language semantics; `-import`ed functions ride the
+  // cross-file branch), and when no definition of that arity exists anywhere,
+  // resolve to NOTHING rather than a sibling arity — the real target may be
+  // macro-generated or out of repo, and a wrong-arity edge is worse than none.
+  if (
+    ref.language === 'erlang' &&
+    !ref.referenceName.includes('::') &&
+    (ref.referenceKind === 'calls' || ref.referenceKind === 'references')
+  ) {
+    const am = /^(.+)\/(\d{1,3})$/.exec(ref.referenceName);
+    if (am) {
+      // endsWith is length-anchored, so `/1` cannot match `…/11`.
+      const arityTail = `/${am[2]}`;
+      const candidates = context
+        .getNodesByName(am[1]!)
+        .filter(
+          (n) =>
+            n.language === 'erlang' && n.kind === 'function' && n.qualifiedName.endsWith(arityTail),
+        );
+      if (candidates.length > 0) {
+        const sameFile = candidates.find((n) => n.filePath === ref.filePath);
+        if (sameFile) {
+          return { original: ref, targetNodeId: sameFile.id, confidence: 0.95, resolvedBy: 'exact-match' };
+        }
+        if (candidates.length === 1) {
+          return { original: ref, targetNodeId: candidates[0]!.id, confidence: 0.8, resolvedBy: 'exact-match' };
+        }
+        const best = findBestMatch(ref, candidates, context);
+        if (best) {
+          const proximity = computePathProximity(ref.filePath, best.filePath);
+          return {
+            original: ref,
+            targetNodeId: best.id,
+            confidence: proximity >= 30 ? 0.7 : 0.4,
+            resolvedBy: 'exact-match',
+          };
+        }
+      }
+      return null;
+    }
   }
 
   // Try strategies in order of confidence

@@ -27,6 +27,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- Erlang functions that share a name but differ in arity are now separate symbols with the language's own `module:fun/arity` identity, so the everyday `f/1` delegating to `f/2` shows as a real call edge instead of a self-loop, each arity keeps its own `-spec` and source span, `-export([f/1])` marks exactly that arity as public, and asking `codegraph_explore` for a symbol the way Erlang spells it — `cowboy_req:header/3` — returns that definition. Re-index Erlang projects after upgrading. Thanks @Dshuishui. (#1610) (Erlang)
+
+- Erlang behaviour dispatch no longer miscounts a call site's arity when an argument is a binary literal like `<<1,2,3>>` — the commas inside were counted as argument separators, which silently dropped (or could mislink) the dispatch edge to the behaviour callback. (#1358) (Erlang)
 - The MCP server now finds your project when it's launched from a workspace folder above it: if the launch directory has no index of its own but exactly one indexed project sits below it (a repo container, an agent workspace, a monorepo root), that project becomes the session's default — live file watching and the shared daemon included — instead of every tool call failing until a `projectPath` or `--path` is supplied. Thanks @nakisen. (#1606)
 
 - When no project can be resolved at all, the MCP server now says so instead of starting silently: a startup log line names the directory it searched, and tool calls list the indexed sub-projects it can see nearby so you can pass one as `projectPath`. Previously the server looked healthy from the outside while every tool quietly had no project to answer from. Thanks @nakisen. (#1607)

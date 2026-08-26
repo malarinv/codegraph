@@ -145,8 +145,11 @@ interface UnresolvedRefRow {
  * refs against newly-added node names.
  */
 function referenceNameTail(referenceName: string): string {
-  const idx = Math.max(referenceName.lastIndexOf('.'), referenceName.lastIndexOf(':'));
-  return idx >= 0 ? referenceName.slice(idx + 1) : referenceName;
+  // Erlang refs carry a written arity (`f/1`, `mod::fn/2` — #1610); the tail a
+  // new symbol's plain name could match is the arity-less function name.
+  const base = referenceName.replace(/\/\d{1,3}$/, '') || referenceName;
+  const idx = Math.max(base.lastIndexOf('.'), base.lastIndexOf(':'));
+  return idx >= 0 ? base.slice(idx + 1) : base;
 }
 
 /**
