@@ -4432,6 +4432,26 @@ export class TreeSitterExtractor {
                 calleeName = methodName;
               }
             } else if (
+              this.language === 'rust' &&
+              receiver &&
+              receiver.type === 'field_expression' &&
+              getChildByField(receiver, 'value')?.type === 'self' &&
+              getChildByField(receiver, 'field')?.type === 'field_identifier'
+            ) {
+              // Rust `self.<field>.<method>()` — a call through a field of the
+              // enclosing type (#1585). Keep the `self.` prefix: the resolver
+              // recognizes the shape, reads the field's declared type off the
+              // owner struct's declaration, and resolves the method on THAT
+              // type — or leaves the ref unresolved when the type is external
+              // or unknown. Previously this collapsed to the bare method name,
+              // which exact-matched whichever same-named method was nearest —
+              // often the calling method itself, a self-edge not in the source.
+              // Deeper chains (`self.a.b.m()`), `self.f().m()` and parenthesized
+              // receivers keep the bare name. Mirrored in the kernel's
+              // extract_call (rustlang.rs).
+              const fieldName = getNodeText(getChildByField(receiver, 'field')!, this.source);
+              calleeName = `self.${fieldName}.${methodName}`;
+            } else if (
               (this.language === 'cpp' ||
                 this.language === 'c' ||
                 this.language === 'kotlin' ||

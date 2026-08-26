@@ -72,6 +72,16 @@ impl Widget {
         self.n * mul()
     }
 
+    /// Receiver shapes (#1585): only `self.<field>.<method>()` keeps the
+    /// owner-field prefix; deeper / parenthesized / call / bare-self collapse.
+    fn via_field(&self) -> u32 {
+        self.field.deep_call();
+        self.field.z.clone();
+        self.method_a().chain_b();
+        (self.field).deep_call();
+        self.area()
+    }
+
     fn clone_self(&self) -> Self {
         Self::assoc();
         Widget {

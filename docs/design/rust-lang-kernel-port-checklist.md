@@ -226,9 +226,13 @@ Generic else-branch (4312+), `func = childForFieldName('function') ?? namedChild
      (4455) → `Foo::new().bar()` → ref `Foo::new().bar`; an instance chain
      `x.foo().bar()` (innerFn field_expression) → bare `bar`. When not
      re-encoding, calleeName = bare methodName.
-   - receiver anything else (`field_expression` 2-hop `v.field.method()`,
-     `parenthesized_expression`, `await_expression`, `self`) → bare
-     methodName (probed all four).
+   - receiver `field_expression` whose `value` is `self` and whose `field` is
+     a `field_identifier` (`self.inner.run()`) → `self.inner.run` — the
+     owner-field shape the resolver types from the struct declaration
+     (#1585, both sides together).
+   - receiver anything else (`field_expression` with a non-self base
+     `v.field.method()` / deeper `self.a.b.m()`, `parenthesized_expression`,
+     `await_expression`, `self`) → bare methodName (probed all four).
 2. `func.type === 'scoped_identifier'` (4499) → calleeName = FULL text
    (`Foo::new`, `m::helper2`, `std::mem::swap` — whatever the source spells,
    whitespace included).

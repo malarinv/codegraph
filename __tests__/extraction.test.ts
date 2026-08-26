@@ -1216,6 +1216,41 @@ impl From<u32> for Own {
     ).toBe(true);
   });
 
+  it('keeps the owner-field shape for `self.<field>.<method>()` and collapses every other receiver (#1585)', () => {
+    const code = `
+pub struct Outer { pub inner: Inner, pub deep: Deep }
+impl Outer {
+    pub fn run(&mut self) {
+        self.inner.run();
+        self.deep.inner.run();
+        self.make().run();
+        (self.inner).run();
+        self.run();
+        let local = Inner { n: 0 };
+        local.run();
+    }
+}
+`;
+    const result = extractFromSource('outer.rs', code);
+    const calls = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'calls')
+      .map((r) => r.referenceName);
+    // Exactly one call keeps the `self.<field>` prefix — the single-hop field
+    // receiver whose type the resolver can read off the owner struct.
+    expect(calls.filter((c) => c.startsWith('self.'))).toEqual(['self.inner.run']);
+    // A local receiver keeps its name as before…
+    expect(calls).toContain('local.run');
+    // …and the deeper chain, the call receiver, the parenthesized receiver and
+    // the bare `self` receiver all still collapse to the method name.
+    expect(calls.filter((c) => c === 'run')).toHaveLength(4);
+    expect(calls).toContain('make');
+    const outerRun = result.nodes.find((n) => n.qualifiedName === 'Outer::run');
+    expect(outerRun).toBeDefined();
+    const fieldRef = result.unresolvedReferences.find((r) => r.referenceName === 'self.inner.run');
+    expect(fieldRef?.fromNodeId).toBe(outerRun!.id);
+    expect(fieldRef?.line).toBe(5);
+  });
+
   it('gives no receiver to an impl whose target names no single type', () => {
     // A tuple / `dyn Trait` / primitive implementing type has no struct to
     // hang the methods off, so they are extracted as plain functions — the

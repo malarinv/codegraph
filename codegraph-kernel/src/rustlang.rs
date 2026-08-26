@@ -23,10 +23,12 @@
 //! - Unit structs (`struct Unit;`, no body field) mint NO node; `mod_item`
 //!   mints no module node and adds no QN prefix.
 //! - Chained-call re-encode is scoped_identifier-gated (`Foo::new().bar()` →
-//!   `Foo::new().bar`); instance chains, parens, `.await`, 2-hop fields, and
-//!   `self` receivers all collapse to the bare method name (`self` is node
-//!   kind `self`, not `identifier`, so it dodges SKIP_RECEIVERS by falling
-//!   through). Turbofish callees keep the raw `helper::<T>` text.
+//!   `Foo::new().bar`); a call through a field of the enclosing type keeps
+//!   the owner-field shape (`self.inner.run()` → `self.inner.run`, #1585);
+//!   instance chains, parens, `.await`, deeper/non-self field chains, and
+//!   bare `self` receivers all collapse to the bare method name (`self` is
+//!   node kind `self`, not `identifier`, so it dodges SKIP_RECEIVERS by
+//!   falling through). Turbofish callees keep the raw `helper::<T>` text.
 //! - `use` emits an import node named by the ROOT module (`crate`/`self`/…),
 //!   one root `imports` ref, then one FULL-path `imports` ref per binding;
 //!   `use x::*` (use_wildcard) emits nothing at all.
@@ -838,9 +840,29 @@ impl<'t> Walker<'t> {
                                     callee_name = method_name.to_string();
                                 }
                             }
+                            "field_expression" => {
+                                // `self.<field>.<method>()` — a call through a
+                                // field of the enclosing type (#1585): keep the
+                                // `self.` prefix so the resolver can type the
+                                // field from the owner struct's declaration
+                                // (or leave it unresolved). Any other
+                                // field_expression receiver — a deeper chain,
+                                // a non-self base — keeps the bare name.
+                                let base = r.child_by_field_name("value");
+                                let field = r.child_by_field_name("field");
+                                match (base, field) {
+                                    (Some(b), Some(f))
+                                        if b.kind() == "self" && f.kind() == "field_identifier" =>
+                                    {
+                                        let field_name = self.text(f);
+                                        callee_name = format!("self.{field_name}.{method_name}");
+                                    }
+                                    _ => callee_name = method_name.to_string(),
+                                }
+                            }
                             _ => {
-                                // field_expression 2-hop, parenthesized,
-                                // await_expression, `self` — bare method name.
+                                // parenthesized, await_expression, `self` —
+                                // bare method name.
                                 callee_name = method_name.to_string();
                             }
                         }

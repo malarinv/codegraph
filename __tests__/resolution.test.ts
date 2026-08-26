@@ -1172,6 +1172,115 @@ impl<T> Source for BufSource<T> {
       expect(synth(bufImpl!.id)).toHaveLength(0);
     });
 
+    // ── Rust `self.<field>.<method>()` receivers (#1585) ───────────────────
+    // A Cargo layout (Cargo.toml + src/) so `use crate::…` paths resolve.
+    function writeRustCrate(root: string, files: Record<string, string>): void {
+      fs.writeFileSync(
+        path.join(root, 'Cargo.toml'),
+        '[package]\nname = "repro"\nversion = "0.1.0"\nedition = "2021"\n'
+      );
+      fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+      for (const [rel, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(root, 'src', rel), content);
+      }
+    }
+    const callsFrom = (qualifiedName: string) => {
+      const from = cg.getNodesByKind('method').find((n) => n.qualifiedName === qualifiedName);
+      expect(from, qualifiedName).toBeDefined();
+      return cg
+        .getOutgoingEdges(from!.id)
+        .filter((e) => e.kind === 'calls')
+        .map((e) => ({
+          target: cg.getNode(e.target)?.qualifiedName,
+          resolvedBy: (e.metadata as { resolvedBy?: string } | undefined)?.resolvedBy,
+          provenance: e.provenance ?? undefined, // a resolved (non-synthesized) edge stores NULL
+        }));
+    };
+
+    it("resolves `self.field.method()` to the method on the field's declared type, never to the caller itself (#1585)", async () => {
+      // The issue's repro: `Outer::run` forwards to `Inner::run` through the
+      // typed field `inner`. The call used to collapse to the bare name `run`
+      // and exact-match the nearest same-named method — the calling method —
+      // recording recursion the source does not contain.
+      writeRustCrate(tempDir, {
+        'lib.rs': 'pub mod inner;\npub mod outer;\n',
+        'inner.rs': 'pub struct Inner {\n    pub n: usize,\n}\n\nimpl Inner {\n    pub fn run(&mut self) {\n        self.n += 1;\n    }\n}\n',
+        'outer.rs': 'use crate::inner::Inner;\n\npub struct Outer {\n    pub inner: Inner,\n}\n\nimpl Outer {\n    pub fn run(&mut self) {\n        self.inner.run();\n    }\n}\n',
+      });
+      cg = await CodeGraph.init(tempDir, { index: true });
+      expect(callsFrom('Outer::run')).toEqual([
+        { target: 'Inner::run', resolvedBy: 'instance-method', provenance: undefined },
+      ]);
+    });
+
+    it('leaves a `self.field.method()` call unresolved when the field type is external, instead of guessing a same-named local method', async () => {
+      // `its` is a std type with no project node. Before, `self.its.next()`
+      // became the bare `next`, which exact-matched a local `next` — the
+      // calling method (self-edge) or the unrelated `Other::next` decoy.
+      writeRustCrate(tempDir, {
+        'lib.rs':
+          'pub struct Scanner {\n    its: std::vec::IntoIter<u8>,\n}\n\nimpl Scanner {\n    pub fn next(&mut self) -> Option<u8> {\n        self.its.next()\n    }\n}\n\n' +
+          'pub struct Other { pub n: u8 }\nimpl Other {\n    pub fn next(&mut self) -> Option<u8> {\n        None\n    }\n}\n',
+      });
+      cg = await CodeGraph.init(tempDir, { index: true });
+      expect(callsFrom('Scanner::next')).toEqual([]);
+    });
+
+    it('looks through references and owning smart pointers, but not through containers (#1585)', async () => {
+      // Method-call auto-deref reaches the pointee of `Box`/`&mut`, so those
+      // fields resolve to `Inner::run`. `Option<Inner>` does not auto-deref —
+      // `self.inner.take()` is Option's method, so it must NOT become
+      // `Inner::take` even though Inner declares a `take` too.
+      writeRustCrate(tempDir, {
+        'lib.rs':
+          'pub struct Inner { pub n: usize }\nimpl Inner {\n    pub fn run(&mut self) { self.n += 1; }\n    pub fn take(&mut self) {}\n}\n\n' +
+          'pub struct Boxed { inner: Box<Inner> }\nimpl Boxed {\n    pub fn go(&mut self) { self.inner.run(); }\n}\n\n' +
+          "pub struct Borrowed<'a> { inner: &'a mut Inner }\nimpl<'a> Borrowed<'a> {\n    pub fn go(&mut self) { self.inner.run(); }\n}\n\n" +
+          'pub struct Optional { inner: Option<Inner> }\nimpl Optional {\n    pub fn go(&mut self) { self.inner.take(); }\n}\n',
+      });
+      cg = await CodeGraph.init(tempDir, { index: true });
+      expect(callsFrom('Boxed::go').map((c) => c.target)).toEqual(['Inner::run']);
+      expect(callsFrom('Borrowed::go').map((c) => c.target)).toEqual(['Inner::run']);
+      expect(callsFrom('Optional::go')).toEqual([]);
+    });
+
+    it('leaves a call through a generic-typed field unresolved, and keeps genuine `self.method()` recursion (#1585)', async () => {
+      writeRustCrate(tempDir, {
+        'lib.rs':
+          'pub struct Inner { pub n: usize }\nimpl Inner {\n    pub fn run(&mut self) {}\n}\n\n' +
+          'pub struct Holder<T> { item: T }\nimpl<T> Holder<T> {\n    pub fn go(&mut self) { self.item.run(); }\n}\n\n' +
+          'pub struct Countdown { pub n: usize }\nimpl Countdown {\n    pub fn run(&mut self) {\n        if self.n > 0 {\n            self.n -= 1;\n            self.run();\n        }\n    }\n}\n',
+      });
+      cg = await CodeGraph.init(tempDir, { index: true });
+      // `T` names no project type: no edge, and in particular not `Inner::run`.
+      expect(callsFrom('Holder::go')).toEqual([]);
+      // A bare `self` receiver is untouched — real recursion stays a self-edge.
+      expect(callsFrom('Countdown::run').map((c) => c.target)).toEqual(['Countdown::run']);
+    });
+
+    it('resolves a trait-object field to the trait method and typed fields to the right implementation (#1585, #1588)', async () => {
+      // The #1588 repro's second half: `UsesFile::go` / `UsesBuf::go` each
+      // forward through a typed field, and a `Box<dyn Source>` field lands on
+      // the trait's declaration — from which the interface-impl synthesizer
+      // fans out to every implementation.
+      writeRustCrate(tempDir, {
+        'lib.rs':
+          'pub trait Source {\n    fn read(&mut self) -> usize;\n}\n\n' +
+          'pub struct FileSource { pub n: usize }\nimpl Source for FileSource {\n    fn read(&mut self) -> usize { self.n }\n}\n\n' +
+          'pub struct BufSource<T> { pub inner: T }\nimpl<T> Source for BufSource<T> {\n    fn read(&mut self) -> usize { 0 }\n}\n\n' +
+          'pub struct UsesFile { pub src: FileSource }\nimpl UsesFile {\n    pub fn go(&mut self) -> usize { self.src.read() }\n}\n\n' +
+          'pub struct UsesBuf { pub src: BufSource<u8> }\nimpl UsesBuf {\n    pub fn go(&mut self) -> usize { self.src.read() }\n}\n\n' +
+          'pub struct UsesDyn { pub src: Box<dyn Source> }\nimpl UsesDyn {\n    pub fn go(&mut self) -> usize { self.src.read() }\n}\n',
+      });
+      cg = await CodeGraph.init(tempDir, { index: true });
+      expect(callsFrom('UsesFile::go').map((c) => c.target)).toEqual(['FileSource::read']);
+      expect(callsFrom('UsesBuf::go').map((c) => c.target)).toEqual(['BufSource::read']);
+      expect(callsFrom('UsesDyn::go').map((c) => c.target)).toEqual(['Source::read']);
+      // …and dispatch continues from the trait declaration to both impls.
+      const fanOut = callsFrom('Source::read').filter((c) => c.provenance === 'heuristic').map((c) => c.target).sort();
+      expect(fanOut).toEqual(['BufSource::read', 'FileSource::read']);
+    });
+
     it('records instantiates for C++ stack/brace construction, targeting the class (#1035)', async () => {
       // `Calculator calc(0)` (direct-init) and `Widget w{1, 2}` (brace-init)
       // carry the constructor args directly on the declarator — there's no
