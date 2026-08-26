@@ -1839,7 +1839,9 @@ program
 function printNoIndexGuidance(projectPath: string): void {
   error(`No CodeGraph index found for ${projectPath}`);
   console.error('');
-  console.error('  The viewer reads an index that already exists — it never creates one.');
+  // getGlyphs() (not a literal em dash): a legacy Windows console decodes raw
+  // UTF-8 with its OEM codepage and renders one as mojibake (#168).
+  console.error(`  The viewer reads an index that already exists ${getGlyphs().dash} it never creates one.`);
   console.error('  To index this project:');
   console.error('');
   console.error(`    ${chalk.cyan('codegraph init')}`);
@@ -1944,7 +1946,7 @@ ${BROWSER_ENV}=none to never open one.
     const opened = options.open === false ? false : openBrowser(handle.url);
     console.log(
       opened
-        ? chalk.dim('  Opening your browser… press Ctrl+C to stop.')
+        ? chalk.dim('  Opening your browser... press Ctrl+C to stop.')
         : chalk.dim('  Open that URL in a browser. Press Ctrl+C to stop.')
     );
     console.log('');
