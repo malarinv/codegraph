@@ -32,6 +32,14 @@ export function browserOpenCommand(
   if (override !== undefined) {
     const trimmed = override.trim();
     if (SUPPRESS_VALUES.has(trimmed.toLowerCase())) return null;
+    // Windows: go through `cmd /c` rather than spawning the override directly.
+    // `spawn` there is CreateProcess, which only ever launches a real .exe — a
+    // `.cmd`/`.bat` browser shim (how most Windows wrappers are written) fails
+    // outright, and an extension-less name only resolves because CreateProcess
+    // appends `.exe`. Routing through cmd makes .exe, .cmd and .bat all work,
+    // and node quotes each argument, so a path with spaces survives. Caught on
+    // the Windows VM, where the direct spawn silently launched nothing.
+    if (platform === 'win32') return { command: 'cmd', args: ['/c', trimmed, url] };
     return { command: trimmed, args: [url] };
   }
   if (platform === 'darwin') return { command: 'open', args: [url] };

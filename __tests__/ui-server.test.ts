@@ -523,6 +523,12 @@ describe('browserOpenCommand', () => {
       command: 'firefox',
       args: ['http://x'],
     });
+    // Windows routes the override through cmd so a `.cmd`/`.bat` shim — which
+    // CreateProcess cannot launch directly — still works.
+    expect(browserOpenCommand('http://x', 'win32', 'C:\\tools\\open.cmd')).toEqual({
+      command: 'cmd',
+      args: ['/c', 'C:\\tools\\open.cmd', 'http://x'],
+    });
     for (const off of ['none', 'NONE', '0', 'false', 'off', '', '  ']) {
       expect(browserOpenCommand('http://x', 'darwin', off), off).toBeNull();
     }
