@@ -1251,6 +1251,65 @@ program
   });
 
 /**
+ * codegraph context <task...>
+ *
+ * The CLI face of the public `buildContext` API (ContextBuilder): FTS entry
+ * points + graph expansion + code blocks, formatted as markdown or JSON.
+ * Advertised in the usage header since the first release but never actually
+ * registered (#1611); external integrations (e.g. Memorix) invoke it as
+ * `codegraph context --path <root> --format json --max-nodes 8 --no-code <task>`.
+ */
+program
+  .command('context <task...>')
+  .description('Build context for a task: relevant symbols, relationships, and code blocks')
+  .option('-p, --path <path>', 'Project path')
+  .option('-f, --format <format>', 'Output format: markdown or json', 'markdown')
+  .option('-n, --max-nodes <number>', 'Maximum number of symbols to include')
+  .option('--no-code', 'Omit code blocks (structure only)')
+  .action(async (taskParts: string[], options: { path?: string; format?: string; maxNodes?: string; code?: boolean }) => {
+    const projectPath = resolveProjectPath(options.path);
+
+    const format = options.format ?? 'markdown';
+    if (format !== 'markdown' && format !== 'json') {
+      error(`Unknown format "${options.format}" — use "markdown" or "json".`);
+      process.exit(1);
+    }
+    let maxNodes: number | undefined;
+    if (options.maxNodes !== undefined) {
+      maxNodes = parseInt(options.maxNodes, 10);
+      if (Number.isNaN(maxNodes) || maxNodes < 1) {
+        error(`--max-nodes expects a positive integer, got "${options.maxNodes}".`);
+        process.exit(1);
+      }
+    }
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const cg = await CodeGraph.open(projectPath);
+
+      const result = await cg.buildContext(taskParts.join(' '), {
+        format,
+        includeCode: options.code !== false,
+        ...(maxNodes !== undefined ? { maxNodes } : {}),
+      });
+
+      // Both supported formats return a formatted string; print it verbatim so
+      // `--format json` stays machine-parseable on stdout (error()/warnings go
+      // to stderr only).
+      console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+      cg.destroy();
+    } catch (err) {
+      error(`Context build failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
  * codegraph prompt-hook  (hidden)
  *
  * A Claude Code `UserPromptSubmit` hook entry point. Reads `{prompt, cwd}` JSON
