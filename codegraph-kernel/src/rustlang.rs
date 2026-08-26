@@ -11,10 +11,11 @@
 //! - impl blocks push NO scope: members re-dispatch at file scope, so an impl
 //!   associated `const` becomes a FILE-level `variable`, and the method↔owner
 //!   `contains` edge is a source-order name scan (an impl ABOVE its struct
-//!   gets no edge). `impl Trait for Generic<T>`'s receiver resolves to the
-//!   TRAIT (the only direct type_identifier), and methods get QN
-//!   `Trait::method` — preserve, never "fix" via the grammar's trait:/type:
-//!   fields.
+//!   gets no edge). The receiver (method QN prefix, `contains` owner,
+//!   `implements` source) is the impl_item's `type` field via
+//!   impl_type_name — both sides moved to the grammar's trait:/type: fields
+//!   together in #1588 (the earlier positional scan qualified every
+//!   parameterized impl's methods by the TRAIT).
 //! - `const_item`/`static_item` ride the generic extractVariable fallback:
 //!   kind is always `variable`, no signature, and EVERY direct `identifier`
 //!   child mints a node (`const MAX: u32 = OTHER;` → two nodes, `MAX` + the
@@ -399,33 +400,35 @@ impl<'t> Walker<'t> {
         Some(if last == "Self" { "self".to_string() } else { last.to_string() })
     }
 
-    /// rustExtractor.getReceiverType: parent-walk to the nearest impl_item;
-    /// LAST direct type_identifier child wins (for `impl Trait for Generic<T>`
-    /// that's the TRAIT — bug preserved); else the first generic_type's inner
-    /// type_identifier.
+    /// rustImplTypeName (languages/rust.ts) — the implementing type's simple
+    /// name for an impl block, from the grammar's `type` field (#1588):
+    /// `impl<T> Tr for G<T>` / `impl<'a> Iterator for Parents<'a>` /
+    /// `impl Tr for &Foo` / `impl Tr for m::Foo` → `G` / `Parents` / `Foo` /
+    /// `Foo`. Shapes naming no single type (tuple, `dyn Tr`, pointer,
+    /// primitive, fn type…) → None. Mirrored byte-for-byte — change both.
+    fn impl_type_name(&self, ty: Option<Node>) -> Option<String> {
+        let ty = ty?;
+        match ty.kind() {
+            "type_identifier" | "identifier" => Some(self.text(ty).to_string()),
+            "generic_type" => self.impl_type_name(ty.child_by_field_name("type")),
+            "scoped_type_identifier" | "scoped_identifier" => {
+                self.impl_type_name(ty.child_by_field_name("name"))
+            }
+            "reference_type" => self.impl_type_name(ty.child_by_field_name("type")),
+            _ => None,
+        }
+    }
+
+    /// rustExtractor.getReceiverType: parent-walk to the nearest impl_item and
+    /// read its `type` field (impl_type_name). The pre-#1588 rule took the
+    /// LAST direct type_identifier child, which for `impl Trait for Generic<T>`
+    /// was the TRAIT — so every parameterized impl's methods were qualified by
+    /// the trait.
     fn receiver_type_of(&self, node: Node) -> Option<String> {
         let mut parent = node.parent();
         while let Some(p) = parent {
             if p.kind() == "impl_item" {
-                let type_idents: Vec<Node> = (0..p.named_child_count())
-                    .filter_map(|i| p.named_child(i))
-                    .filter(|c| c.kind() == "type_identifier")
-                    .collect();
-                if let Some(last) = type_idents.last() {
-                    return Some(self.text(*last).to_string());
-                }
-                let generic = (0..p.named_child_count())
-                    .filter_map(|i| p.named_child(i))
-                    .find(|c| c.kind() == "generic_type");
-                if let Some(g) = generic {
-                    let inner = (0..g.named_child_count())
-                        .filter_map(|i| g.named_child(i))
-                        .find(|c| c.kind() == "type_identifier");
-                    if let Some(inner) = inner {
-                        return Some(self.text(inner).to_string());
-                    }
-                }
-                return None;
+                return self.impl_type_name(p.child_by_field_name("type"));
             }
             parent = p.parent();
         }
@@ -1024,36 +1027,19 @@ impl<'t> Walker<'t> {
         }
     }
 
-    /// extractRustImplItem — `impl Trait for Type` back-reference: positional
-    /// type-node filter (NEVER the grammar's trait:/type: fields), ≥2 needed,
-    /// target found by FIRST earlier node of kind struct/enum/class (never
-    /// trait); ref FROM the type's node, named by the trait's full text.
+    /// extractRustImplItem — `impl Trait for Type` back-reference from the
+    /// grammar's `trait` / `type` fields (#1588; an inherent impl has no
+    /// `trait` field and emits nothing). Target = FIRST earlier node of kind
+    /// struct/union/enum/class (never trait) named by impl_type_name; ref FROM
+    /// the type's node, named by the trait's full text (scoped path / generic
+    /// args kept), at the trait node's position.
     fn extract_rust_impl_item(&mut self, node: Node<'t>) {
-        let has_for = (0..node.child_count())
-            .filter_map(|i| node.child(i))
-            .any(|c| c.kind() == "for" && !c.is_named());
-        if !has_for {
+        let Some(trait_node) = node.child_by_field_name("trait") else {
             return;
-        }
-        let type_idents: Vec<Node> = (0..node.named_child_count())
-            .filter_map(|i| node.named_child(i))
-            .filter(|c| matches!(c.kind(), "type_identifier" | "generic_type" | "scoped_type_identifier"))
-            .collect();
-        if type_idents.len() < 2 {
-            return;
-        }
-        let trait_node = type_idents[0];
-        let type_node = type_idents[type_idents.len() - 1];
-
+        };
         let trait_name = self.text(trait_node).to_string();
-        let type_name = if type_node.kind() == "generic_type" {
-            (0..type_node.named_child_count())
-                .filter_map(|i| type_node.named_child(i))
-                .find(|c| c.kind() == "type_identifier")
-                .map(|c| self.text(c).to_string())
-                .unwrap_or_else(|| self.text(type_node).to_string())
-        } else {
-            self.text(type_node).to_string()
+        let Some(type_name) = self.impl_type_name(node.child_by_field_name("type")) else {
+            return;
         };
 
         let target_row = self

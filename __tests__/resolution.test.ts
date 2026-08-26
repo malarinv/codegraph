@@ -1119,6 +1119,59 @@ impl Describe for Ctl { fn describe(&self) -> String { "ctl".into() } }
       ).toBe('interface-impl');
     });
 
+    it('qualifies a generic impl by its type, so trait dispatch reaches it and no edge is invented from its body (#1588)', async () => {
+      // `impl<T> Source for BufSource<T>`: the implementing type parses as a
+      // generic_type, so the old positional receiver scan picked the TRAIT.
+      // The impl's `read` was recorded as `Source::read` — unaddressable as
+      // `BufSource::read` — and, carrying the trait's name, the interface-impl
+      // synthesizer treated its body (`{ 0 }`, no call at all) as a second
+      // declaration and gave it a dispatch edge to FileSource's implementation.
+      fs.writeFileSync(
+        path.join(tempDir, 'lib.rs'),
+        `pub trait Source {
+    fn read(&mut self) -> usize;
+}
+
+pub struct FileSource { pub n: usize }
+impl Source for FileSource {
+    fn read(&mut self) -> usize { self.n }
+}
+
+pub struct BufSource<T> { pub inner: T }
+impl<T> Source for BufSource<T> {
+    fn read(&mut self) -> usize { 0 }
+}
+`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+
+      const methods = cg.getNodesByKind('method');
+      const traitDecls = methods.filter((n) => n.qualifiedName === 'Source::read');
+      expect(traitDecls, 'only the declaration carries the trait-qualified name').toHaveLength(1);
+      const traitMethod = traitDecls[0]!;
+      expect(traitMethod.startLine).toBe(2);
+      const fileImpl = methods.find((n) => n.qualifiedName === 'FileSource::read');
+      const bufImpl = methods.find((n) => n.qualifiedName === 'BufSource::read');
+      expect(fileImpl).toBeDefined();
+      expect(bufImpl, 'the generic impl is addressable by its type').toBeDefined();
+
+      const synth = (id: string) =>
+        cg.getOutgoingEdges(id).filter((e) => e.kind === 'calls' && e.provenance === 'heuristic');
+      // Dispatch fans out from the declaration to BOTH implementations…
+      const fromTrait = synth(traitMethod.id);
+      expect(new Set(fromTrait.map((e) => e.target))).toEqual(new Set([fileImpl!.id, bufImpl!.id]));
+      for (const e of fromTrait) {
+        expect(
+          (e.metadata as { synthesizedBy?: string } | undefined)?.synthesizedBy
+        ).toBe('interface-impl');
+        expect(e.line, 'registered at the declaration, never at an impl body').toBe(2);
+      }
+      // …and neither implementation body sprouts a synthesized call of its own.
+      expect(synth(fileImpl!.id)).toHaveLength(0);
+      expect(synth(bufImpl!.id)).toHaveLength(0);
+    });
+
     it('records instantiates for C++ stack/brace construction, targeting the class (#1035)', async () => {
       // `Calculator calc(0)` (direct-init) and `Widget w{1, 2}` (brace-init)
       // carry the constructor args directly on the declarator — there's no

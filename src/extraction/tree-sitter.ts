@@ -22,6 +22,7 @@ import { isGeneratedFile } from './generated-detection';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { stripCppTemplateArgs } from './languages/c-cpp';
+import { rustImplTypeName } from './languages/rust';
 import { LiquidExtractor } from './liquid-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
@@ -5717,38 +5718,20 @@ export class TreeSitterExtractor {
    * For plain `impl Type { ... }` (no trait), no inheritance edge is needed.
    */
   private extractRustImplItem(node: SyntaxNode): void {
-    // Check if this is `impl Trait for Type` by looking for a `for` keyword
-    const hasFor = node.children.some(
-      (c: SyntaxNode) => c.type === 'for' && !c.isNamed
-    );
-    if (!hasFor) return;
+    // `impl Trait for Type` carries the trait in the grammar's `trait` field;
+    // an inherent `impl Type { … }` has none and needs no inheritance edge.
+    const traitNode = getChildByField(node, 'trait');
+    if (!traitNode) return;
 
-    // In `impl Trait for Type`, the type_identifiers are:
-    // first = Trait name, last = implementing Type name
-    // Also handle generic types like `impl<T> Trait for MyStruct<T>`
-    const typeIdents = node.namedChildren.filter(
-      (c: SyntaxNode) => c.type === 'type_identifier' || c.type === 'generic_type' || c.type === 'scoped_type_identifier'
-    );
-    if (typeIdents.length < 2) return;
+    // Full text, so a scoped path (`std::fmt::Display`) and a generic trait
+    // (`From<u32>`) keep their spelling.
+    const traitName = getNodeText(traitNode, this.source);
 
-    const traitNode = typeIdents[0]!;
-    const typeNode = typeIdents[typeIdents.length - 1]!;
-
-    // Get the trait name (handle scoped paths like std::fmt::Display)
-    const traitName = traitNode.type === 'scoped_type_identifier'
-      ? this.source.substring(traitNode.startIndex, traitNode.endIndex)
-      : getNodeText(traitNode, this.source);
-
-    // Get the implementing type name (extract inner type_identifier for generics)
-    let typeName: string;
-    if (typeNode.type === 'generic_type') {
-      const inner = typeNode.namedChildren.find(
-        (c: SyntaxNode) => c.type === 'type_identifier'
-      );
-      typeName = inner ? getNodeText(inner, this.source) : getNodeText(typeNode, this.source);
-    } else {
-      typeName = getNodeText(typeNode, this.source);
-    }
+    // The implementing type from the `type` field (#1588). The old positional
+    // scan took the LAST type-shaped child, which for a parameterized
+    // implementing type (`BufSource<T>`, `Parents<'a>`, `&Foo`) was the trait.
+    const typeName = rustImplTypeName(getChildByField(node, 'type'), this.source);
+    if (!typeName) return;
 
     // Find the struct/type node for the implementing type
     const typeNodeId = this.findNodeByName(typeName);

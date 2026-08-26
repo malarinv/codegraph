@@ -148,9 +148,11 @@ them are the ORIGINAL plan and carry expectations that measurement later correct
       tokio node sections IDENTICAL, small precision-positive edge churn only,
       full suite green), walker `codegraph-kernel/src/rustlang.rs` (survey
       artifact: rust-lang-kernel-port-checklist.md — isAsync dead-code,
-      impl-pushes-no-scope, trait-receiver bug on `impl Trait for Generic<T>`,
-      phantom const identifiers, use-binding triple emission, all preserved
-      bug-for-bug). Gates: parity sweeps **0 diffs** on ripgrep (101/101,
+      impl-pushes-no-scope, trait-receiver bug on `impl Trait for Generic<T>`
+      (fixed on both sides together in #1588 — receiver now comes from the
+      impl_item's `type` field), phantom const identifiers, use-binding
+      triple emission, all preserved bug-for-bug). Gates: parity sweeps
+      **0 diffs** on ripgrep (101/101,
       0 deferred) / tokio (790/790, 0 deferred) / rust-analyzer (1217/1488,
       0 diffs; 271 deferrals are token-macro-table sources — `T![~]`, `[$]` —
       that error on BOTH arms, grammar-inherent like fmt's C++ 42%); full-init
