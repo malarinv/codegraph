@@ -27,6 +27,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- The MCP server now finds your project when it's launched from a workspace folder above it: if the launch directory has no index of its own but exactly one indexed project sits below it (a repo container, an agent workspace, a monorepo root), that project becomes the session's default — live file watching and the shared daemon included — instead of every tool call failing until a `projectPath` or `--path` is supplied. Thanks @nakisen. (#1606)
+
+- When no project can be resolved at all, the MCP server now says so instead of starting silently: a startup log line names the directory it searched, and tool calls list the indexed sub-projects it can see nearby so you can pass one as `projectPath`. Previously the server looked healthy from the outside while every tool quietly had no project to answer from. Thanks @nakisen. (#1607)
+
 - Indexing no longer hangs on a Swift Vapor project containing a call with a long argument list. A single `.get(...)`-style call with many labeled arguments and no `use:` handler — the shape generated request builders produce — could stall `codegraph index`, `codegraph sync`, and the MCP server indefinitely. Route detection now handles such files in milliseconds, and every previously-recognized route shape still parses exactly as before. Thanks @maxmilian. (#1544) (Swift)
 
 - `codegraph status` now sees new files inside brand-new directories. Git reports an entirely-untracked directory as a single collapsed entry, so source files created there — a freshly scaffolded `frontend/`, for example — were missing from the pending-changes report, which could claim everything was up to date while those files had not yet been indexed. Thanks @maxmilian. (#1213)
