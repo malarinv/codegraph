@@ -23,6 +23,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A new `deprioritize` setting in `codegraph.json` keeps the paths you name from outranking your product code in search and `codegraph_explore` answers, without removing anything from the index. It takes gitignore-style patterns just like `exclude`, but is ranking-only: helper-script trees, generated output, or optional add-on directories whose generic symbol names (`usage`, `run`, `status`) would otherwise crowd out the code that actually answers a query stay fully indexed and findable — and a query that genuinely targets such a tree still returns it. Thanks @maxmilian. (#982)
 
+- `codegraph install --init` wires up your agents and builds the current project's index in one command, and `codegraph init --yes` runs without any prompts — so a fresh container or CI job can bootstrap CodeGraph with a single non-interactive line (`codegraph install --yes --init`). The installer still never indexes anything unless you ask for it with the flag, and the usual safety refusal for a home directory or filesystem root applies. (#1578)
+
 ### Fixes
 
 - Indexing no longer hangs on a Swift Vapor project containing a call with a long argument list. A single `.get(...)`-style call with many labeled arguments and no `use:` handler — the shape generated request builders produce — could stall `codegraph index`, `codegraph sync`, and the MCP server indefinitely. Route detection now handles such files in milliseconds, and every previously-recognized route shape still parses exactly as before. Thanks @maxmilian. (#1544) (Swift)
