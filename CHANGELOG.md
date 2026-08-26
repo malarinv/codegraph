@@ -12,6 +12,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.0] - 2026-08-26
+
 ### Highlights
 
 - **GitHub Copilot is now supported** — `codegraph install` sets it up in VS Code, the Copilot CLI, and JetBrains IDEs, next to the agents it already knew.
@@ -856,3 +859,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.4.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.0
 [1.4.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.1
 [1.5.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.5.0
+[1.6.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.0
