@@ -543,6 +543,93 @@ export function preferCallSiteFile(nodes: Node[], callSiteFile: string): Node[] 
   return same.length ? [...same, ...other] : nodes;
 }
 
+/**
+ * Languages whose object literals declare callable members — `export const
+ * api = { call() {…}, get: () => {…} }` used as a namespace (#1573).
+ */
+const OBJECT_LITERAL_LANGUAGES = new Set<string>(['typescript', 'tsx', 'javascript', 'jsx', 'arkts']);
+
+/** True when `inner`'s source range lies within `outer`'s (lines, then columns on a shared line). */
+function rangeWithin(inner: Node, outer: Node): boolean {
+  const innerEnd = inner.endLine ?? inner.startLine;
+  const outerEnd = outer.endLine ?? outer.startLine;
+  if (inner.startLine < outer.startLine || innerEnd > outerEnd) return false;
+  if (inner.startLine === outer.startLine && inner.startColumn < outer.startColumn) return false;
+  if (innerEnd === outerEnd && inner.endColumn > outer.endColumn) return false;
+  return true;
+}
+
+function sameRange(a: Node, b: Node): boolean {
+  return (
+    a.startLine === b.startLine &&
+    a.startColumn === b.startColumn &&
+    (a.endLine ?? a.startLine) === (b.endLine ?? b.startLine) &&
+    a.endColumn === b.endColumn
+  );
+}
+
+/**
+ * Resolve `container.member` where `container` is a VALUE holding an object
+ * literal — `export const api = { call() {…}, get: () => {…} }` used as the
+ * module's namespace (#1573). The members are extracted as plain functions
+ * with BARE qualified names inside the constant's source extent (there is no
+ * `api::call`), so neither the `Container::member` lookup the class-shaped
+ * kinds use (#825) nor the declared-type inference for singleton instances
+ * (#1292) can reach them, and every such call resolved to nothing — or, via
+ * an import, to the constant itself. This looks the member up by CONTAINMENT:
+ * a node named `member` whose range lies inside the container's, in the
+ * container's own file. A helper declared inside a member's body is not a
+ * member and is skipped; nothing else in the file can donate a match. Calls
+ * take callable kinds only; other references accept value members too.
+ */
+export function resolveObjectLiteralMember(
+  container: Node,
+  member: string,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+  confidence: number,
+  resolvedBy: ResolvedRef['resolvedBy'],
+): ResolvedRef | null {
+  if (container.kind !== 'constant' && container.kind !== 'variable') return null;
+  if (!OBJECT_LITERAL_LANGUAGES.has(container.language)) return null;
+  if (!sameLanguageFamily(container.language, ref.language)) return null;
+
+  const inFile = context.getNodesInFile(container.filePath);
+  const callable = (n: Node) => n.kind === 'function' || n.kind === 'method';
+  const valueMember = (n: Node) =>
+    callable(n) || n.kind === 'property' || n.kind === 'variable' || n.kind === 'constant';
+  const accepts = ref.referenceKind === 'calls' ? callable : valueMember;
+
+  const inside = inFile.filter((n) => n.id !== container.id && rangeWithin(n, container));
+  let candidates = inside.filter((n) => n.name === member && accepts(n));
+  if (candidates.length === 0) return null;
+
+  // Drop a candidate nested inside ANOTHER callable's body within the literal
+  // (`{ run() { const call = () => {}; } }` — `call` is `run`'s local, not a
+  // member). Strict containment: an identically-ranged sibling node for the
+  // same member (a property node over an arrow function) is not a body.
+  const bodies = inside.filter(callable);
+  candidates = candidates.filter(
+    (c) => !bodies.some((b) => b.id !== c.id && !sameRange(b, c) && rangeWithin(c, b))
+  );
+  if (candidates.length === 0) return null;
+
+  // Several survivors (a property AND a function for one arrow member, say):
+  // a callable first, then the earliest in source order.
+  candidates.sort((a, b) => {
+    const ca = callable(a) ? 0 : 1;
+    const cb = callable(b) ? 0 : 1;
+    if (ca !== cb) return ca - cb;
+    return a.startLine - b.startLine || a.startColumn - b.startColumn;
+  });
+  return {
+    original: ref,
+    targetNodeId: candidates[0]!.id,
+    confidence,
+    resolvedBy,
+  };
+}
+
 // Exported for the precedence unit tests (#1079): they assert the
 // preferredFqn → same-file → matches[0] ordering directly.
 export function resolveMethodOnType(
@@ -1769,6 +1856,27 @@ export function matchMethodCall(
         return typedMatch;
       }
     }
+  }
+
+  // Object-literal namespace receiver (#1573): `api.call()` where `api` is a
+  // same-file `const api = { call() {…}, get: () => {…} }`. Its members are
+  // plain functions with bare names inside the constant's extent — no
+  // `Container::member` qualified name — so none of the class-shaped
+  // strategies below can see them (Strategy 3 only considers `method`
+  // kinds) and the call resolved to nothing at all. Same file only: a
+  // cross-file use reaches the same helper through the import path.
+  if (dotMatch && !objectOrClass!.includes('.') && OBJECT_LITERAL_LANGUAGES.has(ref.language)) {
+    const literalMatch = nmTimedT('mc-literal', ref, (): ResolvedRef | null => {
+      const holders = preferCallSiteFile(context.getNodesByName(objectOrClass!), ref.filePath).filter(
+        (n) => (n.kind === 'constant' || n.kind === 'variable') && n.filePath === ref.filePath
+      );
+      for (const holder of holders) {
+        const hit = resolveObjectLiteralMember(holder, methodName!, ref, context, 0.85, 'instance-method');
+        if (hit) return hit;
+      }
+      return null;
+    });
+    if (literalMatch) return literalMatch;
   }
 
   // Strategy 1: Direct class name match (existing logic). When the receiver

@@ -3075,6 +3075,131 @@ export function callFromImportedFile(): void {
     }, 30000);
   });
 
+  describe('Object-literal namespace members (#1573)', () => {
+    // `export const api = { call() {…}, get: () => {…} }` used as the module's
+    // API surface: the members are plain functions with bare names inside the
+    // constant's extent, so `api.call()` resolved to nothing in the defining
+    // file and to the CONSTANT through an import — zero callers everywhere.
+    const setup = (files: Record<string, string>) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-1573-'));
+      for (const [name, content] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(tmpDir, name)), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, name), content);
+      }
+      return tmpDir;
+    };
+    const callersOf = async (cg: CodeGraph, name: string, kind: string, filePath?: string) => {
+      const target = (await cg.searchNodes(name, { limit: 20 })).find(
+        (r) => r.node.kind === kind && r.node.name === name && (!filePath || r.node.filePath === filePath)
+      );
+      expect(target).toBeDefined();
+      return (await cg.getCallers(target!.node.id)).map((c) => c.node.name).sort();
+    };
+
+    it('resolves same-file and imported calls to the literal member, never to the constant (#1573)', async () => {
+      const tmpDir = setup({
+        'a.ts': `export const obj = { m() { return 1; } };
+export class C { static s() { return 2; } }
+export function sameFileCallers() { return obj.m() + C.s(); }
+`,
+        'b.ts': `import { obj, C } from "./a";
+export function crossFileCaller() { return obj.m() + C.s(); }
+`,
+        // A same-named top-level function elsewhere must never be chosen.
+        'decoy.ts': `export function m() { return 'decoy'; }
+`,
+      });
+      try {
+        const cg = CodeGraph.initSync(tmpDir);
+        await cg.indexAll();
+
+        expect(await callersOf(cg, 'm', 'function', 'a.ts')).toEqual(['crossFileCaller', 'sameFileCallers']);
+        expect(await callersOf(cg, 'm', 'function', 'decoy.ts')).toEqual([]);
+        // The class static next to it resolves exactly as before (#825).
+        expect(await callersOf(cg, 's', 'method')).toEqual(['crossFileCaller', 'sameFileCallers']);
+
+        // The import edge no longer lands on the constant itself.
+        const obj = (await cg.searchNodes('obj', { limit: 5 })).find((r) => r.node.kind === 'constant');
+        expect(obj).toBeDefined();
+        const caller = (await cg.searchNodes('crossFileCaller', { limit: 5 })).find((r) => r.node.kind === 'function');
+        const toConstant = cg
+          .getOutgoingEdges(caller!.node.id)
+          .filter((e) => e.kind === 'calls' && e.target === obj!.node.id);
+        expect(toConstant).toHaveLength(0);
+        cg.close();
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }, 30000);
+
+    it('covers method and arrow-property members, and skips a declaration nested in a member body', async () => {
+      const tmpDir = setup({
+        'src/api.ts': `export const api = {
+  call: () => { return 1; },
+  get() {
+    function call() { return 'nested in get, not a member'; }
+    return call();
+  },
+};
+`,
+        'src/use.ts': `import { api } from './api';
+export function useCall() { return api.call(); }
+export function useGet() { return api.get(); }
+`,
+      });
+      try {
+        const cg = CodeGraph.initSync(tmpDir);
+        await cg.indexAll();
+
+        const calls = (await cg.searchNodes('call', { limit: 20 }))
+          .map((r) => r.node)
+          .filter((n) => n.name === 'call' && n.filePath === 'src/api.ts' && (n.kind === 'function' || n.kind === 'method'));
+        // The member is the arrow on line 2; the nested declaration sits
+        // inside `get`'s body on line 4 and must never be taken for it.
+        const member = calls.find((n) => n.startLine === 2);
+        const nested = calls.find((n) => n.startLine === 4);
+        expect(member).toBeDefined();
+        expect(nested).toBeDefined();
+        expect((await cg.getCallers(member!.id)).map((c) => c.node.name)).toContain('useCall');
+        expect((await cg.getCallers(nested!.id)).map((c) => c.node.name)).not.toContain('useCall');
+        expect(await callersOf(cg, 'get', 'function')).toEqual(['useGet']);
+        cg.close();
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }, 30000);
+
+    it('leaves a non-literal value receiver on its existing path', async () => {
+      const tmpDir = setup({
+        'src/mk.ts': `export function m() { return 'top-level, unrelated to obj'; }
+export const obj = makeObj();
+export function makeObj(): { m(): number } { return { m: () => 1 } as { m(): number }; }
+export function localUse() { return obj.m(); }
+`,
+        'src/use.ts': `import { obj } from './mk';
+export function remoteUse() { return obj.m(); }
+`,
+      });
+      try {
+        const cg = CodeGraph.initSync(tmpDir);
+        await cg.indexAll();
+        // `obj` holds a call result, not a literal: the same-named top-level
+        // `m` lies outside its declaration, so containment finds nothing and
+        // both calls keep today's behavior (unresolved in the defining file;
+        // the constant edge through the import) rather than guessing.
+        expect(await callersOf(cg, 'm', 'function')).toEqual([]);
+        const obj = (await cg.searchNodes('obj', { limit: 5 })).find((r) => r.node.kind === 'constant');
+        const remote = (await cg.searchNodes('remoteUse', { limit: 5 })).find((r) => r.node.kind === 'function');
+        expect(
+          cg.getOutgoingEdges(remote!.node.id).some((e) => e.kind === 'calls' && e.target === obj!.node.id)
+        ).toBe(true);
+        cg.close();
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }, 30000);
+  });
+
   describe('C++ namespace-qualified static method calls to out-of-line definitions (#1291)', () => {
     // The issue's exact shape: nested types + out-of-line static method
     // definition inside `namespace simulator { }` in the .cpp, called via the

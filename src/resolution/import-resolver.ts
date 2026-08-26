@@ -12,6 +12,7 @@ import { applyAliases } from './path-aliases';
 import { resolveWorkspaceImport } from './workspace-packages';
 import {
   resolveMethodOnType,
+  resolveObjectLiteralMember,
   localReceiverTypePatterns,
   normalizeInferredTypeName,
 } from './name-matcher';
@@ -1544,6 +1545,20 @@ export function resolveViaImport(
                 confidence: 0.9,
                 resolvedBy: 'import',
               };
+            }
+            // An imported object literal used as a namespace (#1573):
+            // `api.call()` after `import { api } from './api'` where `api` is
+            // `export const api = { call() {…} }`. Its members have bare
+            // qualified names inside the constant's extent, so the
+            // `Container::member` lookup above can't see them and the edge
+            // landed on the constant — every cross-file caller of the method
+            // went missing. Resolve the member by containment instead.
+            if (targetNode.kind === 'constant' || targetNode.kind === 'variable') {
+              const member = ref.referenceName.slice(imp.localName.length + 1).split('.')[0];
+              if (member) {
+                const literalMember = resolveObjectLiteralMember(targetNode, member, ref, context, 0.9, 'import');
+                if (literalMember) return literalMember;
+              }
             }
             // An imported VALUE (singleton constant / shared instance) called
             // through a member: `reproStore.notifyJoinGuildStatus()` after
