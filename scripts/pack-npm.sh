@@ -55,6 +55,10 @@ for archive in "${archives[@]}"; do
       nodefile="node"
       ;;
   esac
+  # The browser viewer must survive the archive round-trip too: a tar/zip that
+  # dropped dist/viewer would publish a platform package whose `codegraph ui`
+  # serves a 404.
+  node "$ROOT/scripts/check-ui-build.mjs" --root "$pkgdir/lib"
   VERSION="$VERSION" SCOPE="$SCOPE" TARGET="$target" OSV="$os" ARCHV="$arch" NODEFILE="$nodefile" \
     node -e '
       const fs=require("fs");
