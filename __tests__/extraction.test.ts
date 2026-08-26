@@ -175,6 +175,53 @@ class ENGINE_API UNetConnectionRepControl : public UObject
     expect(detectLanguage('cfoo.h', '#ifndef CFOO_H\nstruct Point { int x; int y; };\nvoid f(struct Point p);\n#endif\n')).toBe('c');
   });
 
+  it('should detect a .h whose only C++ signal is a plain base clause as cpp (#1592)', () => {
+    // No export macro, no `class` keyword, no access section, no `virtual`:
+    // the derived struct's base clause is the only C++ construct, and the
+    // #1159 branch only knows the macro-annotated form. Misdetected as C, the
+    // C extractor drops `Derived` and mints a phantom `function Base`.
+    expect(detectLanguage('min.h', 'struct Base {};\nstruct Derived : Base {};\n')).toBe('cpp');
+    expect(detectLanguage('pub.h', 'struct Derived : public Base {};\n')).toBe('cpp');
+    expect(detectLanguage('scoped.h', 'struct Derived : ns::Base {};\n')).toBe('cpp');
+    expect(detectLanguage('tmpl.h', 'struct Derived : Base<int, Foo<T>> {};\n')).toBe('cpp');
+    expect(detectLanguage('final.h', 'struct Derived final : Base {};\n')).toBe('cpp');
+    expect(detectLanguage('multi.h', 'class Derived : public A, private B\n{\n};\n')).toBe('cpp');
+    expect(detectLanguage('virt.h', 'struct Derived : virtual Base {};\n')).toBe('cpp');
+
+    // The base clause sits PAST the 8 KB sample, behind a long C-compatible
+    // preamble (guards, defines, plain typedefs) — the second pass must scan
+    // the whole file, not just the sample.
+    const preamble = '#ifndef BIG_H\n#define BIG_H\n' + '#define VALUE_0 0\n'.repeat(700);
+    expect(preamble.length).toBeGreaterThan(8192);
+    expect(detectLanguage('big.h', `${preamble}struct Base {};\nstruct Derived : Base {};\n#endif\n`)).toBe('cpp');
+
+    // Controls — all genuine C, none may flip to C++:
+    // a bit-field (`:` after a member name inside the body),
+    expect(detectLanguage('bits.h', 'struct S { unsigned int a : 3; unsigned int b : 5; };\n')).toBe('c');
+    // a ternary whose `:` follows a `sizeof(struct …)` / cast,
+    expect(detectLanguage('tern.h', 'static inline int sz(int x) { return x ? sizeof(struct foo) : 0; }\n#define P(a,b) ((a) ? (struct foo *)(a) : (b))\n')).toBe('c');
+    // a label / identifier that merely starts with `struct`,
+    expect(detectLanguage('label.h', 'static void g(void) {\nstruct_end:\n  return;\n}\nint struct_a, struct_b;\n')).toBe('c');
+    // a doc comment whose prose reads like a base clause,
+    expect(detectLanguage('doc.h', '/* struct timeval: seconds, microseconds */\nstruct timeval { long tv_sec; long tv_usec; };\n// struct foo: x, y\n')).toBe('c');
+    // and the two existing controls.
+    expect(detectLanguage('cfoo.h', '#ifndef CFOO_H\nstruct Point { int x; int y; };\nvoid f(struct Point p);\n#endif\n')).toBe('c');
+    expect(detectLanguage('stdio.h', '#ifndef STDIO_H\nvoid printf();\n#endif\n')).toBe('c');
+  });
+
+  it('should extract a derived struct from a plain base-clause .h, with no phantom function (#1592)', () => {
+    const result = extractFromSource('src/min.h', 'struct Base {};\nstruct Derived : Base {};\n');
+    const derived = result.nodes.find((n) => n.name === 'Derived');
+    expect(derived).toBeDefined();
+    expect(derived?.kind).toBe('struct');
+    expect(derived?.language).toBe('cpp');
+    // The C mis-route read `Derived : Base {}` as a K&R-ish function `Base`
+    // returning `Derived` — that phantom must be gone.
+    expect(result.nodes.some((n) => n.name === 'Base' && n.kind === 'function')).toBe(false);
+    expect(result.nodes.filter((n) => n.name === 'Base')).toHaveLength(1);
+    expect(result.nodes.find((n) => n.name === 'Base')?.kind).toBe('struct');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.css')).toBe('unknown');
     expect(detectLanguage('data.json')).toBe('unknown');
