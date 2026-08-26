@@ -80,8 +80,13 @@ export class NotIndexedError extends Error {}
 /**
  * A security refusal (sensitive system path). Stays `isError: true` WITHOUT
  * retry guidance — abandoning this path is the desired agent reaction.
+ *
+ * Defined in `../errors` so non-MCP read sinks (the `codegraph ui` server) can
+ * enforce the same refusal without importing this module; re-exported here
+ * because this is where every existing caller imports it from.
  */
-export class PathRefusalError extends Error {}
+export { PathRefusalError } from '../errors';
+import { PathRefusalError } from '../errors';
 import { resolve as resolvePath, relative as relativePath } from 'path';
 
 /** Maximum output length to prevent context bloat (characters) */

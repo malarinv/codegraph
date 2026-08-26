@@ -20,6 +20,7 @@
  *   codegraph callees <symbol>   Find what a function/method calls
  *   codegraph impact <symbol>    Analyze what code is affected by changing a symbol
  *   codegraph affected [files]   Find test files affected by changes
+ *   codegraph ui [path]          Open the browser viewer for an indexed project
  *   codegraph upgrade [version]  Update CodeGraph to the latest release
  */
 
@@ -53,6 +54,11 @@ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
+// Value import, but dependency-free by design so `--help` text can name the
+// default port without dragging node:http into every other subcommand; the
+// server itself is loaded lazily inside the `ui` action. See ui-server/constants.
+import { BROWSER_ENV, DEFAULT_UI_PORT } from '../ui-server/constants';
+import type { UiServerHandle } from '../ui-server';
 
 // Decided once, before `--color`/`--no-color` are stripped from argv below
 // (#1281). Piped/redirected stdout, NO_COLOR, or --no-color -> plain output.
@@ -1820,6 +1826,136 @@ program
       note: (m) => clack.log.success(m),
       done: (m) => clack.outro(m),
     });
+  });
+
+/**
+ * Print the "no index here" guidance.
+ *
+ * The viewer READS an index; it never builds one — indexing stays the user's
+ * decision, exactly as it is for the MCP tools. So a missing index is normal
+ * input, not a failure to apologize for: say what is missing, say the one
+ * command that fixes it, and never print a stack trace.
+ */
+function printNoIndexGuidance(projectPath: string): void {
+  error(`No CodeGraph index found for ${projectPath}`);
+  console.error('');
+  console.error('  The viewer reads an index that already exists — it never creates one.');
+  console.error('  To index this project:');
+  console.error('');
+  console.error(`    ${chalk.cyan('codegraph init')}`);
+  console.error('');
+  console.error('  Already indexed somewhere else? Point the viewer at it:');
+  console.error('');
+  console.error(`    ${chalk.cyan('codegraph ui /path/to/indexed/project')}`);
+  console.error('');
+}
+
+/**
+ * codegraph ui [path]  (alias: web)
+ *
+ * The browser reader: serves the built viewer (`dist/viewer/`) over loopback
+ * and opens it. Read-only in every sense — it answers GET, it opens the index
+ * for reading, and it never writes to the project or the graph.
+ *
+ * Deliberately absent from TELEMETRY_FLUSH_COMMANDS above: the command's own
+ * banner tells the user nothing leaves their machine, so it must not be the
+ * thing that triggers a telemetry send. The usage count still buffers locally
+ * like every other quick command.
+ */
+program
+  .command('ui [path]')
+  .alias('web')
+  .description('Open the CodeGraph viewer in your browser — read your indexed project as a graph')
+  .option('--port <number>', `Port to listen on (default: ${DEFAULT_UI_PORT}, or the next free one)`)
+  .option('--no-open', 'Print the URL instead of opening a browser')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  $ codegraph ui                    Read the project you're standing in
+  $ codegraph ui ~/code/my-app      Read a specific indexed project
+  $ codegraph ui --port 8080        Use one specific port (fails if it's taken)
+  $ codegraph ui --no-open          Just print the URL (headless boxes, SSH)
+
+The viewer listens on 127.0.0.1 only, so nothing on your network can reach it,
+and it is read-only: it opens an index that already exists and never changes
+your project or your graph. Requests from any other host are refused.
+
+Without --port it takes ${DEFAULT_UI_PORT}, or the next free port if that one is busy.
+
+Set ${BROWSER_ENV}=<command> to choose which browser opens, or
+${BROWSER_ENV}=none to never open one.
+`
+  )
+  .action(async (pathArg: string | undefined, options: { port?: string; open?: boolean }) => {
+    // An explicit --port stays explicit: a scripted `--port 8080` that quietly
+    // lands on 8081 is worse than one that says the port is busy. The default
+    // port is the only one we're free to walk away from.
+    let requestedPort: number | undefined;
+    if (options.port !== undefined) {
+      requestedPort = Number(options.port);
+      if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) {
+        error(`--port must be a whole number between 0 and 65535 (got "${options.port}").`);
+        process.exit(1);
+      }
+    }
+
+    const projectPath = resolveProjectPath(pathArg);
+
+    // Sensitive-directory refusal before anything opens: the same guard the MCP
+    // entry points use, so `codegraph ui /etc` is turned away here rather than
+    // becoming a browsable view of the system.
+    const { validateProjectPath } = await import('../utils');
+    const rootError = validateProjectPath(projectPath);
+    if (rootError) {
+      error(rootError);
+      process.exit(1);
+    }
+
+    if (!isInitialized(projectPath)) {
+      printNoIndexGuidance(projectPath);
+      process.exit(1);
+    }
+
+    const { startUiServer, openBrowser, ViewerMissingError } = await import('../ui-server');
+
+    let handle: UiServerHandle;
+    try {
+      handle = await startUiServer({
+        projectRoot: projectPath,
+        port: requestedPort,
+        portFallback: requestedPort === undefined,
+      });
+    } catch (err) {
+      // Both failure modes here (viewer assets missing, no port available) carry
+      // their own remediation — print it plainly, never a stack trace.
+      error(err instanceof ViewerMissingError || err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+
+    console.log('');
+    console.log(chalk.bold('CodeGraph viewer'));
+    console.log('');
+    console.log(`  ${chalk.dim('Reading')}  ${projectPath}`);
+    console.log(`  ${chalk.dim('URL')}      ${chalk.cyan(handle.url)}`);
+    console.log(`  ${chalk.dim('Access')}   this machine only ${getGlyphs().dash} read-only, nothing leaves your computer`);
+    console.log('');
+
+    const opened = options.open === false ? false : openBrowser(handle.url);
+    console.log(
+      opened
+        ? chalk.dim('  Opening your browser… press Ctrl+C to stop.')
+        : chalk.dim('  Open that URL in a browser. Press Ctrl+C to stop.')
+    );
+    console.log('');
+
+    // The http server keeps the event loop alive on its own; these just make
+    // Ctrl-C hang up live sockets instead of waiting on browser keep-alives.
+    const shutdown = (): void => {
+      void handle.close().then(() => process.exit(0));
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
   });
 
 /**
