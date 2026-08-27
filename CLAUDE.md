@@ -11,7 +11,8 @@ Distributed as `@colbymchenry/codegraph` on npm; same binary serves as installer
 ## Build, Test, Run
 
 ```bash
-npm run build           # tsc + copy schema.sql and *.wasm into dist/; chmods dist/bin/codegraph.js
+npm run build           # tsc + copy schema.sql and *.wasm + build the viewer into dist/; chmods dist/bin/codegraph.js
+npm run build:lib       # the viewer's components as @colbymchenry/codegraph-ui (ui/dist) — NOT part of `build`
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -28,6 +29,29 @@ npx vitest run __tests__/extraction.test.ts -t "TypeScript"
 ```
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
+
+One other build step writes into `dist/` and is subject to the same rule: `build:ui` builds the
+browser viewer into `dist/viewer/` (never `dist/ui/` — that's the terminal ui).
+`scripts/check-ui-build.mjs` asserts both `dist/viewer/` and the copied grammars in
+`dist/extraction/wasm/` after every build and inside every release archive — the viewer's syntax
+highlighting reads a file with the same grammar the engine indexed it with, so a missing wasm is an
+unhighlighted screen as well as an extraction gap.
+
+`npm run build:lib` is separate and does NOT run as part of `npm run build`: it compiles the same
+`ui/src` tree a second way, with `svelte-package`, into `ui/dist` — the `@colbymchenry/codegraph-ui`
+component library the Pro app imports (task CG-61). `scripts/check-ui-package.mjs` then prunes the
+standalone app's shell out of it, resolves the extensionless import specifiers `svelte-package`
+leaves behind, and asserts the seam: nothing outside `lib/adapter.js` may reach the network. The
+package is **prepared, not published** — `ui/package.json` carries `"private": true` deliberately,
+and `scripts/pack-npm.sh` only packs a tarball when `CODEGRAPH_PACK_UI=1`.
+
+Tests run as **two vitest projects** (`vitest.workspace.mts`): `engine` (node) and `ui` (jsdom, the
+Svelte plugin, `resolve.conditions: ['browser']`) for the single `__tests__/ui-package.test.ts`.
+`npm test` still runs both. The split is not cosmetic — `browser` is a package-resolution
+condition, and applied globally it hands the engine's suites the browser builds of
+`web-tree-sitter` and friends. The root config (`vitest.config.mts`, `.mts` because the plugin is
+ESM-only and the repo is CJS) is the shared base; note that a workspace project **concatenates**
+the base's `include` with its own, which is why the `ui` project does not `extends` it.
 
 Node engines: `>=20.0.0 <25.0.0`. There is a hard exit on Node 25.x and below 20 (see `src/bin/node-version-check.ts`).
 
@@ -53,7 +77,8 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Backed by Node's built-in **`node:sqlite`** (`DatabaseSync`) — real SQLite with WAL + FTS5, exposed through a thin better-sqlite3-shaped adapter. The bundled runtime always ships Node ≥22.5, so `node:sqlite` is always available: **no native build step and no wasm fallback**. (Running from source needs Node ≥22.5.) `codegraph status` reports the live backend (`node-sqlite`, the sole backend).
 - `src/extraction/` — `ExtractionOrchestrator`, tree-sitter wrappers, per-language extractors under `languages/` (one file per language), plus standalone extractors for non-tree-sitter formats (`svelte-extractor.ts`, `vue-extractor.ts`, `liquid-extractor.ts`, `dfm-extractor.ts` for Delphi). `parse-worker.ts` runs heavy parsing off the main thread.
 - `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges.
-- `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries).
+- `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries), plus the shared query-time derivations more than one surface renders: `named-symbol-flow.ts` (the one path finder, behind `codegraph_explore`'s Flow section and the viewer's Flow strip), `dynamic-boundary-report.ts` (where the graph stops), `type-hierarchy.ts` (ancestors/subtypes and the implementation count explore prints and the viewer draws),
+  `dead-code.ts` (unreferenced symbols, and every reason a candidate is NOT claimed). A derivation that two callers render must live here, not in `ToolHandler` — two derivations eventually disagree.
 - `src/context/` — `ContextBuilder` + formatter for markdown/JSON output.
 - `src/search/` — full-text query parser and helpers for FTS5.
 - `src/sync/` — `FileWatcher` (native FSEvents/inotify/RDCW) with debounce + filter, and git-hook helpers.
