@@ -192,6 +192,15 @@ ${callers}
 `
   );
 
+  // CRLF on purpose: tree-sitter numbers rows by `\n`, so a CRLF file must come
+  // back with the same line numbers the graph recorded — and without the stray
+  // `\r` rendering at the end of every line. This is what a Windows checkout
+  // with core.autocrlf looks like, and it is decided by bytes, not by the OS.
+  fs.writeFileSync(
+    path.join(srcDir, 'crlf.ts'),
+    ['export function windowsStyle(n: number): number {', '  return n + 1;', '}', ''].join('\r\n')
+  );
+
   fs.writeFileSync(
     path.join(testsDir, 'service.test.ts'),
     `import { Service } from '../src/service';
@@ -611,6 +620,27 @@ describe('GET /api/source', () => {
     const body = await getJson('/api/source?file=src/handler.ts&from=1&to=2');
     expect(body.drift).toBe(false);
     expect(body.lines).toHaveLength(2);
+  });
+
+  it('keeps a CRLF file on the index line numbering, without the stray carriage returns', async () => {
+    const node = await getJson(`/api/node/${await idOf('windowsStyle', 'function')}`);
+    expect(node.node.file).toBe('src/crlf.ts');
+
+    const body = await getJson('/api/source?file=src/crlf.ts');
+    expect(body.drift).toBe(false);
+    expect(body.totalLines).toBe(3);
+    expect(body.lines).toEqual([
+      'export function windowsStyle(n: number): number {',
+      '  return n + 1;',
+      '}',
+    ]);
+    expect(body.lines.some((l: string) => l.includes('\r'))).toBe(false);
+
+    // The symbol's indexed range still names its own body.
+    const slice = await getJson(
+      `/api/source?file=src/crlf.ts&from=${node.node.line}&to=${node.node.endLine}`
+    );
+    expect(slice.lines[0]).toContain('windowsStyle');
   });
 
   it('refuses a path that escapes the project', async () => {
