@@ -175,6 +175,22 @@ export function handleRequest(service: Service, key: string): string {
 `
   );
 
+  // Module-level statements: the engine records them as edges out of the FILE
+  // node, which is the only reason `/api/entrypoints` can see an executable
+  // root at all. Nothing else in the fixture runs anything on the way down.
+  fs.writeFileSync(
+    path.join(srcDir, 'main.ts'),
+    `import { Service } from './service';
+import { handleRequest } from './handler';
+
+const service = new Service({ ttlMs: 5, label: 'main' });
+const first = handleRequest(service, 'boot');
+const second = service.load('warm');
+
+export const started = [first, second];
+`
+  );
+
   // 500 callers into one function: the N+1 and capping behaviour only shows up
   // at this scale, and the fixture keeps CI honest without needing the engine's
   // own index to be present.
@@ -209,6 +225,10 @@ export function testLoadsThroughCache(): void {
   const service = new Service({ ttlMs: 1, label: 'x' });
   service.load('k');
 }
+
+// Module level, on purpose: a test file that RUNS something must still be
+// excluded from the entry points.
+testLoadsThroughCache();
 `
   );
 
@@ -910,6 +930,20 @@ export default app;
       expect(handler.node.name).toBe('listUsers');
     });
 
+    it('offers its routes as entry points, ahead of anything derived', async () => {
+      const res = await requestOn(routedServer.port, '/api/entrypoints');
+      const body = JSON.parse(res.body);
+
+      expect(body.routes.routed).toBe(true);
+      expect(body.routes.routeCount).toBe(4);
+      const urls = body.routes.items.map((e: any) => e.url);
+      expect(urls).toEqual(
+        expect.arrayContaining(['GET /users', 'GET /users/:id', 'POST /users', 'DELETE /users/:id'])
+      );
+      // A route row has to be navigable, or it is a label.
+      expect(body.routes.items.every((e: any) => e.handlerId)).toBe(true);
+    });
+
     it('honours the limit and says when it cut the list', async () => {
       const res = await requestOn(routedServer.port, '/api/routes?limit=3');
       const body = JSON.parse(res.body);
@@ -997,6 +1031,108 @@ describe.runIf(CodeGraph.isInitialized(path.resolve(__dirname, '..')))(
     });
   }
 );
+
+describe('GET /api/entrypoints', () => {
+  it('finds the file that runs something, and reports what it reaches', async () => {
+    const body = await getJson('/api/entrypoints');
+
+    const files = body.files.items.map((f: any) => f.file);
+    expect(files).toContain('src/main.ts');
+
+    const main = body.files.items.find((f: any) => f.file === 'src/main.ts');
+    expect(main.kind).toBe('file');
+    expect(main.id).toMatch(/^file:/);
+    // `new Service(...)`, `handleRequest(...)` and `service.load(...)` all sit
+    // at module level.
+    expect(main.calls).toBeGreaterThanOrEqual(2);
+    // It imports from service.ts and handler.ts, so it wires files together.
+    expect(main.reaches).toBeGreaterThanOrEqual(2);
+    expect(typeof main.dependents).toBe('number');
+  });
+
+  it('leaves test files out — "where do I start" never means a test', async () => {
+    const body = await getJson('/api/entrypoints');
+
+    for (const file of body.files.items) expect(file.test).toBe(false);
+    // The fixture's test file calls its own helper at module level, so it IS a
+    // candidate by the raw graph signal and is excluded deliberately.
+    expect(body.files.items.map((f: any) => f.file)).not.toContain(
+      '__tests__/service.test.ts'
+    );
+    for (const hub of body.hubs.items) expect(hub.test).toBe(false);
+  });
+
+  it('ranks the most depended-on symbols as hubs, with their dependent counts', async () => {
+    const body = await getJson('/api/entrypoints');
+
+    const hot = body.hubs.items.find((h: any) => h.name === 'hot');
+    expect(hot, 'the 500-caller function should top the hubs').toBeTruthy();
+    expect(hot.dependents).toBe(500);
+    expect(body.hubs.items[0].name).toBe('hot');
+
+    const counts = body.hubs.items.map((h: any) => h.dependents);
+    expect(counts).toEqual([...counts].sort((a: number, b: number) => b - a));
+    // A file or a bare import is structure, not somewhere to start reading.
+    for (const hub of body.hubs.items) {
+      expect(['file', 'import', 'export', 'parameter']).not.toContain(hub.kind);
+    }
+  });
+
+  it('says a project without routes is not routed rather than failing', async () => {
+    const body = await getJson('/api/entrypoints');
+    expect(body.routes.routed).toBe(false);
+    expect(body.routes.items).toEqual([]);
+    expect(body.routes.routeCount).toBe(0);
+  });
+
+  it('honours limit, and keeps every list within it', async () => {
+    const body = await getJson('/api/entrypoints?limit=1');
+    expect(body.files.items.length).toBeLessThanOrEqual(1);
+    expect(body.hubs.items.length).toBe(1);
+    expect(body.hubs.total).toBeGreaterThanOrEqual(body.hubs.items.length);
+
+    const bad = await getStatusAndJson('/api/entrypoints?limit=0');
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('bad-request');
+  });
+});
+
+describe('GET /api/nodes', () => {
+  it('answers a batch of ids in the order asked, and says which are missing', async () => {
+    const cacheId = await idOf('Cache', 'class');
+    const loadId = await idOf('load', 'method');
+    const body = await getJson(
+      `/api/nodes?id=${encodeURIComponent(loadId)}&id=${encodeURIComponent(cacheId)}&id=method%3Anot-a-real-id`
+    );
+
+    expect(body.items.map((n: any) => n.id)).toEqual([loadId, cacheId]);
+    expect(body.items[0].name).toBe('load');
+    expect(body.items[1].name).toBe('Cache');
+    expect(body.missing).toEqual(['method:not-a-real-id']);
+    // The REF shape, not the Symbol view payload: a trail redraws six names,
+    // not six rail sets.
+    expect(body.items[0].incoming).toBeUndefined();
+    expect(body.items[0].file).toBe('src/service.ts');
+  });
+
+  it('de-duplicates ids rather than answering twice', async () => {
+    const cacheId = await idOf('Cache', 'class');
+    const encoded = encodeURIComponent(cacheId);
+    const body = await getJson(`/api/nodes?id=${encoded}&id=${encoded}`);
+    expect(body.items).toHaveLength(1);
+  });
+
+  it('refuses an empty or oversized request with guidance', async () => {
+    const none = await getStatusAndJson('/api/nodes');
+    expect(none.status).toBe(400);
+    expect(none.body.hint).toContain('id=');
+
+    const ids = Array.from({ length: 61 }, (_, i) => `id=method%3A${i}`).join('&');
+    const many = await getStatusAndJson(`/api/nodes?${ids}`);
+    expect(many.status).toBe(400);
+    expect(many.body.error).toContain('Too many ids');
+  });
+});
 
 describe('an index that is not there', () => {
   it('answers with the same guidance the CLI prints, not a stack trace', async () => {

@@ -1988,6 +1988,94 @@ export class QueryBuilder {
   }
 
   /**
+   * The graph's executable roots — files that RUN something at module level,
+   * ranked by how much of the project they set in motion.
+   *
+   * The engine records a statement at the top level of a file as an edge from
+   * the *file* node, so `src/bin/codegraph.ts` calling `program.parse()` at
+   * module scope is a `calls` edge out of a `file`. That set is what makes the
+   * roots of a dependency graph visible: a library module holds definitions and
+   * runs nothing until someone imports it, while a CLI, a worker entry or a
+   * build script does its work on the way down the file. `instantiates` counts
+   * the same way — `new Server(...)` at module scope is the same act.
+   *
+   * Ranking multiplies the two things an entry point does: it runs (calls), and
+   * it wires the project together (distinct other files its symbols reach). One
+   * alone is misleading — a registration table makes hundreds of module-level
+   * calls into itself, and a barrel file imports everything and runs nothing.
+   * The product puts the file that does both at the top.
+   */
+  getTopCallingFiles(
+    limit: number
+  ): Array<{ nodeId: string; filePath: string; calls: number; reaches: number; score: number }> {
+    if (limit <= 0) return [];
+    return this.db
+      .prepare(
+        `WITH runs AS (
+             SELECT e.source AS id, COUNT(*) AS calls
+               FROM edges e
+               JOIN nodes n ON n.id = e.source
+              WHERE n.kind = 'file' AND e.kind IN ('calls', 'instantiates')
+           GROUP BY e.source
+         ),
+         cand AS (
+             SELECT r.id AS id, n.file_path AS fp, r.calls AS calls
+               FROM runs r JOIN nodes n ON n.id = r.id
+         ),
+         wires AS (
+             SELECT sn.file_path AS fp, COUNT(DISTINCT tn.file_path) AS reaches
+               FROM edges e
+               JOIN nodes sn ON sn.id = e.source
+               JOIN nodes tn ON tn.id = e.target
+              WHERE e.kind != 'contains'
+                AND sn.file_path <> tn.file_path
+                AND sn.file_path IN (SELECT fp FROM cand)
+           GROUP BY sn.file_path
+         )
+         SELECT c.id AS nodeId,
+                c.fp AS filePath,
+                c.calls AS calls,
+                COALESCE(w.reaches, 0) AS reaches,
+                c.calls * (1 + COALESCE(w.reaches, 0)) AS score
+           FROM cand c LEFT JOIN wires w ON w.fp = c.fp
+       ORDER BY score DESC, calls DESC, filePath
+          LIMIT ?`
+      )
+      .all(limit) as Array<{
+      nodeId: string;
+      filePath: string;
+      calls: number;
+      reaches: number;
+      score: number;
+    }>;
+  }
+
+  /**
+   * How many OTHER files depend on each of the given files.
+   *
+   * Counted through the symbols, not the file nodes: an `imports` edge points
+   * at the imported symbol, so a file node almost never receives one and
+   * counting edges into it would report every file as depended on by nobody.
+   * Same-file edges are excluded, which is what makes zero mean "nothing else
+   * in the index reaches into this file" — the honest reading of a root.
+   */
+  getFileDependentCounts(filePaths: string[]): Array<{ filePath: string; dependents: number }> {
+    if (filePaths.length === 0) return [];
+    return this.db
+      .prepare(
+        `SELECT tn.file_path AS filePath, COUNT(DISTINCT sn.file_path) AS dependents
+           FROM edges e
+           JOIN nodes tn ON tn.id = e.target
+           JOIN nodes sn ON sn.id = e.source
+          WHERE e.kind != 'contains'
+            AND tn.file_path IN (SELECT value FROM json_each(?))
+            AND sn.file_path <> tn.file_path
+       GROUP BY tn.file_path`
+      )
+      .all(JSON.stringify(filePaths)) as Array<{ filePath: string; dependents: number }>;
+  }
+
+  /**
    * References recorded against a symbol that never resolved to a node — the
    * calls and type mentions that leave the index (a third-party package, a
    * runtime builtin, a language construct extraction doesn't model).

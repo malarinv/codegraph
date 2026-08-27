@@ -1,7 +1,7 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Six endpoints, one per screen, each answering in a single round-trip — the
+ * Eight endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
  * have to ask a follow-up question. Everything here is a *reader* of the
  * existing schema; nothing indexes, resolves, or writes.
@@ -10,9 +10,11 @@
  * GET /api/stats                     what this index is and how much to trust it
  * GET /api/search?q=                 the search palette
  * GET /api/node/<id>                 the Symbol view: rails, members, tests, blast radius
+ * GET /api/nodes?id=&id=             names for ids you already have (the trail)
  * GET /api/source?file=&from=&to=    verbatim source, with a drift verdict
  * GET /api/file/<path>               the File view: outline and import rails
  * GET /api/routes                    the URL to handler map, when there is one
+ * GET /api/entrypoints               where to start reading: routes, roots, hubs
  * ```
  *
  * It mounts on the `api` seam of `startUiServer`, which means it sits *behind*
@@ -33,10 +35,14 @@ import { buildNode } from './node';
 import { buildSource } from './source';
 import { buildFile } from './file';
 import { buildRoutes } from './routes';
+import { buildEntryPoints } from './entrypoints';
+import { buildNodeRefs } from './nodes';
 
 export { GraphSession } from './session';
 export { ApiError } from './respond';
 export * from './wire';
+export type { WireEntryPoints, WireEntryFile, WireEntryHub } from './entrypoints';
+export type { WireNodeRefs } from './nodes';
 
 /**
  * A mounted API, plus the handle it holds open.
@@ -62,6 +68,7 @@ const API_INDEX = {
     { path: '/api/stats', description: 'Index state, graph counts, detected frameworks.' },
     { path: '/api/search', description: 'Ranked symbol search.', params: ['q', 'limit'] },
     { path: '/api/node/<id>', description: 'One symbol: callers, callees, members, tests, blast radius.' },
+    { path: '/api/nodes', description: 'Names and locations for ids you already have.', params: ['id'] },
     {
       path: '/api/source',
       description: 'Verbatim source for an indexed file, omitted when it has drifted on disk.',
@@ -69,6 +76,11 @@ const API_INDEX = {
     },
     { path: '/api/file/<path>', description: 'One file: outline and import rails.' },
     { path: '/api/routes', description: 'URL to handler map, when the project is a routed app.', params: ['limit'] },
+    {
+      path: '/api/entrypoints',
+      description: 'Where to start reading: routes, files that run something, and hubs.',
+      params: ['limit'],
+    },
   ],
 };
 
@@ -87,6 +99,10 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildSearch(session.acquire(), ctx.query), ctx.method);
         case '/api/routes':
           return ok(res, buildRoutes(session.acquire(), ctx.query), ctx.method);
+        case '/api/entrypoints':
+          return ok(res, buildEntryPoints(session.acquire(), ctx.query), ctx.method);
+        case '/api/nodes':
+          return ok(res, buildNodeRefs(session.acquire(), ctx.query), ctx.method);
         case '/api/source':
           return ok(res, buildSource(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         default:

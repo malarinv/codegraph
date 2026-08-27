@@ -77,6 +77,7 @@
         class="row"
         class:origin={isOrigin}
         class:sel={railFocus.at('left', indexOf(groupIndex, rowIndex))}
+        data-target={node.id}
         role="button"
         tabindex="0"
         title={rowTitle(row)}

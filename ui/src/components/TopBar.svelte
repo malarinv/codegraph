@@ -1,19 +1,19 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
   import { router, mapHref, flowHref, symbolHref } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
+  import { palette } from '../lib/palette.svelte';
+  import SearchPalette from './SearchPalette.svelte';
+  import type { PaletteItem } from '../lib/search-model';
+  import { walkTo } from '../lib/walk';
 
   interface Props {
     /** Indexed project name, e.g. "codegraph/". Null until stats load. */
     project?: string | null;
     /** "13,060 symbols · 46,004 edges · 593 files indexed". Null until loaded. */
     stats?: string | null;
-    query?: string;
-    /** Results panel, owned by the search palette (CG-45). */
-    palette?: Snippet;
   }
 
-  let { project = null, stats = null, query = $bindable(''), palette }: Props = $props();
+  let { project = null, stats = null }: Props = $props();
 
   let input: HTMLInputElement | null = $state(null);
 
@@ -31,12 +31,74 @@
   export function focusSearch(): void {
     input?.focus();
     input?.select();
+    palette.show();
+  }
+
+  /**
+   * Following a result is a `start` hop, never `down` or `up`: nothing on
+   * screen was stepped through to get there, and claiming a direction would
+   * put a `→` in the trail that describes no call.
+   */
+  export function pick(item: PaletteItem): void {
+    const id = item.type === 'route' ? item.nodeId : item.id;
+    // A route whose handler never resolved to a node has nowhere to go; the
+    // row stays, because "this URL exists and we could not place it" is true.
+    if (!id) return;
+    palette.reset();
+    input?.blur();
+    walkTo(
+      item.type === 'route'
+        ? { id, name: item.handler, kind: null }
+        : { id, name: item.node.name, kind: item.node.kind },
+      'start'
+    );
   }
 
   function onkeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') input?.blur();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      palette.hide();
+      input?.blur();
+      return;
+    }
+    if (!palette.open) {
+      // Any other key means the box is being used again after a dismissal.
+      if (event.key !== 'Tab') palette.show();
+      return;
+    }
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        palette.move(1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        palette.move(-1);
+        break;
+      case 'Enter': {
+        event.preventDefault();
+        const item = palette.selectedItem;
+        if (item) pick(item);
+        break;
+      }
+    }
   }
+
+  /**
+   * A click anywhere else closes the panel. `mousedown` on a row calls
+   * `preventDefault`, so picking a result never races this.
+   */
+  function onpointerdown(event: PointerEvent) {
+    if (!palette.open) return;
+    const target = event.target;
+    if (target instanceof Node && searchBox?.contains(target)) return;
+    palette.hide();
+  }
+
+  let searchBox: HTMLDivElement | null = $state(null);
 </script>
+
+<svelte:window {onpointerdown} />
 
 <header class="topbar">
   <a class="brand" href="#/" aria-label="CodeGraph home">
@@ -51,19 +113,27 @@
     <a href={flowHref()} class:active={view === 'flow'}>Flow</a>
   </nav>
 
-  <div class="search" role="search">
+  <div class="search" role="search" bind:this={searchBox}>
     <input
       bind:this={input}
-      bind:value={query}
+      bind:value={palette.query}
       {onkeydown}
+      onfocus={() => palette.show()}
       id="q"
       type="search"
       autocomplete="off"
       spellcheck="false"
       placeholder={'Search a symbol or file, or ask “how does execute reach getFile” — press / to focus'}
       aria-label="Search symbols and files"
+      role="combobox"
+      aria-expanded={palette.open}
+      aria-controls="palette-panel"
+      aria-autocomplete="list"
+      aria-activedescendant={palette.open ? `palette-row-${palette.selected}` : undefined}
     />
-    {@render palette?.()}
+    {#if palette.open}
+      <SearchPalette onpick={pick} />
+    {/if}
   </div>
 
   <div class="project" title="Indexed project">

@@ -9,10 +9,8 @@
   import FlowView from './views/FlowView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
   import { router, navigate, back, mapHref, flowHref } from './lib/router.svelte';
-  import { trail } from './lib/trail.svelte';
+  import { trail, resolveTrailNames } from './lib/trail.svelte';
   import { project } from './lib/project.svelte';
-
-  let query = $state('');
 
   // One `/api/stats` for the whole app: the top bar's counts and the Symbol
   // view's blast-radius denominator come out of the same payload.
@@ -35,6 +33,14 @@
         trail.push({ id: current.id });
       }
     });
+  });
+
+  // Hops restored from a URL carry ids and nothing else; one batched request
+  // turns the bar back into names. Runs after every trail change, and does
+  // nothing when every hop already has one.
+  $effect(() => {
+    void trail.hops.length;
+    void resolveTrailNames();
   });
 
   function isTypingTarget(target: EventTarget | null): boolean {
@@ -84,7 +90,7 @@
 
 <svelte:window {onkeydown} />
 
-<TopBar bind:this={topbar} bind:query project={project.name} stats={project.summary} />
+<TopBar bind:this={topbar} project={project.name} stats={project.summary} />
 <TrailBar />
 <main>
   {#if route.view === 'symbol'}

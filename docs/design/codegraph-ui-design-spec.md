@@ -168,6 +168,20 @@ Results panel under the input: 1px `--ink` border, max-height 420px; group heade
 rows grid `18px | 1fr | auto`, 6px 10px, `--rule-faint` separators, selected/hover `--press`; name 12.5px mono + signature 11.5px mono
 `--ink-3` + location 11px mono. Flow grammar: "how does X reach Y", "X -> Y", "X → Y".
 
+**As built (phase 1, CG-45).** Group headers are the result's KIND — `Methods`, `Functions`,
+`Classes`, `Files` — a group appearing where its best result did, so flattening the groups
+reproduces the ranking ↑/↓ walks. The prototype's two-group split (`Flow` / `Symbols & files`)
+waits for the Flow view: a flow question is recognised now, but until there is a path to draw it
+searches both endpoints and says so in one line above the results rather than offering a row that
+lands on a placeholder. A file's row shows its basename with its DIRECTORY in the location column —
+its name column already carries the path, and printing it twice reads as an error.
+
+At rest — an empty box, or the empty screen — the panel shows **entry points** from
+`/api/entrypoints`: routes (URL → handler), files that run something at module level (a CLI, a
+worker entry, a script — ranked by calls × the number of other files they reach), and the most
+depended-on symbols. Each section says what it is derived from, never that a file IS the entry
+point.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a

@@ -4,59 +4,37 @@
  * Hops live in memory (they carry names and kinds, which the URL cannot),
  * and are mirrored into the `t` query param so a reload or a shared link
  * still reproduces the walk. On a cold load only the ids survive; names are
- * filled in by `resolve()` as each hop's node is fetched.
- *
- * Encoding: comma-separated tokens, each `<dir><encoded id>` where dir is
- * `s` (start) | `d` (stepped down, into a call) | `u` (stepped up, to a
- * caller). The dir char is ALWAYS present — an id may itself begin with 'd'
- * or 'u' (`union:…`), so an optional prefix would be ambiguous.
+ * filled in by `resolve()` as each hop's node is fetched. The wire format
+ * itself lives in `trail-codec.ts`, where it can be tested without a runtime.
  */
 
-export type HopDirection = 'start' | 'down' | 'up';
+import { fetchNodeRefs } from './api';
+import { encodeTrail, decodeTrail, type HopDirection, type TrailHop } from './trail-codec';
 
-export interface TrailHop {
-  id: string;
-  /** null until the node is fetched; render `hopLabel()` rather than this. */
-  name: string | null;
-  kind: string | null;
-  dir: HopDirection;
-}
-
-const DIR_TO_CHAR: Record<HopDirection, string> = { start: 's', down: 'd', up: 'u' };
-const CHAR_TO_DIR: Record<string, HopDirection> = { s: 'start', d: 'down', u: 'up' };
-
-/** A readable stand-in for a hop whose name has not been resolved yet. */
-export function hopLabel(hop: TrailHop): string {
-  if (hop.name) return hop.name;
-  const body = hop.id.includes(':') ? hop.id.slice(hop.id.indexOf(':') + 1) : hop.id;
-  // Path-shaped ids (`file:src/mcp/tools.ts`) read best as their basename.
-  const basename = body.slice(body.lastIndexOf('/') + 1);
-  return basename.length > 0 && basename.length <= 40 ? basename : `${body.slice(0, 8)}…`;
-}
-
-export function encodeTrail(hops: readonly TrailHop[]): string {
-  return hops.map((h) => DIR_TO_CHAR[h.dir] + encodeURIComponent(h.id)).join(',');
-}
-
-export function decodeTrail(encoded: string | null): TrailHop[] {
-  if (!encoded) return [];
-  const hops: TrailHop[] = [];
-  for (const token of encoded.split(',')) {
-    if (token.length < 2) continue;
-    const dir = CHAR_TO_DIR[token[0] as string];
-    if (!dir) continue;
-    let id: string;
-    try {
-      id = decodeURIComponent(token.slice(1));
-    } catch {
-      id = token.slice(1);
-    }
-    if (id) hops.push({ id, name: null, kind: null, dir });
-  }
-  return hops;
-}
+export { encodeTrail, decodeTrail, hopLabel } from './trail-codec';
+export type { HopDirection, TrailHop } from './trail-codec';
 
 let hops = $state<TrailHop[]>([]);
+
+/**
+ * Every name this session has learned, by id.
+ *
+ * The hop objects cannot carry it: truncating the trail throws them away, and
+ * walking back through history rebuilds the dropped hops from the URL, which
+ * holds ids and nothing else. Without this cache the bar would re-fetch — or,
+ * worse, redraw a hash for a symbol it had already named a second ago.
+ */
+const known = new Map<string, { name: string | null; kind: string | null }>();
+
+function remember(id: string, info: { name?: string | null; kind?: string | null }): void {
+  // Nothing to remember is not an entry: an empty one would read as "already
+  // known" and stop the bar from ever asking for the name.
+  if (!info.name && !info.kind) return;
+  const at = known.get(id) ?? { name: null, kind: null };
+  if (info.name) at.name = info.name;
+  if (info.kind) at.kind = info.kind;
+  known.set(id, at);
+}
 
 export const trail = {
   get hops(): readonly TrailHop[] {
@@ -75,6 +53,7 @@ export const trail = {
    * loop — the trail is a path, not a history.
    */
   push(hop: { id: string; name?: string | null; kind?: string | null; dir?: HopDirection }): void {
+    remember(hop.id, hop);
     const existing = hops.findIndex((h) => h.id === hop.id);
     if (existing >= 0) {
       hops = hops.slice(0, existing + 1);
@@ -102,6 +81,7 @@ export const trail = {
 
   /** Fill in the name/kind of a hop once its node has been fetched. */
   resolve(id: string, info: { name?: string | null; kind?: string | null }): void {
+    remember(id, info);
     const hop = hops.find((h) => h.id === id);
     if (!hop) return;
     if (info.name) hop.name = info.name;
@@ -116,11 +96,43 @@ export const trail = {
   hydrate(encoded: string | null): void {
     const decoded = decodeTrail(encoded);
     if (encodeTrail(decoded) === encodeTrail(hops)) return;
-    // Keep any names already resolved for ids that survive the change.
-    const known = new Map(hops.filter((h) => h.name).map((h) => [h.id, h]));
+    // Names survive the change — including for hops this trail dropped earlier
+    // and history has just brought back.
     hops = decoded.map((h) => {
       const seen = known.get(h.id);
       return seen ? { ...h, name: seen.name, kind: seen.kind } : h;
     });
   },
 };
+
+/**
+ * Give the hops restored from a URL their names back.
+ *
+ * A trail travels as ids, so a shared or reloaded link arrives with every hop
+ * but the one on screen unnamed — and `hopLabel` then draws a hash. One batched
+ * request fixes the whole bar. Ids that name nothing are marked resolved with
+ * the label they already had, so a stale link asks once and not on every
+ * re-render.
+ */
+const nameless = new Set<string>();
+
+export async function resolveTrailNames(): Promise<void> {
+  const unknown = hops
+    .filter((hop) => !hop.name && !known.get(hop.id)?.name && !nameless.has(hop.id))
+    .map((hop) => hop.id);
+  if (unknown.length === 0) return;
+  try {
+    const { items, missing } = await fetchNodeRefs(unknown);
+    for (const node of items) {
+      trail.resolve(node.id, {
+        name: node.kind === 'file' ? node.file : node.name,
+        kind: node.kind,
+      });
+    }
+    // An id this index does not hold is a stale link. Recorded so the bar asks
+    // once rather than on every redraw.
+    for (const id of missing) nameless.add(id);
+  } catch {
+    // A name is a nicety; the hop still navigates without one.
+  }
+}

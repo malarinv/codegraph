@@ -163,6 +163,67 @@ export interface WireBlastScale {
   estimated: boolean;
 }
 
+/* ------------------------------------------------------- search palette -- */
+
+/** How a result's text matched the query — the server's primary sort key. */
+export type MatchKind = 'exact' | 'prefix' | 'substring' | 'qualified' | 'file' | 'related';
+
+export interface WireSearchResult extends WireNodeRef {
+  matchKind: MatchKind;
+}
+
+export interface WireSearchGroup {
+  kind: NodeKind;
+  count: number;
+  items: WireSearchResult[];
+}
+
+export interface WireSearch {
+  query: string;
+  /** The free-text part, with any `kind:` / `lang:` / `path:` filters removed. */
+  text: string;
+  filters: { kinds: string[]; languages: string[]; paths: string[]; names: string[] };
+  results: WireList<WireSearchResult>;
+  /** Kind buckets in ranked order — flattening them reproduces the ranking. */
+  groups: WireSearchGroup[];
+}
+
+export interface WireNodeRefs {
+  items: WireNodeRef[];
+  /** Ids that name nothing in this index — a stale link, not an error. */
+  missing: string[];
+}
+
+/* ---------------------------------------------------------- entry points -- */
+
+export interface WireEntryRoute {
+  url: string;
+  handler: string;
+  file: string;
+  line: number;
+  handlerId: string | null;
+}
+
+export interface WireEntryFile extends WireNodeRef {
+  /** Calls and instantiations made at the top level of the file. */
+  calls: number;
+  /** Distinct other files this one's symbols reach. */
+  reaches: number;
+  /** Other files reaching into this one. Zero means nothing imports it. */
+  dependents: number;
+}
+
+export interface WireEntryHub extends WireNodeRef {
+  dependents: number;
+}
+
+export interface WireEntryPoints {
+  routes: { routed: boolean; routeCount: number; items: WireEntryRoute[] };
+  /** `total` is a floor on both lists — the server counts what its scan saw. */
+  files: WireList<WireEntryFile>;
+  hubs: WireList<WireEntryHub>;
+}
+
 export interface WireStats {
   project: { root: string; name: string };
   index: {
@@ -255,6 +316,33 @@ export function fetchSymbol(id: string, signal?: AbortSignal): Promise<WireSymbo
   // per segment so the path stays readable and still round-trips.
   const encoded = id.split('/').map(encodeURIComponent).join('/');
   return getJson<WireSymbolPayload>(`api/node/${encoded}`, signal);
+}
+
+export function fetchSearch(
+  query: string,
+  opts: { limit?: number } = {},
+  signal?: AbortSignal
+): Promise<WireSearch> {
+  const params = new URLSearchParams({ q: query });
+  if (opts.limit) params.set('limit', String(opts.limit));
+  return getJson<WireSearch>(`api/search?${params}`, signal);
+}
+
+/** Names and locations for ids you already have — what the trail redraws with. */
+export function fetchNodeRefs(ids: readonly string[], signal?: AbortSignal): Promise<WireNodeRefs> {
+  const params = new URLSearchParams();
+  for (const id of ids) params.append('id', id);
+  return getJson<WireNodeRefs>(`api/nodes?${params}`, signal);
+}
+
+export function fetchEntryPoints(
+  opts: { limit?: number } = {},
+  signal?: AbortSignal
+): Promise<WireEntryPoints> {
+  const params = new URLSearchParams();
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const query = params.toString();
+  return getJson<WireEntryPoints>(`api/entrypoints${query ? `?${query}` : ''}`, signal);
 }
 
 export function fetchSource(

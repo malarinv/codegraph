@@ -3,6 +3,14 @@
   import { trail, hopLabel, encodeTrail } from '../lib/trail.svelte';
   import { navigate, symbolHref, flowHref } from '../lib/router.svelte';
 
+  /**
+   * "Read as flow" replays the trail as a computed path in the Flow view,
+   * which is phase 2 (CG-50). The control is built and wired; it stays hidden
+   * until there is a view to send it to, because a button that lands on a
+   * placeholder is worse than no button.
+   */
+  const READ_AS_FLOW = false;
+
   let hops = $derived(trail.hops);
 
   function step(index: number) {
@@ -17,9 +25,23 @@
     navigate(flowHref(encodeTrail(hops)));
   }
 
+  /**
+   * Clear the path, keep the place.
+   *
+   * Emptying the trail while you are reading a symbol would also throw the
+   * symbol away, which is not what "Clear" says. It restarts the trail at
+   * where you are — one `start` hop — and only leaves for the empty screen
+   * when there is nowhere to stay.
+   */
   function clear() {
+    const here = trail.current;
     trail.clear();
-    navigate('#/');
+    if (!here) {
+      navigate('#/');
+      return;
+    }
+    trail.push({ id: here.id, name: here.name, kind: here.kind, dir: 'start' });
+    navigate(symbolHref(here.id, { trail: encodeTrail(trail.hops) }), { replace: true });
   }
 </script>
 
@@ -27,7 +49,10 @@
   <span class="label">Trail</span>
 
   {#if hops.length === 0}
-    <span class="empty">Follow a call and the path you walked shows up here.</span>
+    <span class="empty"
+      >Step into a call on the right, or up to a caller on the left — the trail records the
+      path.</span
+    >
   {:else}
     {#each hops as hop, i (hop.id)}
       {#if i > 0}
@@ -59,7 +84,7 @@
 
   <span class="spacer"></span>
 
-  {#if hops.length > 1}
+  {#if READ_AS_FLOW && hops.length > 1}
     <button type="button" class="tb-btn" onclick={readAsFlow}>Read as flow</button>
   {/if}
   {#if hops.length > 0}
