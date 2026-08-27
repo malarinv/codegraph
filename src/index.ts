@@ -2041,7 +2041,17 @@ export class CodeGraph {
   }
 
   /**
-   * Find dead code (unreferenced symbols)
+   * Find unreferenced symbols — the RAW candidate set.
+   *
+   * Non-exported symbols of the given kinds with no incoming edge but
+   * `contains`. That is a fact, not a claim: on this engine's own index it
+   * returns ~2 500 symbols, of which about 20 are actually unreachable. The
+   * rest are overrides, framework registrations, mis-resolved twins and
+   * references the extractor never recorded.
+   *
+   * For a list anybody should act on, use `buildDeadCodeReport` from
+   * `src/graph/dead-code.ts`, which applies the exclusions and counts every one
+   * of them. This method is kept as-is because it is a published API.
    *
    * @param kinds - Node kinds to check (default: functions, methods, classes)
    * @returns Array of unreferenced nodes
