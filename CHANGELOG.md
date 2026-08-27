@@ -66,6 +66,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Nothing changes for `codegraph ui` itself — it is the same viewer, now the library's first user. The package is prepared, not yet on npm.
 
+- **See what a type is built on, and what is built on it, in `codegraph ui`.** Open a class, interface, struct, trait or enum and a small tree now sits above its members: what it extends and implements, going all the way up rather than stopping at the direct parent, and everything that extends or implements it, going down. Inheritance is drawn with a solid line and implementation with a dashed one, so the two never read as the same relationship, and every row opens the type it names.
+
+  For an interface, the list below it is the answer to a question source code cannot give you: a call through that interface can land on any of them, and where there are enough of them to make a static answer meaningless the block says so in a sentence. Go's implicit interface satisfaction is included — a struct that satisfies an interface without either file mentioning the other appears in the fan, marked as matched by CodeGraph rather than written down, along with the line it was matched at. Long fans fold behind a "+N more implementations" button rather than being cut off, and if there is more below than was walked the tree says that too.
+
+  Members that redeclare something from a type above are marked in the outline ("overrides Base", or "satisfies Clock" for an interface), so a 40-member class shows at a glance which parts are its own and which are a contract it is filling. The number of implementations shown here is the same number `codegraph_explore` reports to your agent when it announces an interface dispatch.
+
 ### Fixes
 
 - Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.

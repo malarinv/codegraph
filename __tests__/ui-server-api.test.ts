@@ -603,6 +603,18 @@ describe('GET /api/node/<id>', () => {
   });
 });
 
+describe('GET /api/node/<id> — the type hierarchy block', () => {
+  it('is null for a function, so the block costs a plain symbol nothing', async () => {
+    const body = await getJson(`/api/node/${await idOf('hot', 'function')}`);
+    expect(body.hierarchy).toBeNull();
+  });
+
+  it('is null for a class with nothing above or below it', async () => {
+    const body = await getJson(`/api/node/${await idOf('Cache', 'class')}`);
+    expect(body.hierarchy).toBeNull();
+  });
+});
+
 describe('GET /api/node/<id> — the busiest symbol', () => {
   it('caps the caller list, keeps the true total, and stays fast', async () => {
     const hotId = await idOf('hot', 'function');

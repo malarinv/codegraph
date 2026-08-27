@@ -63,11 +63,17 @@ build so that mistake cannot land twice.
 ```
 
 Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `FileView`,
-`FileSourceView`, `EntryPointsView`, `TrailBar`, `SearchPalette`,
-`PalettePanel`, `PaletteRows`, `DriftBanner`, `KindGlyph`, `ExportButtons`,
-`CodegraphUi` — plus every pure model function the screens are built from
-(`buildCalleeRail`, `buildFlowLayout`, `buildMapLayout`, `tokensByLine`, …) and
-the `Wire*` types an adapter answers in.
+`FileSourceView`, `EntryPointsView`, `TypeHierarchy`, `TrailBar`,
+`SearchPalette`, `PalettePanel`, `PaletteRows`, `DriftBanner`, `KindGlyph`,
+`ExportButtons`, `CodegraphUi` — plus every pure model function the screens are
+built from (`buildCalleeRail`, `buildFlowLayout`, `buildMapLayout`,
+`buildHierarchyModel`, `tokensByLine`, …) and the `Wire*` types an adapter
+answers in.
+
+`TypeHierarchy` is the one screen that takes its data as a prop rather than
+asking the adapter: it is part of `SymbolView`'s payload (`/api/node`'s
+`hierarchy`), so a host that already holds a `WireSymbolPayload` can render the
+tree on its own without a second read.
 
 ### The adapter is the only way data arrives
 
@@ -253,6 +259,34 @@ Two rules hold it together:
 The verdict itself is not computed here or in the server: it is
 `findDynamicBoundaries` in `src/graph/dynamic-boundary-report.ts`, the same
 detector `codegraph_explore` announces boundaries with.
+
+## The type hierarchy
+
+A class, interface, struct, trait or enum carries a `hierarchy` on its
+`/api/node` payload: ancestors up, subtypes down, and the fan an interface call
+dispatches into. `buildHierarchyModel` turns it into a tree whose geometry is
+arithmetic — 24px rows, 22px of indent per descendant level, orthogonal 1px
+connectors computed from those two numbers. Nothing is measured; the same
+payload always draws the same picture.
+
+The details worth knowing before changing it:
+
+- **`extends` is solid, `implements` dashed `4 3`, a synthesized edge dashed
+  `6 3`** with a `via <mechanism>` pill. In Go, `System` satisfies `Clock`
+  without either file naming the other and the edge exists only because the
+  resolver made it — the block says so rather than drawing it like a parse.
+- **Overrides on the members outline are a NAME match**, not an `overrides`
+  edge (nothing in the engine emits one). They are matched against the nearest
+  ancestor that declares the name and are blind to signatures, and the tooltip
+  says which claim was actually checked.
+- **The fold trims the deepest end**, because the walk is breadth-first: a
+  reader looking at an interface gets every direct implementation before any
+  subclass of one appears at all.
+
+The walk is not computed here or in the server: it is `buildTypeHierarchy` in
+`src/graph/type-hierarchy.ts`, whose `countImplementers` is also the number
+`codegraph_explore` prints when it announces an interface dispatch — so "N types
+implement X" is the same N wherever you read it.
 
 ## Live updates
 

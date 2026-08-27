@@ -20,6 +20,7 @@
   import Connectors from '../components/symbol/Connectors.svelte';
   import BlastStrip from '../components/symbol/BlastStrip.svelte';
   import MembersOutline from '../components/symbol/MembersOutline.svelte';
+  import TypeHierarchy from '../components/symbol/TypeHierarchy.svelte';
   import SourceBlock from '../components/symbol/SourceBlock.svelte';
   import SymbolHeader from '../components/symbol/SymbolHeader.svelte';
   import DriftBanner from '../components/DriftBanner.svelte';
@@ -560,7 +561,7 @@
         <Connectors {connectors} width={overlay.width} height={overlay.height} />
 
         <section class="center" bind:this={centerEl}>
-          <SymbolHeader {payload} onopen={open} />
+          <SymbolHeader {payload} onopen={open} relationChips={!payload.hierarchy} />
 
           {#if payload.drift}
             <div class="banner">
@@ -576,6 +577,10 @@
                 {/if}
               </DriftBanner>
             </div>
+          {/if}
+
+          {#if payload.hierarchy}
+            <TypeHierarchy hierarchy={payload.hierarchy} focus={payload.node} onopen={open} />
           {/if}
 
           {#if codeBlock}

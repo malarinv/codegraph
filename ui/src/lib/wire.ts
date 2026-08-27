@@ -56,6 +56,48 @@ export interface WireMember extends WireNodeRef {
   depth: number;
   fanIn: number;
   fanOut: number;
+  /** This member redeclares one an ancestor type declares. */
+  overrides?: WireOverride;
+}
+
+/** How a subtype is tied to the type above it. */
+export type WireHierarchyRelation = 'extends' | 'implements';
+
+/** A member that redeclares an ancestor's — a name match inside a linked chain. */
+export interface WireOverride {
+  baseId: string;
+  baseTypeId: string;
+  baseTypeName: string;
+  relation: WireHierarchyRelation;
+}
+
+/** One type in the hierarchy tree, and the single edge that puts it there. */
+export interface WireHierarchyNode extends WireNodeRef {
+  /** Steps from the focus, in whichever direction the row sits. 1 = direct. */
+  depth: number;
+  /** The row this one hangs off — the focus's id at depth 1. */
+  parentId: string;
+  relation: WireHierarchyRelation;
+  /** Synthesized rather than parsed (Go's implicit interface satisfaction). */
+  synthesized: boolean;
+  via?: string;
+  registeredAt?: string;
+  /** Direct subtypes of this row that are NOT in the payload. */
+  hiddenSubtypes: number;
+}
+
+/** Ancestors up, subtypes down, and the fan an interface call dispatches into. */
+export interface WireHierarchy {
+  ancestors: WireList<WireHierarchyNode>;
+  descendants: WireList<WireHierarchyNode>;
+  /** True number of DIRECT subtypes, whatever `descendants` was capped to. */
+  direct: number;
+  /** Of `direct`, the ones tied by `implements`. */
+  implementers: number;
+  /** Subtypes exist below what the walk returned. */
+  bounded: boolean;
+  /** A call through this type dispatches at runtime rather than to one target. */
+  polymorphic: boolean;
 }
 
 export interface WireEdge {
@@ -124,6 +166,8 @@ export interface WireSymbolPayload {
   /** Outermost first: file, then module/class, then the symbol's own parent. */
   ancestors: WireNodeRef[];
   members: WireList<WireMember>;
+  /** The type-hierarchy block. `null` for anything that is not a type, and for a type with none. */
+  hierarchy: WireHierarchy | null;
   incoming: WireList<WireRelation>;
   outgoing: WireList<WireRelation>;
   typesUsed: WireRelation[];

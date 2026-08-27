@@ -10,7 +10,7 @@
 -->
 <script lang="ts">
   import KindGlyph from '../KindGlyph.svelte';
-  import type { WireNodeRef } from '../../lib/api';
+  import type { WireNodeRef, WireOverride } from '../../lib/api';
   import type { OutlineRow } from '../../lib/symbol-model';
 
   interface Props {
@@ -21,6 +21,18 @@
   }
 
   let { rows, total, truncated, onopen }: Props = $props();
+
+  /**
+   * The override mark is a NAME match inside a chain the graph links, not an
+   * `overrides` edge — nothing in the engine emits one. The tooltip says so,
+   * because "overrides Base" and "declares the same name as Base" are different
+   * claims and only the second one was checked.
+   */
+  function overrideTitle(o: WireOverride): string {
+    return o.relation === 'implements'
+      ? `Declares a member ${o.baseTypeName} requires — matched by name.`
+      : `Redeclares a member of ${o.baseTypeName} — matched by name.`;
+  }
 </script>
 
 <div class="subh">
@@ -40,7 +52,13 @@
     >
       <KindGlyph kind={row.member.kind} />
       <span class="nm">{row.member.name}</span>
-      <span class="sig">{row.member.signature ?? ''}</span>
+      <span class="sig">
+        {#if row.member.overrides}
+          <span class="ovr" title={overrideTitle(row.member.overrides)}>
+            {row.member.overrides.relation === 'implements' ? 'satisfies' : 'overrides'}
+            {row.member.overrides.baseTypeName}
+          </span>
+        {/if}{row.member.signature ?? ''}</span>
       <span class="cnt">
         {#if row.member.fanIn}← {row.member.fanIn}{/if}{#if row.member.fanIn && row.member.fanOut}&nbsp;
         {/if}{#if row.member.fanOut}→ {row.member.fanOut}{/if}
@@ -99,6 +117,15 @@
 
   .orow.dimmed .nm {
     color: var(--ink-3);
+  }
+
+  .ovr {
+    margin-right: 6px;
+    padding: 0 4px;
+    border: 1px solid var(--rule-soft);
+    color: var(--ink-2);
+    font: 10.5px var(--mono);
+    white-space: nowrap;
   }
 
   .sig {

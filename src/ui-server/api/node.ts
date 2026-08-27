@@ -23,6 +23,7 @@
 import type { CodeGraph } from '../../index';
 import type { Edge, Node, NodeKind } from '../../types';
 import { isTestFile } from '../../search/query-utils';
+import { buildHierarchy, type WireOverride } from './hierarchy';
 import { notFound } from './respond';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
 import {
@@ -64,6 +65,12 @@ export interface WireMember extends WireNodeRef {
    */
   fanIn: number;
   fanOut: number;
+  /**
+   * This member redeclares one an ancestor type declares — a name match inside
+   * a chain the graph already links, not an `overrides` edge (nothing emits
+   * one). Absent for every member that declares something new.
+   */
+  overrides?: WireOverride;
 }
 
 export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): unknown {
@@ -155,7 +162,10 @@ export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): u
   // ---------------------------------------------------------------------------
   // Members outline
   // ---------------------------------------------------------------------------
-  const members = buildMembers(cg, node, containsOut, endpoints);
+  // The type hierarchy, and the override marks it puts on the outline. Gated
+  // to types inside `buildHierarchy`, so a function costs one kind test.
+  const hierarchy = buildHierarchy(cg, node);
+  const members = buildMembers(cg, node, containsOut, endpoints, hierarchy?.overrides);
 
   // ---------------------------------------------------------------------------
   // Counts, tests, what leaves the index, blast radius
@@ -176,6 +186,11 @@ export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): u
     /** Outermost first: file, then module/class, then the symbol's own parent. */
     ancestors: [...ancestors].reverse().map(toNodeRef),
     members: wireList(members.items, members.total),
+    /**
+     * Ancestors, subtypes and the dispatch fan — `null` for anything that is
+     * not a type, and for a type with no hierarchy at all.
+     */
+    hierarchy: hierarchy?.wire ?? null,
     incoming: wireList(shownIncoming, incomingGroups.length),
     outgoing: wireList(shownOutgoing, outgoingGroups.length),
     /** `references` edges into a type — the header's "uses types …" chips. */
@@ -218,7 +233,8 @@ function buildMembers(
   cg: CodeGraph,
   focal: Node,
   containsOut: readonly Edge[],
-  endpoints: Map<string, Node>
+  endpoints: Map<string, Node>,
+  overrides?: Map<string, WireOverride>
 ): { items: WireMember[]; total: number } {
   const direct: Array<{ node: Node; parentId: string; depth: number }> = [];
   for (const edge of containsOut) {
@@ -252,13 +268,18 @@ function buildMembers(
   const fanOut = cg.getFanOut(memberIds);
 
   return {
-    items: shown.map((entry) => ({
-      ...toNodeRef(entry.node),
-      parentId: entry.parentId,
-      depth: entry.depth,
-      fanIn: fanIn.get(entry.node.id) ?? 0,
-      fanOut: fanOut.get(entry.node.id) ?? 0,
-    })),
+    items: shown.map((entry) => {
+      const member: WireMember = {
+        ...toNodeRef(entry.node),
+        parentId: entry.parentId,
+        depth: entry.depth,
+        fanIn: fanIn.get(entry.node.id) ?? 0,
+        fanOut: fanOut.get(entry.node.id) ?? 0,
+      };
+      const override = overrides?.get(entry.node.id);
+      if (override) member.overrides = override;
+      return member;
+    }),
     total: all.length,
   };
 }

@@ -130,7 +130,7 @@ for (const [name, entry] of Object.entries(manifest.exports ?? {})) {
   }
 }
 
-// The five components the task names, plus the two seams they are useless
+// The exported screens, plus the two seams they are useless
 // without. Checked in the emitted JS, so a rename in index.ts that misses a
 // component fails here rather than in the Pro app.
 const entry = existsSync(join(DIST, 'index.js'))
@@ -138,6 +138,7 @@ const entry = existsSync(join(DIST, 'index.js'))
   : '';
 for (const name of [
   'SymbolView',
+  'TypeHierarchy',
   'FlowStrip',
   'ArchitectureMap',
   'TrailBar',

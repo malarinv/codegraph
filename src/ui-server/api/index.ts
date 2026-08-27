@@ -11,7 +11,7 @@
  * ```
  * GET /api/stats                     what this index is and how much to trust it
  * GET /api/search?q=                 the search palette
- * GET /api/node/<id>                 the Symbol view: rails, members, tests, blast radius
+ * GET /api/node/<id>                 the Symbol view: rails, members, hierarchy, tests, blast
  * GET /api/nodes?id=&id=             names for ids you already have (the trail)
  * GET /api/source?file=&from=&to=    verbatim source, with a drift verdict
  * GET /api/file/<path>               the File view: outline and import rails
@@ -58,6 +58,8 @@ export type {
   WireEntryHub,
 } from './entrypoints';
 export type { WireRoute, WireRoutes } from './routes';
+export type { WireHierarchy, WireHierarchyNode, WireOverride } from './hierarchy';
+export { MAX_HIERARCHY_ANCESTORS, MAX_HIERARCHY_DESCENDANTS } from './hierarchy';
 export type { WireNodeRefs } from './nodes';
 export type {
   WireFlowPayload,
@@ -112,7 +114,11 @@ const API_INDEX = {
   endpoints: [
     { path: '/api/stats', description: 'Index state, graph counts, detected frameworks.' },
     { path: '/api/search', description: 'Ranked symbol search.', params: ['q', 'limit'] },
-    { path: '/api/node/<id>', description: 'One symbol: callers, callees, members, tests, blast radius.' },
+    {
+      path: '/api/node/<id>',
+      description:
+        'One symbol: callers, callees, members, type hierarchy, tests, blast radius.',
+    },
     { path: '/api/nodes', description: 'Names and locations for ids you already have.', params: ['id'] },
     {
       path: '/api/source',

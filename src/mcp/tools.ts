@@ -41,6 +41,7 @@ import {
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { findDynamicBoundaries, type BoundarySite } from '../graph/dynamic-boundary-report';
+import { countImplementers } from '../graph/type-hierarchy';
 import {
   lastQualifierPart,
   matchesSymbol,
@@ -2830,9 +2831,12 @@ export class ToolHandler {
       let best: { node: Node; impl: number; targets: Node[] } | null = null;
       for (const { node, count, targets } of supers.values()) {
         if (count < MIN_SUPPORT) continue;
-        let impl = 0;
-        try { impl = cg.getIncomingEdges(node.id).filter((e) => e.kind === 'implements' || e.kind === 'extends').length; }
-        catch { /* leave 0 — gated out below */ }
+        // The implementer count is `countImplementers` — the same function the
+        // viewer's type-hierarchy fan counts with, so "dispatch to N types
+        // implementing X" is the same N on both surfaces (CG-58). Distinct
+        // types, not edges: a class tied to its supertype by both a parsed
+        // `extends` and a synthesized `implements` is one implementation.
+        const impl = countImplementers(cg, node.id);
         if (impl < MIN_IMPL) continue;
         if (!best || impl > best.impl) best = { node, impl, targets };
       }

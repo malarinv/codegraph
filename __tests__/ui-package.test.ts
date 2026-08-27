@@ -29,6 +29,7 @@ import {
   SearchPalette,
   SymbolView,
   TrailBar,
+  TypeHierarchy,
   createHttpAdapter,
   fileHref,
   flowHref,
@@ -47,6 +48,7 @@ import {
   type WireNodeRef,
   type WireSource,
   type WireStats,
+  type WireHierarchy,
   type WireSymbolPayload,
 } from '../ui/src/index';
 
@@ -132,6 +134,7 @@ const SYMBOL: WireSymbolPayload = {
     ],
   },
   typesUsed: [],
+  hierarchy: null,
   counts: { callers: 1, callees: 1, typesUsed: 0, fanIn: 1, fanOut: 1, members: 0, hub: false },
   tests: { reached: false, hops: null, fileCount: 0, files: [], exhaustive: true, hopsSearched: 3 },
   outsideIndex: { total: 0, byKind: {}, samples: [] },
@@ -487,6 +490,55 @@ describe('@colbymchenry/codegraph-ui — a host renders the package', () => {
     expect(text).toContain('expiresAt');
     // The honesty badge: nothing in the fixture's graph tests this symbol.
     expect(text.toLowerCase()).toContain('test');
+  });
+
+  it('TypeHierarchy draws the fan, its wiring and its fold from a payload alone', async () => {
+    const implementers = Array.from({ length: 14 }, (_, i) => ({
+      id: `impl-${i}`,
+      kind: 'class' as const,
+      name: `Target${i}`,
+      qualifiedName: `Target${i}`,
+      file: `src/targets/target-${i}.ts`,
+      line: 1,
+      endLine: 9,
+      language: 'typescript' as const,
+      test: false,
+      depth: 1,
+      parentId: SYMBOL.node.id,
+      relation: 'implements' as const,
+      // The first one arrived through a resolver rather than a parse, which is
+      // the case the block has to draw differently.
+      synthesized: i === 0,
+      ...(i === 0 ? { via: 'go-implements', registeredAt: 'src/clock.go:11' } : {}),
+      hiddenSubtypes: 0,
+    }));
+    const hierarchy: WireHierarchy = {
+      ancestors: { total: 0, shown: 0, truncated: false, items: [] },
+      descendants: {
+        total: implementers.length,
+        shown: implementers.length,
+        truncated: false,
+        items: implementers,
+      },
+      direct: implementers.length,
+      implementers: implementers.length,
+      bounded: false,
+      polymorphic: true,
+    };
+
+    await render(TypeHierarchy, { hierarchy, focus: SYMBOL.node, onopen: () => {} });
+
+    const text = host.textContent ?? '';
+    // The claim a reader cannot get by counting rows.
+    expect(text).toContain('14 implementations');
+    // The wiring site of the synthesized edge.
+    expect(text).toContain('go-implements');
+    // Twelve rows, then the fold — never a silent truncation.
+    expect(text).toContain('+2 more implementations');
+    expect(text).toContain('Target0');
+    expect(text).not.toContain('Target13');
+    // It draws no network of its own: this component was handed a payload.
+    expect(host.querySelectorAll('path').length).toBe(12);
   });
 
   it('FlowStrip draws one card per hop from a mock adapter', async () => {

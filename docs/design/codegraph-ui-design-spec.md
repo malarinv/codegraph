@@ -317,6 +317,26 @@ Measured on this repository: `execute -> rowToFileRecord` (8 hops) exports 3690x
 16-module map exports 566x1077 and reproduces the on-screen picture exactly (16 boxes, 52 links, 9 layer rules, both band labels;
 with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
 
+### 3.10 Type hierarchy (CG-58)
+Sits in the Symbol view between the header and the source block, above the members outline, for classes, interfaces, structs,
+traits, protocols, enums, unions and type aliases — and only when the type has an `extends`/`implements` edge in some direction.
+A vertical tree: **row height 24px**, names 12.5px mono with kind glyphs, ancestors above at **indent 0** (farthest first, so the
+focus's own parents sit adjacent to it), the focus in `--accent` (600), descendants below indented **22px per level**,
+breadth-first so every direct subtype precedes any indirect one. Connectors are orthogonal 1px `--ink-4` paths — down, then out —
+leaving the parent's glyph centre (indent + 26) and meeting the child's glyph (indent + 16): `extends` solid, `implements` dashed
+`4 3`, a synthesized edge dashed `6 3` in `--ink-3` with a `via <mechanism>` pill carrying its `registeredAt` as the tooltip.
+Rows are buttons, like outline rows; meta is the relation word (11px `--ink-3`) and the file (11px mono, "same file" when it
+matches the focus). Header hint reads "supertypes above · subtypes below". Fold: **more than 12** descendants shows the first 12
+and a `+N more implementations` button (`subclasses` when the folded rows are `extends`, `subtypes` when mixed); truncation or a
+bounded walk adds a note under the tree. A `polymorphic` type (≥ 8 direct implementers) leads with one line — *"A call through X
+dispatches to N implementations — no single static target."* — the only claim in the block a reader cannot get by counting rows.
+The header's `extends X` / `implemented by …` chips are **suppressed** while the tree is on screen: two renderings of one
+relation in one column is how a reader ends up trusting neither.
+**Overrides** are marked on the members outline (`overrides Base` / `satisfies Base`, 10.5px mono pill before the signature).
+Nothing in the engine emits an `overrides` edge, so this is a NAME match inside a chain the graph already links, and the tooltip
+says so. It is deliberately blind to signatures — an overload set would need type resolution the graph does not have.
+Layout is arithmetic (row height × index): no `ResizeObserver`, no measurement, same payload → same picture.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a
@@ -352,7 +372,7 @@ with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
 
 ### 4.1 The component library (`@colbymchenry/codegraph-ui`, CG-61)
 The same `ui/src` tree builds a second way — `svelte-package` into `ui/dist` — so CodeGraph Pro renders the Symbol view, the Flow
-strip and the Map over its own in-process engine reads without forking a component. One tree, because a fork is a second answer to
+strip, the Map and the type-hierarchy tree over its own in-process engine reads without forking a component. One tree, because a fork is a second answer to
 the same question about the same graph.
 - **One seam: `GraphAdapter`** (`ui/src/lib/adapter.ts`) — eleven methods answering the `Wire*` shapes verbatim. `createHttpAdapter()`
   is the loopback JSON API and is what the CLI's viewer runs on; a host implements the same methods and never makes a request.

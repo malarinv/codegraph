@@ -111,6 +111,8 @@ export { default as DriftBanner } from './components/DriftBanner.svelte';
 export { default as KindGlyph } from './components/KindGlyph.svelte';
 /** Copy image / download SVG for a Flow strip or a Map layout. */
 export { default as ExportButtons } from './components/ExportButtons.svelte';
+/** Ancestors up, subtypes down, and the fan an interface call dispatches into. */
+export { default as TypeHierarchy } from './components/symbol/TypeHierarchy.svelte';
 
 /* ------------------------------------------------------------- the state -- */
 
@@ -173,6 +175,21 @@ export type {
   FlowLayout,
   FlowLinkLayout,
 } from './lib/flow-model';
+
+export {
+  buildHierarchyModel,
+  connectorPath,
+  visibleHierarchy,
+  HIER_FOLD_AT,
+  HIER_INDENT,
+  HIER_PORT_X,
+  HIER_ROW_H,
+} from './lib/hierarchy-model';
+export type {
+  HierarchyConnector,
+  HierarchyModel,
+  HierarchyRow,
+} from './lib/hierarchy-model';
 
 export { buildMapLayout, isEdgeVisible, moduleMetaLabel } from './lib/map-model';
 export type {

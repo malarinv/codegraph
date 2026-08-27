@@ -22,19 +22,36 @@
   interface Props {
     payload: WireSymbolPayload;
     onopen: (node: WireNodeRef) => void;
+    /**
+     * Draw the `extends X` / `implemented by …` chips.
+     *
+     * Off when the type-hierarchy tree is on screen: the tree answers the same
+     * question with more of the truth in it (depth, synthesized edges, the
+     * subtypes that are not direct), and two renderings of one relation in one
+     * column is how a reader ends up trusting neither.
+     */
+    relationChips?: boolean;
   }
 
-  let { payload, onopen }: Props = $props();
+  let { payload, onopen, relationChips = true }: Props = $props();
 
   let node = $derived<WireNodeDetail>(payload.node);
   let tests = $derived(payload.tests);
 
   /** `extends`/`implements` this symbol declares, and the ones declared on it. */
   let supertypes = $derived(
-    payload.outgoing.items.filter((r) => r.edgeKinds.some((k) => k === 'extends' || k === 'implements'))
+    relationChips
+      ? payload.outgoing.items.filter((r) =>
+          r.edgeKinds.some((k) => k === 'extends' || k === 'implements')
+        )
+      : []
   );
   let subtypes = $derived(
-    payload.incoming.items.filter((r) => r.edgeKinds.some((k) => k === 'extends' || k === 'implements'))
+    relationChips
+      ? payload.incoming.items.filter((r) =>
+          r.edgeKinds.some((k) => k === 'extends' || k === 'implements')
+        )
+      : []
   );
 
   const TYPE_CHIP_LIMIT = 12;
