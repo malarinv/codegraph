@@ -1401,6 +1401,35 @@ export class CodeGraph {
   }
 
   /**
+   * Roll the edge table up to module granularity, for a file → module
+   * assignment the caller decides.
+   *
+   * The architecture map's single query: cross-module edge counts by kind,
+   * the `declared` subset of each (see {@link QueryBuilder.aggregateModuleGraph}),
+   * and the busiest symbol pairs behind each link. Read-only, and bounded by
+   * the number of modules rather than the number of edges.
+   */
+  getModuleAggregation(
+    assignments: ReadonlyArray<{ filePath: string; module: string }>,
+    options: {
+      kinds: readonly Edge['kind'][];
+      minConfidence: number;
+      topPairsPerLink: number;
+      pairKinds: readonly Edge['kind'][];
+    }
+  ): ReturnType<QueryBuilder['aggregateModuleGraph']> {
+    return this.queries.aggregateModuleGraph(assignments, options);
+  }
+
+  /**
+   * Every ordered pair of files where one reaches into the other — the edge
+   * list a cycle finder runs on. See {@link QueryBuilder.getCrossFileDependencyPairs}.
+   */
+  getFileDependencyPairs(minConfidence = 0): Array<{ source: string; target: string }> {
+    return this.queries.getCrossFileDependencyPairs(minConfidence);
+  }
+
+  /**
    * References from a symbol that never resolved to an indexed node — the
    * calls and type mentions that leave the index. Lets a reader account for
    * the call sites that have no callee row instead of implying there are none.

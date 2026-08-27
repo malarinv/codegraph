@@ -1,7 +1,7 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Eight endpoints, one per screen, each answering in a single round-trip — the
+ * Nine endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
  * have to ask a follow-up question. Everything here is a *reader* of the
  * existing schema; nothing indexes, resolves, or writes.
@@ -15,6 +15,7 @@
  * GET /api/file/<path>               the File view: outline and import rails
  * GET /api/routes                    the URL to handler map, when there is one
  * GET /api/entrypoints               where to start reading: routes, roots, hubs
+ * GET /api/map?root=&depth=          the module map: modules, links, cycles
  * ```
  *
  * It mounts on the `api` seam of `startUiServer`, which means it sits *behind*
@@ -37,12 +38,19 @@ import { buildFile } from './file';
 import { buildRoutes } from './routes';
 import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
+import { buildMap } from './map';
 
 export { GraphSession } from './session';
 export { ApiError } from './respond';
 export * from './wire';
 export type { WireEntryPoints, WireEntryFile, WireEntryHub } from './entrypoints';
 export type { WireNodeRefs } from './nodes';
+export type {
+  WireMapPayload,
+  WireMapModule,
+  WireMapLink,
+  WireMapCycle,
+} from './map';
 
 /**
  * A mounted API, plus the handle it holds open.
@@ -77,6 +85,11 @@ const API_INDEX = {
     { path: '/api/file/<path>', description: 'One file: outline and import rails.' },
     { path: '/api/routes', description: 'URL to handler map, when the project is a routed app.', params: ['limit'] },
     {
+      path: '/api/map',
+      description: 'The repository at module granularity: modules, cross-module links, cycles.',
+      params: ['root', 'depth'],
+    },
+    {
       path: '/api/entrypoints',
       description: 'Where to start reading: routes, files that run something, and hubs.',
       params: ['limit'],
@@ -101,6 +114,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildSearch(session.acquire(), ctx.query), ctx.method);
         case '/api/routes':
           return ok(res, buildRoutes(session.acquire(), ctx.query), ctx.method);
+        case '/api/map':
+          return ok(res, buildMap(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/entrypoints':
           return ok(res, buildEntryPoints(session.acquire(), ctx.query), ctx.method);
         case '/api/nodes':

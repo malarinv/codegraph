@@ -367,6 +367,55 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
+/* -------------------------------------------------------------- the map -- */
+
+export interface WireMapModule {
+  /** Directory path, the `(root files)` bucket, or a façade file's own path. */
+  id: string;
+  label: string;
+  files: number;
+  symbols: number;
+  languages: Array<{ language: string; files: number }>;
+  /** More than half its files are tests. */
+  test: boolean;
+  /** A single file kept out of the root bucket because it is the façade. */
+  facade: boolean;
+  /** Its files, capped — the side panel's list when the module is selected. */
+  fileList: { total: number; shown: number; truncated: boolean; items: string[] };
+}
+
+export interface WireMapLink {
+  source: string;
+  target: string;
+  /** Every confident cross-module edge behind this link. */
+  count: number;
+  /**
+   * The subset resolved through an import, a qualified name, an inheritance
+   * clause or a typed receiver — what the layering trusts.
+   */
+  declared: number;
+  byKind: Array<{ kind: EdgeKind; count: number }>;
+  topPairs: Array<{ from: string; to: string; count: number; declared: number }>;
+}
+
+export interface WireMapCycle {
+  size: number;
+  files: string[];
+  modules: string[];
+}
+
+export interface WireMapPayload {
+  root: string;
+  depth: number;
+  roots: Array<{ root: string; label: string; files: number }>;
+  modules: WireMapModule[];
+  links: WireMapLink[];
+  cycles: { total: number; shown: number; truncated: boolean; items: WireMapCycle[] };
+  excluded: { uncertainEdges: number; confidenceBelow: number };
+  index: { lastIndexedAt: number | null; edges: number; files: number };
+  timing: { elapsedMs: number; cached: boolean };
+}
+
 export function fetchStats(signal?: AbortSignal): Promise<WireStats> {
   return getJson<WireStats>('api/stats', signal);
 }
@@ -420,4 +469,21 @@ export function fetchSource(
 ): Promise<WireSource> {
   const params = new URLSearchParams({ file, from: String(from), to: String(to) });
   return getJson<WireSource>(`api/source?${params}`, signal);
+}
+
+
+/**
+ * The module map. `root` selects the subtree (a monorepo's package); `depth`
+ * is how many path segments under it name a module. Omitting `root` lets the
+ * server pick the repository's source directory.
+ */
+export function fetchMap(
+  opts: { root?: string | null; depth?: number } = {},
+  signal?: AbortSignal
+): Promise<WireMapPayload> {
+  const params = new URLSearchParams();
+  if (opts.root !== undefined && opts.root !== null) params.set('root', opts.root);
+  if (opts.depth) params.set('depth', String(opts.depth));
+  const query = params.toString();
+  return getJson<WireMapPayload>(`api/map${query ? `?${query}` : ''}`, signal);
 }

@@ -20,6 +20,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It is read-only: it opens an index that already exists, never creates one, and never writes to your project or your graph. It sends nothing anywhere.
 
+- **A map of the whole project, in `codegraph ui`.** The Map tab draws your repository at module granularity — one box per directory — with dependencies pointing down, so the top of the picture is what runs first and the bottom is what everything else stands on. Nothing is placed by hand and nothing floats: a module sits one layer above whatever it depends on, line weight is how many calls, imports and type references cross the link, and the same project always draws the same picture. Hover a link for what crosses it, including the busiest symbol pairs behind the weight; click a module to isolate its links, list its dependencies and dependents with counts, and jump straight into one of its files.
+
+  It says what it leaves out. Links carrying only a handful of references stay hidden until you select a module they touch, references CodeGraph isn't confident about are excluded from every count on the screen and the number is printed, and mutual dependencies, module loops and circular imports between files are listed rather than straightened away. The vertical order rests on the dependencies your code actually writes down — imports, qualified names, inheritance, typed receivers — because a method name shared by two unrelated folders should not be able to move a box.
+
+  It opens on your project's source directory; a picker switches to any other top-level folder or the whole repository, a checkbox brings tests in, and `depth` splits a large folder into its sub-folders — useful on a monorepo. What you're looking at lives in the address, so the view is shareable.
+
 
 ## [1.6.0] - 2026-08-26
 

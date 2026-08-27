@@ -98,7 +98,7 @@
   {:else if route.view === 'file'}
     <FileView path={route.path} line={route.line} />
   {:else if route.view === 'map'}
-    <MapView />
+    <MapView root={route.root} depth={route.depth} tests={route.tests} />
   {:else if route.view === 'flow'}
     <FlowView flowKey={route.key} />
   {:else if route.view === 'unknown'}

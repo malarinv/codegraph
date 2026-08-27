@@ -42,6 +42,18 @@ The viewer never presents a guess as a fact:
 
 Clicking any file path opens the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
 
+## The map
+
+The **Map** tab (`m`) draws the project at module granularity — one box per directory — with dependencies pointing down. Nothing is placed by hand: a module sits one layer above whatever it depends on, so the top of the picture is what runs first and the bottom is what everything else stands on, and the same project always draws the same picture.
+
+- **Line weight** is how many calls, imports and type references cross the link. Hover one for the breakdown by kind and the busiest symbol pairs behind it.
+- **Click a module** to isolate its links and see its dependencies and dependents with counts, plus its files — click one to open the file view.
+- **Cycles are listed, not straightened away**: mutual dependencies between two modules, loops of three or more, and circular imports between individual files.
+
+It is honest about what it leaves out. Links carrying only a handful of references stay hidden until you select a module they touch, and references CodeGraph isn't confident about are excluded from every count on the screen — the panel prints how many. The vertical order rests on the dependencies your code writes down (imports, qualified names, inheritance, typed receivers), because a method name shared by two unrelated folders should not be able to move a box; when a project has too few of those to go on, the panel says the order came from raw reference counts instead.
+
+The map opens on your project's source directory. The picker switches to any other top-level folder or the whole repository, the checkbox brings test modules in, and `?depth=2` in the address splits a large folder into its sub-folders — the useful setting on a monorepo. What you are looking at lives in the URL, so the view is shareable.
+
 ## Options
 
 | | |

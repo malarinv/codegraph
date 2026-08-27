@@ -42,7 +42,8 @@ src/
   lib/router.svelte.ts    hash router: #/s/<id>, #/file/<path>, #/map, #/flow
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
   lib/kinds.ts            kind glyph letters
-  components/             TopBar, TrailBar, KindGlyph
+  lib/map-model.ts        the Map's deterministic layered layout (pure)
+  components/             TopBar, TrailBar, KindGlyph, map/, symbol/, file/
   views/                  one component per route
 ```
 
@@ -57,7 +58,7 @@ announce the project to a font CDN.
 | `#/` | nothing selected |
 | `#/s/<id>?hl=<line>&t=<trail>` | symbol view |
 | `#/file/<path>?hl=<line>` | file view |
-| `#/map` | module map — reserved, phase 2 |
+| `#/map?root=&depth=&tests=1` | module map |
 | `#/flow[/<key>]` | flow strip — reserved, phase 2 |
 
 Node ids and file paths are encoded per slash-separated segment, so
