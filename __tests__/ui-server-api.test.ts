@@ -289,6 +289,33 @@ describe('GET /api/stats', () => {
     // The thresholds travel with the data so the viewer's copy cannot drift.
     expect(body.thresholds).toEqual({ hub: 40, uncertainBelow: 0.6 });
   });
+
+  it('reports a blast-radius scale the widest symbol in the index reaches', async () => {
+    const body = await getJson('/api/stats');
+    const scale = body.blastScale;
+
+    // `hot` is called by 500 distinct functions and nothing else in the fixture
+    // comes close, so the exact maximum is knowable here.
+    expect(scale.maxDirect).toBe(500);
+    // Its radius is at least its own callers; the sample is capped, so the
+    // count is a floor and the flag says so rather than claiming exhaustive.
+    expect(scale.maxWithinHops).toBeGreaterThanOrEqual(500);
+    expect(scale.hops).toBe(3);
+    expect(scale.sampled).toBeGreaterThan(0);
+    expect(scale.sampled).toBeLessThanOrEqual(24);
+    expect(scale.estimated).toBe(true);
+  });
+
+  it('serves the scale from cache — the second call does not re-traverse', async () => {
+    const first = await getJson('/api/stats');
+    const started = Date.now();
+    const second = await getJson('/api/stats');
+    expect(second.blastScale).toEqual(first.blastScale);
+    // 24 depth-3 traversals over a 500-caller graph are not free; a cached
+    // answer is. The margin is wide because this is a smoke test for the
+    // memo existing at all, not a benchmark.
+    expect(Date.now() - started).toBeLessThan(250);
+  });
 });
 
 describe('GET /api/search', () => {
@@ -383,6 +410,28 @@ describe('GET /api/node/<id>', () => {
       expect(member.depth).toBe(1);
     }
     expect(body.members.total).toBe(body.members.shown);
+  });
+
+  it('gives every member its own fan-in and fan-out — the outline is the body', async () => {
+    const body = await getJson(`/api/node/${await idOf('Cache', 'class')}`);
+    const byName = new Map(body.members.items.map((m: any) => [m.name, m]));
+
+    for (const member of body.members.items) {
+      expect(typeof member.fanIn).toBe('number');
+      expect(typeof member.fanOut).toBe('number');
+      expect(member.fanIn).toBeGreaterThanOrEqual(0);
+      expect(member.fanOut).toBeGreaterThanOrEqual(0);
+    }
+
+    // `Service.load` calls both, and `Cache` contains them: at least the
+    // containment edge plus one call each. Without these numbers a 700-line
+    // class's outline cannot say which member carries weight.
+    expect((byName.get('read') as any).fanIn).toBeGreaterThanOrEqual(2);
+    expect((byName.get('write') as any).fanIn).toBeGreaterThanOrEqual(2);
+    // The class itself calls nothing — its methods do, which is exactly why
+    // the per-member counts have to come from the members.
+    expect(body.counts.callees).toBe(0);
+    expect(body.members.items.some((m: any) => m.fanOut > 0)).toBe(true);
   });
 
   it('nests a file outline one level deeper, so a class shows its methods', async () => {

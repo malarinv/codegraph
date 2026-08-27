@@ -10,12 +10,15 @@
   import NotFoundView from './views/NotFoundView.svelte';
   import { router, navigate, back, mapHref, flowHref } from './lib/router.svelte';
   import { trail } from './lib/trail.svelte';
+  import { project } from './lib/project.svelte';
 
-  // Filled by the project stats call once the JSON API exists (CG-42); the
-  // top bar renders nothing rather than a placeholder until then.
-  let project = $state<string | null>(null);
-  let stats = $state<string | null>(null);
   let query = $state('');
+
+  // One `/api/stats` for the whole app: the top bar's counts and the Symbol
+  // view's blast-radius denominator come out of the same payload.
+  $effect(() => {
+    void project.ensure();
+  });
 
   let topbar: TopBar | null = $state(null);
 
@@ -81,7 +84,7 @@
 
 <svelte:window {onkeydown} />
 
-<TopBar bind:this={topbar} bind:query {project} {stats} />
+<TopBar bind:this={topbar} bind:query project={project.name} stats={project.summary} />
 <TrailBar />
 <main>
   {#if route.view === 'symbol'}
@@ -95,7 +98,7 @@
   {:else if route.view === 'unknown'}
     <NotFoundView path={route.path} />
   {:else}
-    <HomeView {project} />
+    <HomeView project={project.name} />
   {/if}
 </main>
 

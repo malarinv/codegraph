@@ -48,6 +48,12 @@ export const MAX_EDGES_PER_GROUP = 40;
 /** Test files named in a node's test-caller summary (explore uses the same shape). */
 export const MAX_TEST_FILES = 6;
 
+/**
+ * Dependency hops the blast-radius summary walks. Matches the depth
+ * `codegraph_explore` claims when it says "within 3 hops".
+ */
+export const BLAST_DEPTH = 3;
+
 /** Caller hops walked looking for a test. Mirrors `codegraph_explore`'s "tests:" line. */
 export const TEST_CALLER_HOPS = 3;
 

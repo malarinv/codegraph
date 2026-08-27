@@ -1369,6 +1369,15 @@ export class CodeGraph {
   }
 
   /**
+   * The symbols with the most distinct dependents, most first — the index's
+   * hubs. Distinct dependents, not edges: a helper called forty times from one
+   * function has one dependent, and it is dependents a blast radius grows from.
+   */
+  getTopDependedOn(limit: number): Array<{ nodeId: string; dependents: number }> {
+    return this.queries.getTopDependedOn(limit);
+  }
+
+  /**
    * References from a symbol that never resolved to an indexed node — the
    * calls and type mentions that leave the index. Lets a reader account for
    * the call sites that have no callee row instead of implying there are none.

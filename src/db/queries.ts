@@ -1962,6 +1962,32 @@ export class QueryBuilder {
   }
 
   /**
+   * The nodes with the most DISTINCT dependents, most first.
+   *
+   * "Distinct" is the difference that matters: a helper called forty times from
+   * one function has a fan-in of 40 but exactly one dependent. This counts the
+   * second thing — the number a reader means by "N callers" — so the top of
+   * this list is the set of symbols a change actually radiates furthest from.
+   *
+   * `contains` is excluded because it is structure, not dependency: counting it
+   * would rank every file and class above the code they hold.
+   */
+  getTopDependedOn(limit: number): Array<{ nodeId: string; dependents: number }> {
+    if (limit <= 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT target AS nodeId, COUNT(DISTINCT source) AS dependents
+           FROM edges
+          WHERE kind != 'contains' AND source != target
+       GROUP BY target
+       ORDER BY dependents DESC
+          LIMIT ?`
+      )
+      .all(limit) as Array<{ nodeId: string; dependents: number }>;
+    return rows;
+  }
+
+  /**
    * References recorded against a symbol that never resolved to a node — the
    * calls and type mentions that leave the index (a third-party package, a
    * runtime builtin, a language construct extraction doesn't model).

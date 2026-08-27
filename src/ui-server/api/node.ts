@@ -26,6 +26,7 @@ import { isTestFile } from '../../search/query-utils';
 import { notFound } from './respond';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
 import {
+  BLAST_DEPTH,
   CALLER_EDGE_KINDS,
   CONTAINER_KINDS,
   HUB_THRESHOLD,
@@ -46,15 +47,23 @@ import {
   type WireNodeRef,
 } from './wire';
 
-/** Depth the blast-radius summary walks. Matches `codegraph_explore`'s claim. */
-const BLAST_DEPTH = 3;
-
 /** A member row in the focal symbol's outline, with its place in the tree. */
 export interface WireMember extends WireNodeRef {
   /** The container this member belongs to — the focal node, or one of its children. */
   parentId: string;
   /** 1 = direct member, 2 = a member of a member (a class's method inside a file). */
   depth: number;
+  /**
+   * Edges in and out of this member — the outline's `← in  → out` columns.
+   *
+   * A container's own fan-out is usually zero (a class calls nothing; its
+   * methods do), so without these an outline of a 700-line class says nothing
+   * about which member is load-bearing and which is a getter. Edge counts, not
+   * distinct counterparts: the column is a weight, and it sits beside a
+   * signature rather than beside a caller list it could contradict.
+   */
+  fanIn: number;
+  fanOut: number;
 }
 
 export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): unknown {
@@ -234,11 +243,21 @@ function buildMembers(
   const all = [...direct, ...nested].sort(
     (a, b) => a.node.startLine - b.node.startLine || a.node.name.localeCompare(b.node.name)
   );
+  const shown = all.slice(0, MAX_OUTLINE_NODES);
+
+  // Two queries for the whole outline, not two per row: a file with 400
+  // symbols would otherwise be 800 lookups behind one screen.
+  const memberIds = shown.map((entry) => entry.node.id);
+  const fanIn = cg.getFanIn(memberIds);
+  const fanOut = cg.getFanOut(memberIds);
+
   return {
-    items: all.slice(0, MAX_OUTLINE_NODES).map((entry) => ({
+    items: shown.map((entry) => ({
       ...toNodeRef(entry.node),
       parentId: entry.parentId,
       depth: entry.depth,
+      fanIn: fanIn.get(entry.node.id) ?? 0,
+      fanOut: fanOut.get(entry.node.id) ?? 0,
     })),
     total: all.length,
   };

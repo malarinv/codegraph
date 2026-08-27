@@ -31,8 +31,17 @@
   {:else}
     {#each hops as hop, i (hop.id)}
       {#if i > 0}
-        <span class="hop-arrow" class:up={hop.dir === 'up'} aria-hidden="true">
-          {hop.dir === 'up' ? '←' : '→'}
+        <span
+          class="hop-arrow"
+          class:up={hop.dir === 'up'}
+          title={hop.dir === 'up'
+            ? 'stepped up to a caller'
+            : hop.dir === 'down'
+              ? 'stepped down into a call'
+              : 'jumped here'}
+          aria-hidden="true"
+        >
+          {hop.dir === 'up' ? '←' : hop.dir === 'down' ? '→' : '·'}
         </span>
       {/if}
       <button
