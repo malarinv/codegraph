@@ -1,7 +1,7 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Ten endpoints, one per screen, each answering in a single round-trip — the
+ * Eleven endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
  * have to ask a follow-up question. Everything here is a *reader* of the
  * existing schema; nothing indexes, resolves, or writes.
@@ -13,6 +13,7 @@
  * GET /api/nodes?id=&id=             names for ids you already have (the trail)
  * GET /api/source?file=&from=&to=    verbatim source, with a drift verdict
  * GET /api/file/<path>               the File view: outline and import rails
+ * GET /api/filecode/<path>           the whole-file view: ports, arcs, callee rail
  * GET /api/routes                    the URL to handler map, when there is one
  * GET /api/entrypoints               where to start reading: routes, roots, hubs
  * GET /api/map?root=&depth=          the module map: modules, links, cycles
@@ -36,6 +37,7 @@ import { buildSearch } from './search';
 import { buildNode } from './node';
 import { buildSource } from './source';
 import { buildFile } from './file';
+import { buildFileCode } from './filecode';
 import { buildRoutes } from './routes';
 import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
@@ -56,6 +58,11 @@ export type {
   WireFlowCallRef,
   WireFlowAmbiguity,
 } from './flow';
+export type {
+  WireFileCodePayload,
+  WireFileCall,
+  WireFileOutsideRef,
+} from './filecode';
 export type {
   WireMapPayload,
   WireMapModule,
@@ -94,6 +101,11 @@ const API_INDEX = {
       params: ['file', 'from', 'to'],
     },
     { path: '/api/file/<path>', description: 'One file: outline and import rails.' },
+    {
+      path: '/api/filecode/<path>',
+      description:
+        'One file, line by line: call sites, unresolved references and the calls that stay inside it.',
+    },
     { path: '/api/routes', description: 'URL to handler map, when the project is a routed app.', params: ['limit'] },
     {
       path: '/api/map',
@@ -178,6 +190,14 @@ function dispatchPathRoutes(
     return ok(res, buildNode(session.acquire(), ctx.projectRoot, nodeId), ctx.method);
   }
 
+  // Before `/api/file/`: that prefix is not a prefix of this route, but keeping
+  // the more specific one first means adding another `/api/file…` sibling later
+  // cannot silently start matching the shorter one.
+  const codePath = suffixAfter(route, '/api/filecode/');
+  if (codePath !== null) {
+    return ok(res, buildFileCode(session.acquire(), ctx.projectRoot, codePath), ctx.method);
+  }
+
   const filePath = suffixAfter(route, '/api/file/');
   if (filePath !== null) {
     if (filePath === '') throw badRequest('No file path was given. Use /api/file/<path>.');
@@ -186,6 +206,10 @@ function dispatchPathRoutes(
 
   // `/api/node` and `/api/file` with no argument at all, so the message can say
   // what the endpoint wants instead of falling through to a bare 404.
+  if (route === '/api/filecode') {
+    throw badRequest('/api/filecode needs an argument: /api/filecode/<path>.');
+  }
+
   if (route === '/api/node' || route === '/api/file') {
     throw badRequest(`${route} needs an argument: ${route}/<${route.endsWith('node') ? 'id' : 'path'}>.`);
   }

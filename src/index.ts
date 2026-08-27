@@ -1439,6 +1439,17 @@ export class CodeGraph {
   }
 
   /**
+   * The same, for every symbol in a FILE at once, in line order.
+   *
+   * One indexed lookup instead of one per symbol — the whole-file reader needs
+   * it for every line it draws. See
+   * {@link QueryBuilder.getUnresolvedReferencesInFile}.
+   */
+  getUnresolvedReferencesInFile(filePath: string, limit?: number): UnresolvedReference[] {
+    return this.queries.getUnresolvedReferencesInFile(filePath, limit);
+  }
+
+  /**
    * Get all nodes in a file
    */
   getNodesInFile(filePath: string): Node[] {

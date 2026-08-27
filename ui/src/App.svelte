@@ -5,6 +5,7 @@
   import HomeView from './views/HomeView.svelte';
   import SymbolView from './views/SymbolView.svelte';
   import FileView from './views/FileView.svelte';
+  import FileCodeView from './views/FileCodeView.svelte';
   import MapView from './views/MapView.svelte';
   import FlowView from './views/FlowView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
@@ -95,6 +96,8 @@
 <main>
   {#if route.view === 'symbol'}
     <SymbolView id={route.id} line={route.line} />
+  {:else if route.view === 'file' && route.source}
+    <FileCodeView path={route.path} line={route.line} />
   {:else if route.view === 'file'}
     <FileView path={route.path} line={route.line} />
   {:else if route.view === 'map'}

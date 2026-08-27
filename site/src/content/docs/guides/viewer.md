@@ -42,6 +42,14 @@ The viewer never presents a guess as a fact:
 
 Clicking any file path opens the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
 
+## The whole file
+
+The **Source** tab on that screen replaces the outline with the file itself, top to bottom, with the same gutter markers and the same right-hand list of what each line calls — a 6,800-line file scrolls as smoothly as a 60-line one, and the text pages in behind you.
+
+The margin on the left is the part you cannot get anywhere else: **an arc for every call that stays inside the file**, drawn from the calling line to the line the callee is defined on. Source order is the only layout — nothing is placed by an algorithm, because the author already placed it — so the shape of a file's internal call structure is legible at a glance. Hover a line to light the arcs the function under your cursor takes part in; click an arc to jump to the other end. On a file with more than forty of them the diagram narrows to the symbol you are reading rather than drawing a wash of overlapping sweeps, and the count stays in the header.
+
+A rail on the far left lists the file's symbols and follows you as you scroll, when the window is wide enough for it.
+
 ## The flow
 
 Type **"how does execute reach getFile"** into the search box — or `execute -> getFile` — and the first result opens the **Flow** strip: the call path between the two symbols, left to right, one card per hop.

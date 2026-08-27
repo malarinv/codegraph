@@ -246,6 +246,7 @@ export class QueryBuilder {
     getEdgesBySource?: SqliteStatement;
     getEdgesByTarget?: SqliteStatement;
     getUnresolvedFromNode?: SqliteStatement;
+    getUnresolvedInFile?: SqliteStatement;
     insertFile?: SqliteStatement;
     updateFile?: SqliteStatement;
     deleteFile?: SqliteStatement;
@@ -2228,6 +2229,40 @@ export class QueryBuilder {
             AND COALESCE(json_extract(e.metadata, '$.confidence'), 1) >= ?`
       )
       .all(minConfidence) as Array<{ source: string; target: string }>;
+  }
+
+  /**
+   * Every unresolved reference recorded in one FILE, ordered by line.
+   *
+   * The per-symbol form above answers "what does this body reach that the
+   * index does not hold". A whole-file reader asks the same question of every
+   * line at once, and asking it one symbol at a time is a query per symbol —
+   * 153 of them on this repo's largest file. `unresolved_refs.file_path` is
+   * indexed, so this is one lookup whatever the file holds.
+   *
+   * `limit` bounds the answer rather than the work: the caller draws a marker
+   * per row, and a generated file with fifty thousand of them would ship
+   * megabytes to say something a count already says. Rows come back in line
+   * order, so a cap trims the END of the file, which is at least legible.
+   */
+  getUnresolvedReferencesInFile(filePath: string, limit = 5000): UnresolvedReference[] {
+    if (!this.stmts.getUnresolvedInFile) {
+      this.stmts.getUnresolvedInFile = this.db.prepare(
+        'SELECT * FROM unresolved_refs WHERE file_path = ? ORDER BY line, col LIMIT ?'
+      );
+    }
+    const rows = this.stmts.getUnresolvedInFile.all(filePath, limit) as UnresolvedRefRow[];
+    return rows.map((row) => ({
+      fromNodeId: row.from_node_id,
+      referenceName: row.reference_name,
+      referenceKind: row.reference_kind as EdgeKind,
+      line: row.line,
+      column: row.col,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      filePath: row.file_path,
+      language: row.language as Language,
+      rowId: row.id,
+    }));
   }
 
   /**

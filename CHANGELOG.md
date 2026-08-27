@@ -32,6 +32,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The **"Read as flow"** button on the trail turns a walk you did by hand into the same strip. It is the same path finder `codegraph_explore` leads its answers with, so the picture and what your agent tells you can't disagree.
 
+- **Read a whole file, with its call graph in the margin, in `codegraph ui`.** The file screen gained a **Source** tab: the file itself, top to bottom, with the same gutter markers as the symbol view and the same right-hand list of what each line calls, positioned level with the line that calls it. A 6,800-line file scrolls at full speed — only the lines on screen are ever drawn, and the text pages in behind you while the markers are there from the first frame.
+
+  In the left margin is an arc for every call that stays inside the file, drawn from the calling line to the line the callee is defined on. Nothing is laid out by an algorithm — the author already put the symbols in order, so source order does the work, and this is the one place a file's internal call structure is legible at a glance. Hover a line to light the arcs the function under your cursor takes part in, and click an arc to jump to the other end. On a file with more than forty of them the picture narrows to the symbol you're reading instead of drawing a wash of overlapping sweeps, with the total in the header. A rail on the far left lists the file's symbols and follows you as you scroll, when the window is wide enough for it.
+
 
 ## [1.6.0] - 2026-08-26
 

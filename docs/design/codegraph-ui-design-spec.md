@@ -159,6 +159,26 @@ windowed above 250 rows (this repo's own fixtures hold a 1,681-symbol `.d.ts`); 
 live together in `ui/src/lib/file-model.ts`. Keyboard: ↑/↓ within a pane, ←/→ across the three
 panes, Enter follows; `?hl=<line>` selects the DEEPEST outline row whose range holds the line.
 
+**Whole-file source, as built (phase 2, CG-52).** `?src=1` on the same route. Four columns inside
+one scroller: sticky outline rail (240px, only at ≥ 1400px) | arcs 56px | source | callee rail 320px.
+The line grid, the 6x6 ports and the accent call-site links are the Symbol view's, unchanged — what
+differs is that **line positions are arithmetic, not measured**: every line is exactly 20px and sits
+at `10 + (n - 1) x 20`, so a 6 820-line file renders ~90 line elements and the arcs, ports, rail
+rows and connectors are all functions of a line number. `ui/src/lib/filecode-model.ts` holds the
+constant; `FileCodeBlock.svelte`'s CSS holds the other half of it, and they must move together.
+Source pages in 800 lines at a time from `/api/source`, each request reaching back 150 lines that are
+then discarded so a page starting inside a block comment does not render prose as code; a line whose
+page has not arrived still shows its number, its port and its place. Callee-rail rows are one per
+(CALLING symbol, called symbol) PAIR rather than one per callee — a row is anchored to a line and a
+helper called from two functions a thousand lines apart has no line that is both — and uncertain rows
+stay in place with their dotted underline rather than folding, because a fold has nowhere to sit on
+this screen. Arcs are half-ellipses bulging left, both ends on the arc column's right edge, depth a
+log function of the arc's own SPAN (so short arcs sit innermost and filtering never moves a survivor
+sideways); `--ink-4` 1px at rest, `--accent` 1.5px when the call line or the callee is under the
+pointer — never as a consequence of the crowding filter. Above 40 arcs only the focused symbol's are
+drawn (hovered symbol, else the symbol the scroll position is inside) and the header states the
+total. Clicking an arc scrolls to the callee's definition and marks it. Data: `GET /api/filecode/<path>`.
+
 ### 3.5 Flow strip (`#/flow/<key>`)
 Header: "Flow" + a `<select>` of flows (`--paper-2`, `--rule-soft` border, 12.5px sans) + a 78ch note.
 Cards **380px** wide, `--rule-soft` border (`--ink` on hover, `--accent` when current), header grid `16px | 1fr` padding `10px 12px 6px`

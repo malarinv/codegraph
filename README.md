@@ -345,7 +345,7 @@ What you get on that screen:
 - **Blast radius** — direct dependents, everything within three hops, and how many files and test files that touches.
 - **Honest edges.** A guess CodeGraph isn't sure about is folded away as "uncertain" rather than shown as fact, and a symbol no test reaches within three hops says so.
 - **Search** (`/` or ⌘K) over every symbol and file, **entry points** to start from (routes, hubs, files that run code at import time), and a **trail** of the path you walked that lives in the URL, so you can send someone the exact route you took.
-- Click any file path to open the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
+- Click any file path to open the **file view**: everything that file depends on, its outline in source order, and everything that depends on it. Its **Source** tab shows the whole file with the same gutter markers, plus an arc in the left margin for every call that stays inside the file — the one place a file's internal call structure is legible, because source order does the layout. A 6,800-line file scrolls at full speed.
 - **Ask for a path.** Type "how does execute reach getFile" (or `execute -> getFile`) and you get the **flow**: one card per hop, each opened at the line that makes the next call. Hops that no static edge records — a callback, an interface dispatch, a React re-render — are drawn dashed and name where the handler was wired. "Read as flow" turns a walk you did by hand into the same strip.
 - **The map**: the whole project at module granularity, laid out from the graph with dependencies pointing down — never drawn by hand, and the same picture every time. Cycles are listed rather than straightened away.
 

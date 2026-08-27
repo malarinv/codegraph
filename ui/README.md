@@ -44,6 +44,7 @@ src/
   lib/kinds.ts            kind glyph letters
   lib/map-model.ts        the Map's deterministic layered layout (pure)
   lib/flow-model.ts       the Flow strip's card/link geometry — a DAG (pure)
+  lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
   components/             TopBar, TrailBar, KindGlyph, map/, flow/, symbol/, file/
   views/                  one component per route
 ```
@@ -58,7 +59,8 @@ announce the project to a font CDN.
 |---|---|
 | `#/` | nothing selected |
 | `#/s/<id>?hl=<line>&t=<trail>` | symbol view |
-| `#/file/<path>?hl=<line>` | file view |
+| `#/file/<path>?hl=<line>` | file view — outline in source order |
+| `#/file/<path>?src=1` | file view — the whole file's source, with ports and call arcs |
 | `#/map?root=&depth=&tests=1` | module map |
 | `#/flow?from=&to=` | flow strip — the call path between two symbols |
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |

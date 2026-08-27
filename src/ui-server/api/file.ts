@@ -71,34 +71,7 @@ export function buildFile(cg: CodeGraph, projectRoot: string, requested: string)
   // ---------------------------------------------------------------------------
   // Outline
   // ---------------------------------------------------------------------------
-  const containsEdges = cg.getOutgoingEdgesFrom(nodeIds, ['contains']);
-  const parentOf = new Map<string, string>();
-  for (const edge of containsEdges) {
-    // Only nesting *within* this file: a `contains` edge reaching out of it is
-    // not something a file outline can draw.
-    if (inThisFile.has(edge.target) && !parentOf.has(edge.target)) {
-      parentOf.set(edge.target, edge.source);
-    }
-  }
-
-  const fanIn = cg.getFanIn(nodeIds);
-  const fanOut = cg.getFanOut(nodeIds);
-
-  const outlineNodes = nodes
-    // The file node is the subject of the screen, not a row in its own outline;
-    // import declarations get their own rail and would otherwise be most of it.
-    .filter((n) => n.kind !== 'file' && n.kind !== 'import')
-    .sort((a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name));
-
-  const outline: WireOutlineEntry[] = outlineNodes
-    .slice(0, MAX_OUTLINE_NODES)
-    .map((node) => ({
-      ...toNodeRef(node),
-      parentId: resolveOutlineParent(node.id, parentOf, fileNode?.id),
-      depth: depthOf(node.id, parentOf, fileNode?.id),
-      fanIn: fanIn.get(node.id) ?? 0,
-      fanOut: fanOut.get(node.id) ?? 0,
-    }));
+  const { entries: outline, total: outlineTotal } = buildOutlineEntries(cg, nodes);
 
   // ---------------------------------------------------------------------------
   // Import rails
@@ -162,7 +135,7 @@ export function buildFile(cg: CodeGraph, projectRoot: string, requested: string)
     },
     /** The file changed on disk since it was indexed — the outline's lines may be shifted. */
     drift: hasDriftedOnDisk(projectRoot, storedPath, record),
-    outline: wireList(outline, outlineNodes.length),
+    outline: wireList(outline, outlineTotal),
     imports: wireList(imports.slice(0, MAX_IMPORT_FILES), imports.length),
     importedBy: wireList(importedBy.slice(0, MAX_IMPORT_FILES), importedBy.length),
     unresolvedImports,
@@ -175,6 +148,57 @@ export function buildFile(cg: CodeGraph, projectRoot: string, requested: string)
     dependencies: cg.getFileDependencies(storedPath).map(toPosixPath).sort(),
     dependents: cg.getFileDependents(storedPath).map(toPosixPath).sort(),
   };
+}
+
+/**
+ * A file's symbols in source order, nested under their container.
+ *
+ * Extracted so the whole-file source view (`/api/filecode`) draws the same rows
+ * as the outline view rather than a second, subtly different reading of the
+ * same `contains` edges — an outline rail whose line numbers disagreed with the
+ * source beside it would be worse than no rail.
+ *
+ * Four batched queries whatever the file holds: its nodes are already in hand,
+ * their `contains` edges, and fan-in / fan-out for the whole set at once.
+ *
+ * @returns the capped rows and the TRUE symbol count, which is what a header
+ *          has to print — see `wireList`.
+ */
+export function buildOutlineEntries(
+  cg: CodeGraph,
+  nodes: readonly Node[]
+): { entries: WireOutlineEntry[]; total: number } {
+  const nodeIds = nodes.map((n) => n.id);
+  const inThisFile = new Set(nodeIds);
+  const fileNodeId = nodes.find((n) => n.kind === 'file')?.id;
+
+  const parentOf = new Map<string, string>();
+  for (const edge of cg.getOutgoingEdgesFrom(nodeIds, ['contains'])) {
+    // Only nesting *within* this file: a `contains` edge reaching out of it is
+    // not something a file outline can draw.
+    if (inThisFile.has(edge.target) && !parentOf.has(edge.target)) {
+      parentOf.set(edge.target, edge.source);
+    }
+  }
+
+  const fanIn = cg.getFanIn(nodeIds);
+  const fanOut = cg.getFanOut(nodeIds);
+
+  const outlineNodes = nodes
+    // The file node is the subject of the screen, not a row in its own outline;
+    // import declarations get their own rail and would otherwise be most of it.
+    .filter((n) => n.kind !== 'file' && n.kind !== 'import')
+    .sort((a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name));
+
+  const entries: WireOutlineEntry[] = outlineNodes.slice(0, MAX_OUTLINE_NODES).map((node) => ({
+    ...toNodeRef(node),
+    parentId: resolveOutlineParent(node.id, parentOf, fileNodeId),
+    depth: depthOf(node.id, parentOf, fileNodeId),
+    fanIn: fanIn.get(node.id) ?? 0,
+    fanOut: fanOut.get(node.id) ?? 0,
+  }));
+
+  return { entries, total: outlineNodes.length };
 }
 
 /**

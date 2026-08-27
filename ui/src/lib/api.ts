@@ -215,6 +215,48 @@ export interface WireFilePayload {
   dependents: string[];
 }
 
+/* ------------------------------------------------ whole-file source view -- */
+
+/** A reference the resolver never landed: a gutter port with no destination. */
+export interface WireFileOutsideRef {
+  line: number;
+  col: number;
+  name: string;
+  kind: string;
+}
+
+/** Every edge from ONE symbol in a file to ONE symbol anywhere. */
+export interface WireFileCall {
+  /** The symbol making the calls — the file node itself for top-level code. */
+  ownerId: string;
+  ownerLine: number;
+  relation: WireRelation;
+}
+
+export interface WireFileCodePayload {
+  file: {
+    path: string;
+    language: string;
+    size: number;
+    indexedAt: number;
+    contentHash: string;
+    generated: boolean;
+    test: boolean;
+    errors: string[];
+    id: string | null;
+    /** Lines on disk now — the height of the scrolling document. */
+    totalLines: number | null;
+  };
+  drift: boolean;
+  reason?: string;
+  outline: WireList<WireOutlineEntry>;
+  calls: WireList<WireFileCall>;
+  outside: WireList<WireFileOutsideRef>;
+  /** Calls landing on a definition in this same file — the arc diagram's total. */
+  intraFileCalls: number;
+  timing: { elapsedMs: number };
+}
+
 export interface WireBlastScale {
   maxDirect: number;
   maxWithinHops: number;
@@ -532,6 +574,20 @@ export function fetchFile(path: string, signal?: AbortSignal): Promise<WireFileP
   // readable and a segment with a reserved character still round-trips.
   const encoded = path.split('/').map(encodeURIComponent).join('/');
   return getJson<WireFilePayload>(`api/file/${encoded}`, signal);
+}
+
+/**
+ * Everything the graph says about the lines of one file: the outline, one row
+ * per (caller, callee) pair with its call-site lines, and the references that
+ * resolved to nothing. The SOURCE is not in here — it pages through
+ * `fetchSource`, so the ports and arcs are complete before any text arrives.
+ */
+export function fetchFileCode(
+  path: string,
+  signal?: AbortSignal
+): Promise<WireFileCodePayload> {
+  const encoded = path.split('/').map(encodeURIComponent).join('/');
+  return getJson<WireFileCodePayload>(`api/filecode/${encoded}`, signal);
 }
 
 export function fetchSource(

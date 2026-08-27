@@ -173,6 +173,60 @@ export function hasDriftedOnDisk(
   }
 }
 
+/**
+ * The drift verdict AND the file's length, from one read.
+ *
+ * The whole-file view needs both before it draws anything: the drift banner,
+ * and the line count that fixes the height of the scrolling document (every
+ * line is a fixed 20px, so the total IS the layout). Asking
+ * {@link hasDriftedOnDisk} and then a source page would answer the first
+ * question against one read of the file and the second against another, which
+ * is exactly the window in which a file can change underneath the two.
+ *
+ * Unlike `hasDriftedOnDisk` there is no stat-only fast path: the bytes have to
+ * be read to be counted. That is the cost of knowing the length, and it is
+ * bounded by {@link MAX_SOURCE_BYTES} like every other read here.
+ */
+export function readFileShape(
+  projectRoot: string,
+  storedPath: string,
+  record: FileRecord
+): { drift: boolean; totalLines: number | null; reason?: string } {
+  let absolute: string;
+  try {
+    absolute = resolveProjectFile(projectRoot, storedPath);
+  } catch {
+    // A refusal on a path the INDEX handed us is not a request to refuse — the
+    // caller already passed the chokepoint. Treat it as unreadable.
+    return { drift: false, totalLines: null };
+  }
+  try {
+    const stats = fs.statSync(absolute);
+    if (stats.size > MAX_SOURCE_BYTES) {
+      return { drift: false, totalLines: null, reason: 'The file is too large to read here.' };
+    }
+    const content = fs.readFileSync(absolute, 'utf-8');
+    const drift = createHash('sha256').update(content).digest('hex') !== record.contentHash;
+    return {
+      drift,
+      totalLines: splitLines(content).length,
+      ...(drift
+        ? {
+            reason:
+              'This file changed on disk after the last index sync, so the line ' +
+              'numbers the graph holds no longer match it.',
+          }
+        : {}),
+    };
+  } catch {
+    return {
+      drift: true,
+      totalLines: null,
+      reason: 'The file is in the index but could not be read from disk.',
+    };
+  }
+}
+
 export interface SourceResult {
   file: string;
   language: string;

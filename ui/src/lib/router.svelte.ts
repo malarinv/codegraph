@@ -7,7 +7,7 @@
  * Routes (design spec §3.2–§3.6):
  *   #/                     home / nothing selected
  *   #/s/<id>               symbol view      (?hl=<line> highlights a line, ?t=<trail>)
- *   #/file/<path>          file view        (?hl=<line>)
+ *   #/file/<path>          file view        (?hl=<line>, ?src=1 for whole-file source)
  *   #/map                  module map       (?root=&depth=&tests=1)
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *
@@ -22,7 +22,13 @@
 export type Route =
   | { view: 'home' }
   | { view: 'symbol'; id: string; line: number | null }
-  | { view: 'file'; path: string; line: number | null }
+  | {
+      view: 'file';
+      path: string;
+      line: number | null;
+      /** The whole-file source view rather than the outline (design spec §3.4). */
+      source: boolean;
+    }
   | { view: 'map'; root: string | null; depth: number; tests: boolean }
   | {
       view: 'flow';
@@ -81,7 +87,7 @@ export function parseHash(hash: string): RouterLocation {
   } else if (head === 's' && rest.length > 0) {
     route = { view: 'symbol', id: rest.join('/'), line };
   } else if (head === 'file' && rest.length > 0) {
-    route = { view: 'file', path: rest.join('/'), line };
+    route = { view: 'file', path: rest.join('/'), line, source: params.get('src') === '1' };
   } else if (head === 'map' && rest.length === 0) {
     // The map's shape travels in the URL like the trail does: a link to
     // "src/vs at depth 2, tests on" has to reopen the same picture.
@@ -120,9 +126,17 @@ export function symbolHref(id: string, opts: { line?: number; trail?: string } =
   return `#/s/${encodePath(id)}${query ? `?${query}` : ''}`;
 }
 
-export function fileHref(path: string, opts: { line?: number } = {}): string {
-  const query = opts.line ? `?hl=${opts.line}` : '';
-  return `#/file/${encodePath(path)}${query}`;
+export function fileHref(
+  path: string,
+  opts: { line?: number; source?: boolean } = {}
+): string {
+  const params = new URLSearchParams();
+  // `src` before `hl` so the two file URLs a reader shares differ in their
+  // first character after the path, not somewhere in the middle.
+  if (opts.source) params.set('src', '1');
+  if (opts.line) params.set('hl', String(opts.line));
+  const query = params.toString();
+  return `#/file/${encodePath(path)}${query ? `?${query}` : ''}`;
 }
 
 export function mapHref(

@@ -11,13 +11,15 @@
   — every cross-file edge, not just resolved import statements. See
   `lib/file-model.ts` for why that distinction is the whole point of the rails.
 
-  Whole-file source with gutter ports is phase 2 (CG-52); this screen is the
-  outline, and the row that opens a symbol is the way into the code.
+  The whole file's source, with the same gutter ports and an arc diagram for the
+  calls that stay inside it, is the other reading of this screen — `?src=1`,
+  `FileCodeView.svelte` (CG-52). The tabs in the header switch between them.
 -->
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import FileOutline from '../components/file/FileOutline.svelte';
   import FileRail from '../components/file/FileRail.svelte';
+  import FileModeTabs from '../components/file/FileModeTabs.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
   import { ApiFailure, fetchFile, type WireFilePayload, type WireNodeRef } from '../lib/api';
   import {
@@ -253,6 +255,8 @@
         <h1>{basename(payload.file.path)}</h1>
         <span class="kindword">{fileMetaLine(payload)}</span>
         <span class="loc">{payload.file.path}</span>
+        <div class="spacer"></div>
+        <FileModeTabs path={payload.file.path} {line} source={false} />
       </div>
 
       <div class="badges">
@@ -348,6 +352,10 @@
     margin: 0;
     font: 600 20px/1.2 var(--mono);
     letter-spacing: -0.01em;
+  }
+
+  .spacer {
+    flex: 1 1 auto;
   }
 
   .kindword {
