@@ -845,6 +845,17 @@ describe('GET /api/file/<path>', () => {
     expect(body.dependencies).toContain('src/types.ts');
   });
 
+  it('says whether the file runs anything at its top level', async () => {
+    // `src/main.ts` instantiates a Service and calls two functions outside
+    // every definition — code no outline row can show, because it belongs to
+    // no symbol. `src/cache.ts` only defines things.
+    const main = await getJson('/api/file/src/main.ts');
+    expect(main.topLevel.calls).toBeGreaterThanOrEqual(2);
+
+    const cache = await getJson('/api/file/src/cache.ts');
+    expect(cache.topLevel.calls).toBe(0);
+  });
+
   it('404s a file that is not in the index and refuses one outside the project', async () => {
     const missing = await getStatusAndJson('/api/file/src/nope.ts');
     expect(missing.status).toBe(404);

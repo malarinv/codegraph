@@ -164,6 +164,57 @@ export interface WireSource {
   highlight?: WireHighlight;
 }
 
+/* ------------------------------------------------------------- file view -- */
+
+/** A row in the file outline — a symbol, its nesting and its edge counts. */
+export interface WireOutlineEntry extends WireNodeRef {
+  /** Containing symbol within this file, or null for a top-level one. */
+  parentId: string | null;
+  /** Nesting depth from the top level of the file, starting at 0. */
+  depth: number;
+  fanIn: number;
+  fanOut: number;
+}
+
+/** One file at the far end of an import rail, with the symbols the edges name. */
+export interface WireImportRow {
+  file: string;
+  test: boolean;
+  symbols: Array<{ id: string; name: string; kind: string; line: number }>;
+  symbolCount: number;
+}
+
+export interface WireFilePayload {
+  file: {
+    path: string;
+    language: string;
+    size: number;
+    modifiedAt: number;
+    indexedAt: number;
+    contentHash: string;
+    nodeCount: number;
+    generated: boolean;
+    test: boolean;
+    errors: string[];
+    /** The file node's own id, so the viewer can open the file AS a symbol. */
+    id: string | null;
+  };
+  /** Calls made outside every definition — module-level code. */
+  topLevel: { calls: number };
+  /** The file changed on disk since it was indexed; the outline's lines shifted. */
+  drift: boolean;
+  outline: WireList<WireOutlineEntry>;
+  /** `imports` edges only — a subset of `dependencies`, with symbol names. */
+  imports: WireList<WireImportRow>;
+  importedBy: WireList<WireImportRow>;
+  /** Import statements that resolved to nothing indexed: packages, builtins. */
+  unresolvedImports: Array<{ name: string; line: number }>;
+  /** Every file this one reaches by any cross-file edge — `getFileDependencies`. */
+  dependencies: string[];
+  /** Every file that reaches into this one — `getFileDependents`. */
+  dependents: string[];
+}
+
 export interface WireBlastScale {
   maxDirect: number;
   maxWithinHops: number;
@@ -352,6 +403,13 @@ export function fetchEntryPoints(
   if (opts.limit) params.set('limit', String(opts.limit));
   const query = params.toString();
   return getJson<WireEntryPoints>(`api/entrypoints${query ? `?${query}` : ''}`, signal);
+}
+
+export function fetchFile(path: string, signal?: AbortSignal): Promise<WireFilePayload> {
+  // Paths carry '/'; encode per segment so `api/file/src/mcp/tools.ts` stays
+  // readable and a segment with a reserved character still round-trips.
+  const encoded = path.split('/').map(encodeURIComponent).join('/');
+  return getJson<WireFilePayload>(`api/file/${encoded}`, signal);
 }
 
 export function fetchSource(

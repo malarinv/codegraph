@@ -12,6 +12,7 @@
   import PaletteRows from '../components/PaletteRows.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPalette, type PaletteItem } from '../lib/search-model';
+  import { fileHref, navigate } from '../lib/router.svelte';
   import { walkTo } from '../lib/walk';
 
   interface Props {
@@ -28,6 +29,12 @@
   function pick(item: PaletteItem) {
     const id = item.type === 'route' ? item.nodeId : item.id;
     if (!id) return;
+    // A file opens the File view — its outline plus the import rails. The
+    // entry-point rows are files far more often than the palette's are.
+    if (item.type === 'symbol' && item.node.kind === 'file') {
+      navigate(fileHref(item.node.file));
+      return;
+    }
     walkTo(
       item.type === 'route'
         ? { id, name: item.handler, kind: null }

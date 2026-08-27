@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, mapHref, flowHref, symbolHref } from '../lib/router.svelte';
+  import { router, mapHref, flowHref, symbolHref, fileHref, navigate } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
   import { palette } from '../lib/palette.svelte';
   import SearchPalette from './SearchPalette.svelte';
@@ -46,6 +46,13 @@
     if (!id) return;
     palette.reset();
     input?.blur();
+    // A file result opens the File view, not the file node's Symbol view: the
+    // outline is there either way, and only the File view carries the import
+    // rails. (CG-45 routed these at the Symbol view because #/file was a stub.)
+    if (item.type === 'symbol' && item.node.kind === 'file') {
+      navigate(fileHref(item.node.file));
+      return;
+    }
     walkTo(
       item.type === 'route'
         ? { id, name: item.handler, kind: null }

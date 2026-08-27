@@ -143,6 +143,22 @@ Grid **300px | minmax(480px,1fr) | 300px**: Imported by · outline (source order
 File rows 12px mono, 5px 14px padding, `--rule-faint` separators; files outside the index in `--ink-3`, not clickable.
 Header: file glyph, basename as h1, `lang · KB · N symbols · generated`, full path.
 
+**As built (phase 1, CG-46).** The two rails count **dependencies**, not import statements —
+`getFileDependencies` / `getFileDependents`, every cross-file edge except `contains`. The prototype
+drew `imports` edges alone, and on this repo that understates the answer: `src/graph/traversal.ts`
+imports two files and depends on four (it reaches `src/resolution/lru-cache.ts` through a call no
+import names). The import rows are still merged in — they carry the symbol NAMES, shown as a count
+on the row and in full in its tooltip. Rows sort production-first then alphabetically, tests last.
+Imports that resolved to nothing indexed are listed under **Outside the index**, in `--ink-3` and
+not clickable, so a file importing `react` and `fs` does not read as having one dependency.
+The header's `N symbols` is the OUTLINE's total, not the file record's node count (which includes
+the file node and its import declarations). A file that runs code at its top level — an edge out of
+the file node — carries a badge ("Runs N calls at the top level — see what it calls") that focuses
+the file node, the only place that code can be read. Outline rows are a fixed 28px and the list is
+windowed above 250 rows (this repo's own fixtures hold a 1,681-symbol `.d.ts`); the two constants
+live together in `ui/src/lib/file-model.ts`. Keyboard: ↑/↓ within a pane, ←/→ across the three
+panes, Enter follows; `?hl=<line>` selects the DEEPEST outline row whose range holds the line.
+
 ### 3.5 Flow strip (`#/flow/<key>`)
 Header: "Flow" + a `<select>` of flows (`--paper-2`, `--rule-soft` border, 12.5px sans) + a 78ch note.
 Cards **380px** wide, `--rule-soft` border (`--ink` on hover, `--accent` when current), header grid `16px | 1fr` padding `10px 12px 6px`

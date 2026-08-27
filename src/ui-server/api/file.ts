@@ -127,6 +127,16 @@ export function buildFile(cg: CodeGraph, projectRoot: string, requested: string)
   // records a file-level import.
   const unresolvedImports = fileNode ? unresolvedImportsOf(cg, fileNode.id) : [];
 
+  // Whether the file RUNS anything at its top level. Extraction records a
+  // statement outside any definition as an edge out of the FILE node, so a
+  // module that only defines things has none and a CLI entry point has many —
+  // the same signal `/api/entrypoints` ranks on. It is worth a line on this
+  // screen because the outline cannot show it: top-level code belongs to no
+  // symbol, so the only way to read it is to open the file node itself.
+  const topLevelEdges = fileNode
+    ? cg.getOutgoingEdgesFrom([fileNode.id], ['calls', 'instantiates'])
+    : [];
+
   return {
     file: {
       path: toPosixPath(storedPath),
@@ -141,6 +151,14 @@ export function buildFile(cg: CodeGraph, projectRoot: string, requested: string)
       errors: record.errors ?? [],
       /** The file node itself, so the viewer can navigate to it as a symbol. */
       id: fileNode?.id ?? null,
+    },
+    /**
+     * Calls made at the top level of the file, outside every definition.
+     * Counted as distinct call SITES — `(target, line, column)` — so a call
+     * two resolvers both recorded is one thing to read, not two.
+     */
+    topLevel: {
+      calls: new Set(topLevelEdges.map((e) => `${e.target}:${e.line ?? 0}:${e.column ?? 0}`)).size,
     },
     /** The file changed on disk since it was indexed — the outline's lines may be shifted. */
     drift: hasDriftedOnDisk(projectRoot, storedPath, record),
