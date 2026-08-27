@@ -141,6 +141,7 @@ for (const name of [
   'TypeHierarchy',
   'FlowStrip',
   'ArchitectureMap',
+  'DeadCodeView',
   'TrailBar',
   'SearchPalette',
   'CodegraphUi',

@@ -46,6 +46,7 @@ export {
   setGraphAdapter,
 } from './lib/adapter';
 export type {
+  DeadCodeRequest,
   EntryPointsRequest,
   FlowRequest,
   GraphAdapter,
@@ -59,6 +60,7 @@ export type {
 
 export {
   back,
+  deadHref,
   entryHref,
   fileHref,
   flowHref,
@@ -70,6 +72,7 @@ export {
   symbolHref,
 } from './lib/navigation';
 export type {
+  DeadCodeHrefOptions,
   FileHrefOptions,
   FlowHrefOptions,
   MapHrefOptions,
@@ -94,6 +97,8 @@ export { default as FileView } from './views/FileView.svelte';
 export { default as FileSourceView } from './views/FileCodeView.svelte';
 /** Where a reader starts: routes, files that run something, tests, hubs. */
 export { default as EntryPointsView } from './views/EntryView.svelte';
+/** Symbols nothing reaches, grouped by file, with every exclusion printed. */
+export { default as DeadCodeView } from './views/DeadCodeView.svelte';
 
 /* -------------------------------------------------------- the furniture -- */
 
@@ -214,6 +219,16 @@ export {
   visibleLines,
 } from './lib/filecode-model';
 export type { FileArc, FileCallRow, SourcePage } from './lib/filecode-model';
+
+export {
+  deadCodeHeadline,
+  deadCodeRowMeta,
+  deadCodeScale,
+  emptyMessage as deadCodeEmptyMessage,
+  exclusionPhrases,
+  groupMeta as deadCodeGroupMeta,
+  DEAD_CODE_CAVEAT,
+} from './lib/deadcode-model';
 
 export { buildEntryPanel, flowPair, matchEntries } from './lib/entry-model';
 export type {

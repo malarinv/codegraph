@@ -46,14 +46,21 @@
   class:sel={node.selected}
   class:dimmed={node.dimmed}
   class:test={module.test}
+  class:gen={layout.generated}
   style={`width:${layout.width}px;height:${layout.height}px`}
   onclick={() => node.onSelect(layout.id)}
   aria-pressed={node.selected}
-  title={`${module.id} — ${module.symbols} symbols in ${module.files} file${module.files === 1 ? '' : 's'}`}
+  title={`${module.id} — ${module.symbols} symbols in ${module.files} file${
+    module.files === 1 ? '' : 's'
+  }${layout.island ? '. Nothing in the index depends on it.' : ''}${
+    layout.generated ? '. Every file in it is tool-generated.' : ''
+  }`}
 >
   <span class="name">{module.id}</span>
   <!-- The same string nodeWidth() sized the box for; they must not drift. -->
-  <span class="count">{moduleMetaLabel(module)}</span>
+  <span class="count" class:island={layout.island}
+    >{moduleMetaLabel(module, layout.island)}</span
+  >
 </button>
 
 {#each layout.sourceHandles as handle, i (handle)}
@@ -94,6 +101,19 @@
     color: var(--ink-4);
   }
   .mnode.dimmed .count {
+    color: var(--ink-4);
+  }
+  /* Nothing depends on it — the stroke stays normal (it is not a lesser module,
+     it is an unreached one); only the count line changes what it says. */
+  .count.island {
+    color: var(--ink-2);
+  }
+  /* Generated code: nobody wrote it by hand and nobody deletes it by hand. */
+  .mnode.gen {
+    color: var(--ink-4);
+    border-color: var(--rule-soft);
+  }
+  .mnode.gen .count {
     color: var(--ink-4);
   }
   /* Test modules read as scaffolding, not as part of the program. */

@@ -21,3 +21,17 @@ export type {
   OverrideMatch,
   TypeHierarchy,
 } from './type-hierarchy';
+export {
+  buildDeadCodeReport,
+  isImplicitEntryName,
+  DEAD_CODE_ALLOWED_KINDS,
+  DEAD_CODE_KINDS,
+  MAX_DEAD_CODE_CANDIDATES,
+  MAX_OVERRIDE_ANCESTOR_DEPTH,
+} from './dead-code';
+export type {
+  DeadCodeEntry,
+  DeadCodeExclusions,
+  DeadCodeQuery,
+  DeadCodeReport,
+} from './dead-code';

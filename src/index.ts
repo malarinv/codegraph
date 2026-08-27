@@ -1406,6 +1406,47 @@ export class CodeGraph {
   }
 
   /**
+   * Symbols nothing in the index points at, by kind — the candidate set the
+   * dead code report (`src/graph/dead-code.ts`) applies its exclusions to.
+   *
+   * Every edge kind except `contains` counts as a reference, so a method is
+   * not "reached" by the class that holds it. An unreferenced symbol is not
+   * yet a dead one: see {@link buildDeadCodeReport}.
+   */
+  getUnreferencedNodes(
+    kinds: readonly Node['kind'][],
+    limit: number
+  ): Array<{ node: Node; generated: boolean }> {
+    return this.queries.getUnreferencedNodes(kinds, limit);
+  }
+
+  /**
+   * Which of the given names are carried by more than one symbol, at least one
+   * of which something references — the names a "nothing reaches this" claim
+   * must not be made about, because the resolver may have picked the twin.
+   */
+  getAmbiguousReferencedNames(names: Iterable<string>): Set<string> {
+    return this.queries.getAmbiguousReferencedNames(names);
+  }
+
+  /**
+   * Which of the given languages this index records an export marker for. A
+   * language with none has no "reachable from outside" signal at all.
+   */
+  getLanguagesWithExports(languages: Iterable<string>): Set<string> {
+    return this.queries.getLanguagesWithExports(languages);
+  }
+
+  /**
+   * Which of the given names the index holds an unresolved reference to — the
+   * resolver saw the name and could not decide what it meant. A symbol with
+   * such a name can never be called unreferenced.
+   */
+  getUnresolvedNamesAmong(names: Iterable<string>): Set<string> {
+    return this.queries.getUnresolvedNamesAmong(names);
+  }
+
+  /**
    * The symbols with the most distinct dependents, most first — the index's
    * hubs. Distinct dependents, not edges: a helper called forty times from one
    * function has one dependent, and it is dependents a blast radius grows from.

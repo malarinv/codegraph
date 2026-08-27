@@ -1980,6 +1980,173 @@ export class QueryBuilder {
   }
 
   /**
+   * Symbols nothing in the index points at — the candidate set behind the dead
+   * code list (`src/graph/dead-code.ts`).
+   *
+   * "Points at" is every edge kind EXCEPT `contains`: a class containing a
+   * method is structure, not use, and counting it would make every member look
+   * reached by its own container. A self-edge is excluded for the same reason
+   * a recursive function is not its own caller.
+   *
+   * One scan, one index probe per candidate. `NOT EXISTS` over
+   * `idx_edges_target_kind` is what keeps it that way — the alternative
+   * (`LEFT JOIN edges … GROUP BY`) builds a row per edge for the whole table
+   * before discarding all but the empty groups. Ordered by position so the
+   * answer is stable across runs and groups by file without a second sort.
+   *
+   * The result is deliberately NOT called dead code: an unreferenced symbol is
+   * a symbol with no STATIC reference, and the caller applies the exclusions
+   * (tests, generated files, overrides, unresolved names) that turn the
+   * candidate set into a claim worth making.
+   */
+  getUnreferencedNodes(
+    kinds: readonly string[],
+    limit: number
+  ): Array<{ node: Node; generated: boolean }> {
+    if (kinds.length === 0 || limit <= 0) return [];
+    const placeholders = kinds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT n.*, COALESCE(f.generated, 0) AS file_generated
+           FROM nodes n
+           LEFT JOIN files f ON f.path = n.file_path
+          WHERE n.kind IN (${placeholders})
+            AND NOT EXISTS (
+                  SELECT 1 FROM edges e
+                   WHERE e.target = n.id
+                     AND e.kind != 'contains'
+                     AND e.source != n.id
+                )
+       ORDER BY n.file_path, n.start_line, n.name
+          LIMIT ?`
+      )
+      .all(...kinds, limit) as Array<NodeRow & { file_generated: number }>;
+    return rows.map((row) => ({ node: rowToNode(row), generated: row.file_generated === 1 }));
+  }
+
+  /**
+   * Which of `names` the index holds an UNRESOLVED reference to.
+   *
+   * The point is honesty about our own blind spots. A `failed` row in
+   * `unresolved_refs` records that some file referenced a name and the resolver
+   * could not decide what it meant — so a symbol with that name cannot be
+   * called unreferenced, whatever the edge table says. It is deliberately
+   * matched loosely, on the reference name AND on its tail (`util.greet` →
+   * `greet`), because the question being asked is "could this name be the one
+   * we failed to follow", and a maybe has to count as a yes.
+   *
+   * Bounded-lookup like {@link getGeneratedPathsAmong}: the caller holds a
+   * candidate list, so this is a chunked probe over `idx_unresolved_name`, not
+   * a scan of the table.
+   */
+  getUnresolvedNamesAmong(names: Iterable<string>): Set<string> {
+    const unique = [...new Set(names)].filter((name) => name.length > 0);
+    const found = new Set<string>();
+    if (unique.length === 0) return found;
+
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT DISTINCT reference_name AS name FROM unresolved_refs
+            WHERE reference_name IN (${placeholders})
+            UNION
+           SELECT DISTINCT name_tail AS name FROM unresolved_refs
+            WHERE name_tail IN (${placeholders})`
+        )
+        .all(...chunk, ...chunk) as Array<{ name: string }>;
+      for (const row of rows) found.add(row.name);
+    }
+    return found;
+  }
+
+  /**
+   * Which of `names` are carried by MORE THAN ONE symbol, at least one of which
+   * something points at.
+   *
+   * The false positive this exists to kill: `CodeGraph.getTopRouteFile` calls
+   * `this.queries.getTopRouteFile()`, and the resolver — which prefers a
+   * same-name definition in the call site's own file — attaches that edge to
+   * the *calling* method. One of the two ends up with a self-edge and the other
+   * with nothing at all, and neither is unreferenced. From the edge table the
+   * mis-resolution and a genuinely unused twin are the same picture, so the
+   * claim is not made about either.
+   *
+   * Both halves of the condition are load-bearing. **More than one symbol**:
+   * a uniquely-named function that only calls itself is genuinely dead, and
+   * excluding every recursive function would gut the list. **Self-edges
+   * counted**: the self-edge IS the fingerprint of the mis-resolution above, so
+   * it has to count as evidence that this name resolves somewhere.
+   *
+   * Chunked probe over `idx_nodes_name`, bounded by the caller's candidate list.
+   */
+  getAmbiguousReferencedNames(names: Iterable<string>): Set<string> {
+    const unique = [...new Set(names)].filter((name) => name.length > 0);
+    const found = new Set<string>();
+    if (unique.length === 0) return found;
+
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT name FROM (
+             SELECT n.name AS name,
+                    EXISTS (
+                      SELECT 1 FROM edges e
+                       WHERE e.target = n.id AND e.kind != 'contains'
+                    ) AS referenced
+               FROM nodes n
+              WHERE n.name IN (${placeholders})
+           )
+         GROUP BY name
+           HAVING COUNT(*) > 1 AND SUM(referenced) > 0`
+        )
+        .all(...chunk) as Array<{ name: string }>;
+      for (const row of rows) found.add(row.name);
+    }
+    return found;
+  }
+
+  /**
+   * Which of the given languages the index records an EXPORT marker for.
+   *
+   * A self-measurement, and the honest basis for a whole class of exclusion.
+   * The dead code report's strongest filter is "exported symbols may be reached
+   * from outside this repository" — and that filter silently does nothing for a
+   * language whose exports are not recorded, either because the extractor does
+   * not record them (Rust `pub`) or because the language has no such concept at
+   * all (Python, C, Ruby: the header or the module IS the surface). Rather than
+   * carry a table of which is which, ask the index: if nothing in this language
+   * is marked exported, the filter did not run, and no claim about outside
+   * reachability can be made for it.
+   *
+   * `idx_nodes_language` covers the grouping; the caller passes the handful of
+   * languages its candidates are actually in.
+   */
+  getLanguagesWithExports(languages: Iterable<string>): Set<string> {
+    const unique = [...new Set(languages)].filter((language) => language.length > 0);
+    const found = new Set<string>();
+    if (unique.length === 0) return found;
+
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT language, MAX(is_exported) AS any_exported
+             FROM nodes
+            WHERE language IN (${placeholders})
+         GROUP BY language`
+        )
+        .all(...chunk) as Array<{ language: string; any_exported: number }>;
+      for (const row of rows) if (row.any_exported === 1) found.add(row.language);
+    }
+    return found;
+  }
+
+  /**
    * The nodes with the most DISTINCT dependents, most first.
    *
    * "Distinct" is the difference that matters: a helper called forty times from

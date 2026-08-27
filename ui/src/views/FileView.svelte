@@ -276,7 +276,8 @@
     <section class="center" bind:this={centerEl}>
       <div class="card-h">
         <KindGlyph kind="file" />
-        <h1>{basename(payload.file.path)}</h1>
+        <!-- Generated code recedes wherever it appears (design spec §2.6). -->
+        <h1 class:gen={payload.file.generated}>{basename(payload.file.path)}</h1>
         <span class="kindword">{fileMetaLine(payload)}</span>
         <span class="loc">{payload.file.path}</span>
         <div class="spacer"></div>
@@ -379,6 +380,10 @@
     margin: 0;
     font: 600 20px/1.2 var(--mono);
     letter-spacing: -0.01em;
+  }
+
+  .card-h h1.gen {
+    color: var(--ink-4);
   }
 
   .spacer {

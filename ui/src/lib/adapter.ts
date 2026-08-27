@@ -4,7 +4,7 @@
  *
  * The viewer shipped by `codegraph ui` uses {@link createHttpAdapter}, which is
  * the read-only JSON API over loopback. A host that already holds the graph —
- * CodeGraph Pro, which opens the index in-process — implements the same eleven
+ * CodeGraph Pro, which opens the index in-process — implements the same twelve
  * methods against its own reads and never makes an HTTP request. The components
  * cannot tell the difference, which is the whole point: one implementation of
  * the Symbol view, the Flow strip and the Map, drawn from whichever side of the
@@ -29,6 +29,7 @@
  */
 
 import type {
+  WireDeadCode,
   WireEntryPoints,
   WireFilePayload,
   WireFileCodePayload,
@@ -125,6 +126,24 @@ export interface RoutesRequest {
   limit?: number;
 }
 
+/**
+ * What the dead code list should be allowed to claim.
+ *
+ * Every flag widens the list by switching one honesty rule off, so each one is
+ * a thing the screen then has to say out loud. `exported` is the big one: a
+ * symbol something outside the repository could import is not dead in any sense
+ * the index can check, and turning it on also turns off the "this language
+ * records no exports at all" guard.
+ */
+export interface DeadCodeRequest {
+  limit?: number;
+  /** Node kinds to consider. Omitted means callables and types. */
+  kinds?: readonly string[];
+  includeExported?: boolean;
+  includeTests?: boolean;
+  includeGenerated?: boolean;
+}
+
 /* ----------------------------------------------------------------- live -- */
 
 /**
@@ -149,10 +168,11 @@ export interface LiveHandlers {
  * Everything the components ask of a project.
  *
  * Seven of these are the reading surface named in the task — `search`, `node`,
- * `source`, `file`, `flow`, `map`, `routes` — and the other four are what the
- * screens around them need: `stats` (the blast bar's denominator and the top
- * bar's counts), `nodes` (a trail arrives from a URL as bare ids), `fileCode`
- * (the whole-file view) and `entryPoints` (where a reader starts).
+ * `source`, `file`, `flow`, `map`, `routes` — and the rest are what the screens
+ * around them need: `stats` (the blast bar's denominator and the top bar's
+ * counts), `nodes` (a trail arrives from a URL as bare ids), `fileCode` (the
+ * whole-file view), `entryPoints` (where a reader starts) and `deadCode` (where
+ * nobody goes).
  */
 export interface GraphAdapter {
   /** The index's own facts: counts, thresholds, the blast scale. */
@@ -176,6 +196,8 @@ export interface GraphAdapter {
   routes(request?: RoutesRequest, signal?: AbortSignal): Promise<WireRoutes>;
   /** Where a reader starts: routes, files that run something, tests, hubs. */
   entryPoints(request?: EntryPointsRequest, signal?: AbortSignal): Promise<WireEntryPoints>;
+  /** Symbols nothing reaches, grouped by file, with every exclusion counted. */
+  deadCode(request?: DeadCodeRequest, signal?: AbortSignal): Promise<WireDeadCode>;
   /**
    * Subscribe to index/disk changes. Optional — a host without a live channel
    * omits it and nothing polls. Returns a function that closes the stream.
@@ -312,6 +334,16 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
       if (request.limit) params.set('limit', String(request.limit));
       if (request.routes) params.set('routes', String(request.routes));
       return getJson<WireEntryPoints>(`api/entrypoints${query(params)}`, signal);
+    },
+
+    deadCode(request = {}, signal) {
+      const params = new URLSearchParams();
+      if (request.limit) params.set('limit', String(request.limit));
+      if (request.kinds?.length) params.set('kinds', request.kinds.join(','));
+      if (request.includeExported) params.set('exported', '1');
+      if (request.includeTests) params.set('tests', '1');
+      if (request.includeGenerated) params.set('generated', '1');
+      return getJson<WireDeadCode>(`api/deadcode${query(params)}`, signal);
     },
 
     events(handlers) {

@@ -337,6 +337,46 @@ Nothing in the engine emits an `overrides` edge, so this is a NAME match inside 
 says so. It is deliberately blind to signatures — an overload set would need type resolution the graph does not have.
 Layout is arithmetic (row height × index): no `ResizeObserver`, no measurement, same payload → same picture.
 
+### 3.11 Dead code and islands (CG-59)
+A screen (`#/dead`, `?exported=1`) and a mark on the Map.
+
+**The list.** Symbols no import, call or reference in the index reaches, ranked largest first and grouped by file with the
+Symbol view's `.filegroup` / `.row` shapes (design spec §3.2) — file path 11px mono `--ink-3` with the group's
+"N symbols · M lines" opposite it, then rows of kind glyph + 12.5px mono name + 11px mono `file:line` + an 11px `--ink-3` meta
+line ("method · 51 lines"). A dead container folds its unreachable members into a wrapped strip of 11px mono links under it
+rather than listing them as siblings — one finding, not eleven. Column max-width **760px**, 40px gutters, exactly like the
+entry-points panel.
+
+**The caveat is part of the screen, not a note on it.** A persistent 11.5px `--ink-3` line sits above the rows, between two
+hairline rules, and never collapses or dismisses: *"No static reference in the index — dynamic use is possible."* Under the list,
+every reason a candidate was left off is printed with its count ("1 677 in test files", "378 exported, or declared in a header",
+"40 overriding a member declared further up"), preceded by the scale — *"2 494 symbols in this index carry no incoming reference
+at all; 2 474 of them were left off this list."* Twenty rows drawn from twenty candidates and twenty drawn from two and a half
+thousand are different screens and only that sentence tells them apart.
+
+**One switch**, an 11px mono chip on the right of the caveat bar: `Internal only` (default) ↔ `Including exported`, carried in
+the URL. Turning it on adds symbols something outside the repository could import, and the screen grows an `--accent-soft` band
+with an `--accent-line` border saying so; each such row also carries an `exported` chip. Exported rows are never on the default
+list, because the index cannot check a caller it does not contain.
+
+**Islands, on the Map.** A module no link in the payload arrives at keeps its normal 1px `--ink` stroke — it is not a lesser
+module, it is an unreached one — and its 11px count line reads **"nothing depends on this"** in `--ink-2` *instead of* the
+symbol/file counts, which stay in the side panel. The island verdict is computed from the whole link set, so hiding test modules
+cannot manufacture one. Selecting the module adds a sentence in the panel. Note the box is sized from whichever string it will
+show, so the layout and the node must be given the same verdict.
+
+**Generated files recede everywhere** (`files.generated`, §2.6): a module whose files are *all* tool-generated draws in
+`--ink-4` with a `--rule-soft` stroke; a generated file in the Map panel's file list, a generated group on the dead code list,
+a generated result in the search palette and a generated file's title in the File view are all `--ink-4`. Partly-generated
+modules are not dimmed — a module with one `.pb.go` in it is still one somebody writes by hand.
+
+**What the list refuses to claim** is the whole design. Behind it, `src/graph/dead-code.ts` starts from "no incoming edge
+other than `contains`" and subtracts every candidate there is any reason to believe something reaches: exported symbols and
+header declarations, test and generated files, abstract and interface members, anything carrying a `decorates` edge, overrides
+of an ancestor's member, names the language calls by itself, vendored directories, files nothing in the index reaches (those are
+islands — the Map's job, not this list's), names the resolver failed to resolve somewhere, names shared with a symbol that IS
+referenced, and — the only rule that reads a file — names written more than once in a file that can reach them.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a

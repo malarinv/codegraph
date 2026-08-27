@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, mapHref, flowHref, entryHref, symbolHref } from '../lib/router.svelte';
+  import { router, mapHref, flowHref, entryHref, deadHref, symbolHref } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
   import SearchPalette from './SearchPalette.svelte';
   import { live } from '../lib/live.svelte';
@@ -69,6 +69,7 @@
     <a href={mapHref()} class:active={view === 'map'}>Map</a>
     <a href={symbolTabHref} class:active={view === 'symbol' || view === 'home'}>Symbol</a>
     <a href={flowHref()} class:active={view === 'flow'}>Flow</a>
+    <a href={deadHref()} class:active={view === 'dead'}>Dead code</a>
   </nav>
 
   <SearchPalette bind:this={search} />

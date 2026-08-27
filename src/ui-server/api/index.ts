@@ -1,7 +1,7 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Eleven endpoints, one per screen, each answering in a single round-trip — the
+ * Twelve endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
  * have to ask a follow-up question — plus one that does not answer at all and
  * stays open instead (`/api/events`), so a screen learns that its answer went
@@ -19,6 +19,7 @@
  * GET /api/routes                    the URL to handler map, when there is one
  * GET /api/entrypoints               where to start reading: routes, roots, tests, hubs
  * GET /api/map?root=&depth=          the module map: modules, links, cycles
+ * GET /api/deadcode                  symbols nothing reaches, and what was excluded
  * GET /api/flow?from=&to=            the flow strip: one card per hop
  * GET /api/events                    the live channel (SSE): drift and refresh
  * ```
@@ -45,6 +46,7 @@ import { buildRoutes } from './routes';
 import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
+import { buildDeadCode } from './deadcode';
 import { buildFlow } from './flow';
 import { EventHub } from './events';
 
@@ -90,6 +92,13 @@ export type {
   WireMapLink,
   WireMapCycle,
 } from './map';
+export type {
+  WireDeadCode,
+  WireDeadCodeExclusion,
+  WireDeadCodeGroup,
+  WireDeadCodeRow,
+} from './deadcode';
+export { MAX_DEAD_CODE_MEMBERS, MAX_DEAD_CODE_ROWS } from './deadcode';
 
 /**
  * A mounted API, plus the handle it holds open.
@@ -148,6 +157,12 @@ const API_INDEX = {
         'Live channel (server-sent events): source files that changed on disk, and the index moving.',
     },
     {
+      path: '/api/deadcode',
+      description:
+        'Symbols nothing in the index reaches, grouped by file, with every reason a candidate was excluded.',
+      params: ['limit', 'kinds', 'exported', 'tests', 'generated'],
+    },
+    {
       path: '/api/entrypoints',
       description: 'Where to start reading: routes, files that run something, and hubs.',
       params: ['limit'],
@@ -177,6 +192,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildRoutes(session.acquire(), ctx.query), ctx.method);
         case '/api/map':
           return ok(res, buildMap(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
+        case '/api/deadcode':
+          return ok(res, buildDeadCode(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/entrypoints':
           return ok(res, buildEntryPoints(session.acquire(), ctx.query), ctx.method);
         case '/api/nodes':

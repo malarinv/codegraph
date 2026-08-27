@@ -84,8 +84,10 @@
         </span>
       {:else}
         <KindGlyph kind={item.node.kind} />
-        <span class="mid">
-          <span class="nm">{item.name}</span>
+        <span class="mid" title={item.node.generated ? `${item.name} — tool-generated` : undefined}>
+          <!-- Generated code recedes here too: a `.pb.go` stub and the
+               hand-written thing beside it must not read the same. -->
+          <span class="nm" class:gen={item.node.generated}>{item.name}</span>
           {#if item.meta}<span class="sig">{item.meta}</span>{/if}
         </span>
       {/if}
@@ -143,6 +145,10 @@
   .nm {
     font-family: var(--mono);
     font-size: 12.5px;
+  }
+
+  .nm.gen {
+    color: var(--ink-4);
   }
 
   .sig {

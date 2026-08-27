@@ -150,6 +150,41 @@ export function splitLines(content: string): string[] {
 }
 
 /**
+ * The whole text of an INDEXED file, or `null` for anything unreadable.
+ *
+ * The dead code report's corroboration pass needs to count an identifier in a
+ * file's text, and this module is the only one in `api/` that opens a file — so
+ * the reader it uses lives here, behind the same chokepoint. Three refusals,
+ * all answering `null` rather than throwing, because the caller's rule is
+ * already "cannot read it → do not make the claim":
+ *
+ * - not in the index (the viewer never reads a file the graph does not know);
+ * - outside the project (`resolveProjectFile` throws; caught here);
+ * - bigger than `maxBytes`.
+ *
+ * Drift is deliberately NOT checked. The question being asked is "does anything
+ * in this file write this name", and the file's current bytes are the better
+ * answer to it than the bytes we indexed.
+ */
+export function readIndexedFileText(
+  cg: CodeGraph,
+  projectRoot: string,
+  requested: string,
+  maxBytes: number
+): string | null {
+  try {
+    const found = findIndexedFile(cg, requested);
+    if (!found) return null;
+    const absolute = resolveProjectFile(projectRoot, found.storedPath);
+    const stats = fs.statSync(absolute);
+    if (!stats.isFile() || stats.size > maxBytes) return null;
+    return fs.readFileSync(absolute, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether an indexed file has changed on disk since it was indexed — the same
  * verdict `/api/source` returns, for endpoints that must *flag* drift without
  * serving source (a symbol header, a file outline).

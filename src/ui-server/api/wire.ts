@@ -92,6 +92,14 @@ export interface WireNodeRef {
   exported?: boolean;
   /** The file this symbol lives in looks like test/fixture code. */
   test: boolean;
+  /**
+   * The file this symbol lives in is tool-generated, so the row draws in ink-4.
+   *
+   * OPTIONAL and absent by default: the verdict is a bounded lookup
+   * (`generatedFilePredicate`), affordable over a screen's worth of rows and
+   * not over a 545-caller rail. An endpoint fills it where it shows.
+   */
+  generated?: boolean;
 }
 
 /** The focal symbol of a Symbol view — the ref, plus everything the header shows. */

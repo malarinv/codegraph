@@ -34,6 +34,12 @@ export interface WireNodeRef {
   exported?: boolean;
   /** Lives in a file that looks like test or fixture code. */
   test: boolean;
+  /**
+   * Lives in a tool-generated file, so the row draws in ink-4. Optional: only
+   * the endpoints that show it pay for the lookup, so `undefined` means "not
+   * asked", never "no".
+   */
+  generated?: boolean;
 }
 
 export interface WireNodeDetail extends WireNodeRef {
@@ -594,6 +600,10 @@ export interface WireMapModule {
   languages: Array<{ language: string; files: number }>;
   /** More than half its files are tests. */
   test: boolean;
+  /** How many of its files are tool-generated. All of them → drawn in ink-4. */
+  generated: number;
+  /** Which of `fileList.items` are generated, so a row in the panel can dim too. */
+  generatedFiles: string[];
   /** A single file kept out of the root bucket because it is the façade. */
   facade: boolean;
   /** Its files, capped — the side panel's list when the module is selected. */
@@ -630,4 +640,49 @@ export interface WireMapPayload {
   excluded: { uncertainEdges: number; confidenceBelow: number };
   index: { lastIndexedAt: number | null; edges: number; files: number };
   timing: { elapsedMs: number; cached: boolean };
+}
+
+/* -------------------------------------------------------------- dead code -- */
+
+/** One symbol nothing in the index reaches. */
+export interface WireDeadCodeRow extends WireNodeRef {
+  /** Source lines it spans — the rank, and what deleting it would remove. */
+  lines: number;
+  /** Unreferenced members inside it: a dead class takes its methods with it. */
+  members: WireList<WireNodeRef>;
+}
+
+/** The rows of one file, in source order. */
+export interface WireDeadCodeGroup {
+  file: string;
+  /** Tool-generated — drawn dimmed wherever it appears. */
+  generated: boolean;
+  test: boolean;
+  lines: number;
+  rows: WireDeadCodeRow[];
+}
+
+/** One reason candidates were dropped, already worded for the screen. */
+export interface WireDeadCodeExclusion {
+  reason: string;
+  count: number;
+  label: string;
+}
+
+export interface WireDeadCode {
+  rows: WireList<WireDeadCodeRow>;
+  /** The SHOWN rows, grouped by file — group order follows the best row. */
+  groups: WireDeadCodeGroup[];
+  /** Symbols with no incoming reference at all, before any exclusion ran. */
+  candidates: number;
+  excluded: WireDeadCodeExclusion[];
+  excludedTotal: number;
+  kinds: string[];
+  includeExported: boolean;
+  includeTests: boolean;
+  includeGenerated: boolean;
+  bounded: boolean;
+  /** Every row was checked against the text of the files that can reach it. */
+  corroborated: boolean;
+  timing: { elapsedMs: number };
 }

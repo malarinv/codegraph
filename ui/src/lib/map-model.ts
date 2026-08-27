@@ -95,8 +95,17 @@ export function nodeWidth(label: string, meta = ''): number {
   );
 }
 
-/** The second line of a module box — and the string {@link nodeWidth} sizes for. */
-export function moduleMetaLabel(module: WireMapModule): string {
+/**
+ * The second line of a module box — and the string {@link nodeWidth} sizes for.
+ *
+ * An island says so INSTEAD of counting itself. "Nothing depends on this" is
+ * the only fact about such a module a reader needs from twenty boxes away, and
+ * the counts are still one click away in the side panel. Both callers — the
+ * width calculation and the box itself — must pass the same `island`, or the
+ * text will not fit the box that was sized for it.
+ */
+export function moduleMetaLabel(module: WireMapModule, island = false): string {
+  if (island) return 'nothing depends on this';
   const symbols = `${module.symbols} symbol${module.symbols === 1 ? '' : 's'}`;
   const files = `${module.files} file${module.files === 1 ? '' : 's'}`;
   return `${symbols} · ${files}`;
@@ -105,6 +114,16 @@ export function moduleMetaLabel(module: WireMapModule): string {
 export interface MapNodeLayout {
   id: string;
   module: WireMapModule;
+  /**
+   * No link in the payload arrives here — an island (task CG-59).
+   *
+   * Computed from the WHOLE link set, not the filtered one, so hiding test
+   * modules or raising the weight threshold cannot manufacture an island that
+   * the index does not agree is one.
+   */
+  island: boolean;
+  /** Every file in it is tool-generated, so it draws in ink-4. */
+  generated: boolean;
   layer: number;
   x: number;
   y: number;
@@ -189,6 +208,9 @@ export function buildMapLayout(
 ): MapLayout {
   const modules = payload.modules.filter((m) => options.includeTests || !m.test);
   const present = new Set(modules.map((m) => m.id));
+  // Islands come off the UNFILTERED link set: a module a hidden test module
+  // depends on is depended on, whatever this screen is currently showing.
+  const depended = new Set(payload.links.map((l) => l.target));
   const links = payload.links.filter((l) => present.has(l.source) && present.has(l.target));
   const minWeight = options.includeTests ? MIN_WEIGHT_WITH_TESTS : MIN_WEIGHT;
 
@@ -258,7 +280,10 @@ export function buildMapLayout(
   }
 
   // --- placement -----------------------------------------------------------
-  const widths = new Map(modules.map((m) => [m.id, nodeWidth(m.id, moduleMetaLabel(m))]));
+  const islands = new Set(modules.filter((m) => !depended.has(m.id)).map((m) => m.id));
+  const widths = new Map(
+    modules.map((m) => [m.id, nodeWidth(m.id, moduleMetaLabel(m, islands.has(m.id)))])
+  );
   const rowSums = rows.map((row) => row.reduce((sum, id) => sum + (widths.get(id) ?? 0), 0));
   // Natural span = the boxes shoulder to shoulder. The content width is the
   // widest of those, and NOTHING may exceed it — a row of forty leaf modules
@@ -286,9 +311,14 @@ export function buildMapLayout(
     const y = PADDING + (layerCount - 1 - index) * (NODE_HEIGHT + LAYER_GAP);
     for (const id of row) {
       const w = widths.get(id) ?? MIN_NODE_WIDTH;
+      const module = byId.get(id)!;
       nodesById.set(id, {
         id,
-        module: byId.get(id)!,
+        module,
+        island: islands.has(id),
+        // Every file generated, not merely some: a module with one `.pb.go` in
+        // it is still a module somebody writes by hand.
+        generated: module.files > 0 && module.generated === module.files,
         layer: index,
         x,
         y,

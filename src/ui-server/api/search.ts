@@ -150,10 +150,14 @@ export function buildSearch(cg: CodeGraph, query: URLSearchParams): unknown {
   });
 
   const top = scored.slice(0, limit);
-  const results: WireSearchResult[] = top.map(({ node, match }) => ({
-    ...toNodeRef(node),
-    matchKind: match,
-  }));
+  // One bounded lookup for the whole page of results, so a generated stub
+  // reads as one at a glance instead of after a click.
+  const isGenerated = cg.generatedFilePredicate(top.map(({ node }) => node.filePath));
+  const results: WireSearchResult[] = top.map(({ node, match }) => {
+    const result: WireSearchResult = { ...toNodeRef(node), matchKind: match };
+    if (isGenerated(node.filePath)) result.generated = true;
+    return result;
+  });
 
   // Groups keep the ranked order: a group appears where its best result did, so
   // flattening the groups reproduces the flat ranking for keyboard navigation.

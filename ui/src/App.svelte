@@ -9,9 +9,18 @@
   import MapView from './views/MapView.svelte';
   import FlowView from './views/FlowView.svelte';
   import EntryView from './views/EntryView.svelte';
+  import DeadCodeView from './views/DeadCodeView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
   import Toast from './components/Toast.svelte';
-  import { router, navigate, back, mapHref, flowHref, entryHref } from './lib/router.svelte';
+  import {
+    router,
+    navigate,
+    back,
+    mapHref,
+    flowHref,
+    entryHref,
+    deadHref,
+  } from './lib/router.svelte';
   import { palette } from './lib/palette.svelte';
   import { trail, resolveTrailNames } from './lib/trail.svelte';
   import { project } from './lib/project.svelte';
@@ -113,6 +122,10 @@
         event.preventDefault();
         navigate(entryHref());
         break;
+      case 'd':
+        event.preventDefault();
+        navigate(deadHref());
+        break;
       case 'Backspace':
       case '[':
         event.preventDefault();
@@ -144,6 +157,8 @@
     />
   {:else if route.view === 'entry'}
     <EntryView project={project.name} />
+  {:else if route.view === 'dead'}
+    <DeadCodeView exported={route.exported} />
   {:else if route.view === 'unknown'}
     <NotFoundView path={route.path} />
   {:else}

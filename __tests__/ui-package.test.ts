@@ -391,6 +391,21 @@ function mockAdapter(): { adapter: GraphAdapter; calls: string[] } {
         index: { lastIndexedAt: null, files: 3 },
         timing: { elapsedMs: 1, cached: false },
       }),
+    deadCode: () =>
+      seen('deadCode', {
+        rows: { total: 0, shown: 0, truncated: false, items: [] },
+        groups: [],
+        candidates: 0,
+        excluded: [],
+        excludedTotal: 0,
+        kinds: ['function'],
+        includeExported: false,
+        includeTests: false,
+        includeGenerated: false,
+        bounded: false,
+        corroborated: true,
+        timing: { elapsedMs: 1 },
+      }),
     // Deliberately no `events`: a host without a live channel is the normal
     // case, and nothing may poll in its absence.
   };

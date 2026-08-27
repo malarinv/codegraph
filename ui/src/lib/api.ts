@@ -13,6 +13,7 @@
 
 import { getGraphAdapter } from './adapter';
 import type {
+  WireDeadCode,
   WireEntryPoints,
   WireFilePayload,
   WireFileCodePayload,
@@ -30,6 +31,7 @@ export * from './wire';
 export { ApiFailure } from './adapter';
 export type {
   GraphAdapter,
+  DeadCodeRequest,
   EntryPointsRequest,
   FlowRequest,
   HttpAdapterOptions,
@@ -66,6 +68,23 @@ export function fetchEntryPoints(
   signal?: AbortSignal
 ): Promise<WireEntryPoints> {
   return getGraphAdapter().entryPoints(opts, signal);
+}
+
+/**
+ * Symbols nothing in the index reaches, grouped by file — and, just as
+ * importantly, every reason a candidate was left off. The screen prints both.
+ */
+export function fetchDeadCode(
+  opts: {
+    limit?: number;
+    kinds?: readonly string[];
+    includeExported?: boolean;
+    includeTests?: boolean;
+    includeGenerated?: boolean;
+  } = {},
+  signal?: AbortSignal
+): Promise<WireDeadCode> {
+  return getGraphAdapter().deadCode(opts, signal);
 }
 
 /** The URL → handler map. The palette reads routes through `fetchEntryPoints`. */

@@ -113,6 +113,14 @@ export interface WireMapModule {
   languages: Array<{ language: Language; files: number }>;
   /** More than half its files are tests — drawn dashed, hidden by default. */
   test: boolean;
+  /**
+   * How many of its files are tool-generated. A module whose files are ALL
+   * generated is drawn in ink-4 (design spec §2.6): code nobody wrote by hand
+   * and nobody deletes by hand.
+   */
+  generated: number;
+  /** Which of {@link fileList}'s entries are generated, so a row can dim too. */
+  generatedFiles: string[];
   /** True when this box is a single file kept out of the root bucket (a façade). */
   facade: boolean;
   /** Its files, capped — what the side panel lists when the module is selected. */
@@ -311,6 +319,7 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
       language: file.language,
       symbols: file.nodeCount ?? 0,
       test: isTestFile(path),
+      generated: file.generated === true,
     };
   });
 
@@ -340,6 +349,8 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
       files: number;
       symbols: number;
       testFiles: number;
+      generatedFiles: number;
+      generatedPaths: Set<string>;
       languages: Map<Language, number>;
       paths: string[];
     }
@@ -359,6 +370,8 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
         files: 0,
         symbols: 0,
         testFiles: 0,
+        generatedFiles: 0,
+        generatedPaths: new Set(),
         languages: new Map(),
         paths: [],
       };
@@ -368,6 +381,10 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
     entry.paths.push(file.path);
     entry.symbols += file.symbols;
     if (file.test) entry.testFiles += 1;
+    if (file.generated) {
+      entry.generatedFiles += 1;
+      entry.generatedPaths.add(file.path);
+    }
     entry.languages.set(file.language, (entry.languages.get(file.language) ?? 0) + 1);
   }
 
@@ -416,18 +433,25 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
     depth,
     roots: rootOptions(fileRecords),
     modules: [...modules.values()]
-      .map((entry) => ({
-        id: entry.id,
-        label: entry.id.slice(entry.id.lastIndexOf('/') + 1) || entry.id,
-        files: entry.files,
-        symbols: entry.symbols,
-        languages: [...entry.languages]
-          .map(([language, files]) => ({ language, files }))
-          .sort((a, b) => b.files - a.files || a.language.localeCompare(b.language)),
-        test: entry.testFiles * 2 > entry.files,
-        facade: entry.facade,
-        fileList: wireList(entry.paths.slice().sort().slice(0, MAX_FILES_PER_MODULE), entry.files),
-      }))
+      .map((entry) => {
+        const shown = entry.paths.slice().sort().slice(0, MAX_FILES_PER_MODULE);
+        return {
+          id: entry.id,
+          label: entry.id.slice(entry.id.lastIndexOf('/') + 1) || entry.id,
+          files: entry.files,
+          symbols: entry.symbols,
+          languages: [...entry.languages]
+            .map(([language, files]) => ({ language, files }))
+            .sort((a, b) => b.files - a.files || a.language.localeCompare(b.language)),
+          test: entry.testFiles * 2 > entry.files,
+          generated: entry.generatedFiles,
+          facade: entry.facade,
+          // Only the SHOWN paths, so the list the panel dims and the list it
+          // draws are the same list — the count-equals-list rule.
+          generatedFiles: shown.filter((path) => entry.generatedPaths.has(path)),
+          fileList: wireList(shown, entry.files),
+        };
+      })
       // Sorted so two runs over one index produce byte-identical payloads —
       // the layout is deterministic, and it cannot be if its input is not.
       .sort((a, b) => a.id.localeCompare(b.id)),

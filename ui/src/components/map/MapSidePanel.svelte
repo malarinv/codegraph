@@ -45,9 +45,12 @@
     exportName,
   }: Props = $props();
 
-  const selectedModule = $derived(
-    selected === null ? null : (layout.nodes.find((n) => n.id === selected)?.module ?? null)
+  const selectedNode = $derived(
+    selected === null ? null : (layout.nodes.find((n) => n.id === selected) ?? null)
   );
+  const selectedModule = $derived(selectedNode?.module ?? null);
+  /** Which of the listed files are tool-generated — the rows drawn in ink-4. */
+  const generatedFiles = $derived(new Set(selectedModule?.generatedFiles ?? []));
 
   const dependencies = $derived(
     selected === null
@@ -205,7 +208,19 @@
         {#if selectedModule.languages.length > 0}
           · {selectedModule.languages.map((l) => `${l.language} ${l.files}`).join(', ')}
         {/if}
+        {#if selectedModule.generated > 0}
+          · {selectedModule.generated === selectedModule.files
+            ? 'all tool-generated'
+            : `${selectedModule.generated} tool-generated`}
+        {/if}
       </p>
+
+      {#if selectedNode?.island}
+        <p class="island">
+          Nothing in the index depends on this module — no import, call or reference crosses into
+          it. It may be an entry point, or reached in a way the graph cannot see.
+        </p>
+      {/if}
 
       {@render linkList('depends on', dependencies, 'target')}
       {@render linkList('depended on by', dependents, 'source')}
@@ -213,7 +228,12 @@
       <div class="pair label">files</div>
       {#if files.length > 0}
         {#each files as file (file)}
-          <a class="filerow" href={fileHref(file)}>{file}</a>
+          <a
+            class="filerow"
+            class:gen={generatedFiles.has(file)}
+            href={fileHref(file)}
+            title={generatedFiles.has(file) ? `${file} — tool-generated` : file}>{file}</a
+          >
         {/each}
       {:else}
         <div class="pair dim">no files in the index for this module</div>
@@ -380,5 +400,17 @@
   .filerow:hover {
     color: var(--accent);
     text-decoration: underline;
+  }
+
+  /* Generated code recedes wherever it appears (design spec §2.6). */
+  .filerow.gen {
+    color: var(--ink-4);
+  }
+
+  .island {
+    margin: 6px 0 0;
+    color: var(--ink-2);
+    font-size: 11.5px;
+    line-height: 1.45;
   }
 </style>

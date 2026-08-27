@@ -63,7 +63,7 @@ build so that mistake cannot land twice.
 ```
 
 Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `FileView`,
-`FileSourceView`, `EntryPointsView`, `TypeHierarchy`, `TrailBar`,
+`FileSourceView`, `EntryPointsView`, `DeadCodeView`, `TypeHierarchy`, `TrailBar`,
 `SearchPalette`, `PalettePanel`, `PaletteRows`, `DriftBanner`, `KindGlyph`,
 `ExportButtons`, `CodegraphUi` — plus every pure model function the screens are
 built from (`buildCalleeRail`, `buildFlowLayout`, `buildMapLayout`,
@@ -90,6 +90,7 @@ interface GraphAdapter {
   map(request?, signal?): Promise<WireMapPayload>;
   routes(request?, signal?): Promise<WireRoutes>;
   entryPoints(request?, signal?): Promise<WireEntryPoints>;
+  deadCode(request?, signal?): Promise<WireDeadCode>;
   events?(handlers): () => void;   // optional: the live channel
 }
 ```
@@ -98,7 +99,7 @@ The shapes are exactly what `src/ui-server/api/` serialises, and they live in
 `src/lib/wire.ts` — no imports, no runtime — so a host can depend on the
 vocabulary without depending on the viewer. The default implementation,
 `createHttpAdapter()`, is the loopback JSON API; a host that already holds the
-index implements the same eleven methods against its own reads and never makes
+index implements the same twelve methods against its own reads and never makes
 an HTTP request. `scripts/check-ui-package.mjs` asserts that no module in the
 built package but `lib/adapter.js` touches the network, because a screen that
 reached past the adapter would be a screen that ignored the host.

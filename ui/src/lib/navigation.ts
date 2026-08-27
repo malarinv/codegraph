@@ -43,6 +43,11 @@ export interface MapHrefOptions {
   tests?: boolean;
 }
 
+export interface DeadCodeHrefOptions {
+  /** Include symbols something outside the index could import. */
+  exported?: boolean;
+}
+
 export interface FlowHrefOptions {
   from?: string;
   to?: string;
@@ -63,6 +68,7 @@ export interface NavigationDriver {
   mapHref(opts?: MapHrefOptions): string;
   flowHref(opts?: FlowHrefOptions): string;
   entryHref(): string;
+  deadHref(opts?: DeadCodeHrefOptions): string;
   /** Go to an href this driver built. */
   navigate(href: string, opts?: { replace?: boolean }): void;
   /** Back one entry in the host's history. */
@@ -125,6 +131,12 @@ export const hashNavigation: NavigationDriver = {
 
   entryHref() {
     return '#/entry';
+  },
+
+  deadHref(opts = {}) {
+    const params = new URLSearchParams();
+    if (opts.exported) params.set('exported', '1');
+    return `#/dead${query(params)}`;
   },
 
   navigate(href, opts = {}) {
@@ -198,6 +210,10 @@ export function flowHref(opts: FlowHrefOptions = {}): string {
 
 export function entryHref(): string {
   return driver.entryHref();
+}
+
+export function deadHref(opts: DeadCodeHrefOptions = {}): string {
+  return driver.deadHref(opts);
 }
 
 export function navigate(href: string, opts: { replace?: boolean } = {}): void {

@@ -11,6 +11,7 @@
  *   #/map                  module map       (?root=&depth=&tests=1)
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *   #/entry                entry points     (where a flow starts)
+ *   #/dead                 dead code        (?exported=1 widens the claim)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
  * `<kind>:<relative/path>` (see src/extraction/tree-sitter-helpers.ts), so
@@ -31,6 +32,7 @@ import { registerHashSync } from './navigation';
 
 export {
   back,
+  deadHref,
   entryHref,
   fileHref,
   flowHref,
@@ -42,6 +44,7 @@ export {
   symbolHref,
 } from './navigation';
 export type {
+  DeadCodeHrefOptions,
   FileHrefOptions,
   FlowHrefOptions,
   MapHrefOptions,
@@ -71,6 +74,11 @@ export type Route =
       trail: string | null;
     }
   | { view: 'entry' }
+  | {
+      view: 'dead';
+      /** Symbols reachable from outside the index are on the list. */
+      exported: boolean;
+    }
   | { view: 'unknown'; path: string };
 
 export type ViewName = Route['view'];
@@ -128,6 +136,10 @@ export function parseHash(hash: string): RouterLocation {
     };
   } else if (head === 'entry' && rest.length === 0) {
     route = { view: 'entry' };
+  } else if (head === 'dead' && rest.length === 0) {
+    // The widening travels in the URL like the map's shape does: a link to
+    // "including exported symbols" has to reopen the same list.
+    route = { view: 'dead', exported: params.get('exported') === '1' };
   } else if (head === 'flow' && rest.length === 0) {
     // The question travels in the URL exactly as it was asked, so a flow can be
     // linked in a review and reopen as the same path.
