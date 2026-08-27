@@ -43,7 +43,8 @@ src/
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
   lib/kinds.ts            kind glyph letters
   lib/map-model.ts        the Map's deterministic layered layout (pure)
-  components/             TopBar, TrailBar, KindGlyph, map/, symbol/, file/
+  lib/flow-model.ts       the Flow strip's card/link geometry — a DAG (pure)
+  components/             TopBar, TrailBar, KindGlyph, map/, flow/, symbol/, file/
   views/                  one component per route
 ```
 
@@ -59,9 +60,11 @@ announce the project to a font CDN.
 | `#/s/<id>?hl=<line>&t=<trail>` | symbol view |
 | `#/file/<path>?hl=<line>` | file view |
 | `#/map?root=&depth=&tests=1` | module map |
-| `#/flow[/<key>]` | flow strip — reserved, phase 2 |
+| `#/flow?from=&to=` | flow strip — the call path between two symbols |
+| `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
+| `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |
 
 Node ids and file paths are encoded per slash-separated segment, so
 `#/file/src/mcp/tools.ts` stays readable and still round-trips a segment
 containing a reserved character. Build hashes with `symbolHref()` /
-`fileHref()` rather than by hand.
+`fileHref()` / `mapHref()` / `flowHref()` rather than by hand.

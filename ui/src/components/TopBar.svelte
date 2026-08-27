@@ -40,6 +40,14 @@
    * put a `→` in the trail that describes no call.
    */
   export function pick(item: PaletteItem): void {
+    // A flow is not a place in the graph, so it does not join the trail: it is
+    // a question about two symbols, and the Flow view answers it.
+    if (item.type === 'flow') {
+      palette.reset();
+      input?.blur();
+      navigate(flowHref({ from: item.from, to: item.to }));
+      return;
+    }
     const id = item.type === 'route' ? item.nodeId : item.id;
     // A route whose handler never resolved to a node has nowhere to go; the
     // row stays, because "this URL exists and we could not place it" is true.

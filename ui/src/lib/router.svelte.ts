@@ -9,7 +9,7 @@
  *   #/s/<id>               symbol view      (?hl=<line> highlights a line, ?t=<trail>)
  *   #/file/<path>          file view        (?hl=<line>)
  *   #/map                  module map       (?root=&depth=&tests=1)
- *   #/flow[/<key>]         flow strip       — reserved, phase 2
+ *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
  * `<kind>:<relative/path>` (see src/extraction/tree-sitter-helpers.ts), so
@@ -24,7 +24,16 @@ export type Route =
   | { view: 'symbol'; id: string; line: number | null }
   | { view: 'file'; path: string; line: number | null }
   | { view: 'map'; root: string | null; depth: number; tests: boolean }
-  | { view: 'flow'; key: string | null }
+  | {
+      view: 'flow';
+      /** "how does X reach Y" — both ends pinned. */
+      from: string | null;
+      to: string | null;
+      /** An explore-shaped bag of names, comma or space separated. */
+      symbols: string | null;
+      /** An encoded trail, read as a flow. Same format the `t` param uses. */
+      trail: string | null;
+    }
   | { view: 'unknown'; path: string };
 
 export type ViewName = Route['view'];
@@ -84,8 +93,16 @@ export function parseHash(hash: string): RouterLocation {
       depth: Number.isFinite(depth) && depth >= 1 && depth <= 4 ? depth : 1,
       tests: params.get('tests') === '1',
     };
-  } else if (head === 'flow') {
-    route = { view: 'flow', key: rest.length > 0 ? rest.join('/') : null };
+  } else if (head === 'flow' && rest.length === 0) {
+    // The question travels in the URL exactly as it was asked, so a flow can be
+    // linked in a review and reopen as the same path.
+    route = {
+      view: 'flow',
+      from: params.get('from'),
+      to: params.get('to'),
+      symbols: params.get('symbols'),
+      trail: params.get('t'),
+    };
   } else {
     route = { view: 'unknown', path: pathPart };
   }
@@ -119,8 +136,18 @@ export function mapHref(
   return `#/map${query ? `?${query}` : ''}`;
 }
 
-export function flowHref(key?: string): string {
-  return key ? `#/flow/${encodePath(key)}` : '#/flow';
+export function flowHref(
+  opts: { from?: string; to?: string; symbols?: string; trail?: string } = {}
+): string {
+  const params = new URLSearchParams();
+  if (opts.from) params.set('from', opts.from);
+  if (opts.to) params.set('to', opts.to);
+  if (opts.symbols) params.set('symbols', opts.symbols);
+  // `t`, not `trail`: the trail already travels under that name everywhere
+  // else, and a flow read from one is the same walk under a different lens.
+  if (opts.trail) params.set('t', opts.trail);
+  const query = params.toString();
+  return `#/flow${query ? `?${query}` : ''}`;
 }
 
 /* ---------- the live route ---------- */

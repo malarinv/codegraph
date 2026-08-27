@@ -100,7 +100,12 @@
   {:else if route.view === 'map'}
     <MapView root={route.root} depth={route.depth} tests={route.tests} />
   {:else if route.view === 'flow'}
-    <FlowView flowKey={route.key} />
+    <FlowView
+      from={route.from}
+      to={route.to}
+      symbols={route.symbols}
+      trailParam={route.trail}
+    />
   {:else if route.view === 'unknown'}
     <NotFoundView path={route.path} />
   {:else}

@@ -42,6 +42,19 @@ The viewer never presents a guess as a fact:
 
 Clicking any file path opens the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
 
+## The flow
+
+Type **"how does execute reach getFile"** into the search box — or `execute -> getFile` — and the first result opens the **Flow** strip: the call path between the two symbols, left to right, one card per hop.
+
+Each card is opened at the line that makes the next call, not at the top of the function, so reading the strip is reading the six or eight lines that actually carry the request. The identifier being called is a link; click a card's header to open it in the symbol screen with the trail already set to the path you have read so far.
+
+- **The link between two cards carries the edge** — what kind it is and the line it was recorded at.
+- **A dashed link is a hop nobody can see in the source**: a callback, an interface dispatch, a React re-render, a JSX child. It names the mechanism and, where the resolver knows it, the exact line the handler was wired at. This is the part grep cannot do.
+- **When a name means several definitions**, the strip says so under the picture and names the one this path runs through — and offers the other paths in the picker at the top. Choosing "All paths" draws them as one diagram, branching where they differ and rejoining where they agree.
+- **"Not connected" is an answer**, not a failure: a flow that runs through a dispatch no static edge records genuinely has no path, and the screen says that rather than inventing one.
+
+The **"Read as flow"** button on the trail turns a walk you did by hand into the same strip. It is the same path finder `codegraph_explore` leads its answers with, so the picture and what your agent tells you cannot disagree.
+
 ## The map
 
 The **Map** tab (`m`) draws the project at module granularity — one box per directory — with dependencies pointing down. Nothing is placed by hand: a module sits one layer above whatever it depends on, so the top of the picture is what runs first and the bottom is what everything else stands on, and the same project always draws the same picture.

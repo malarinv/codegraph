@@ -41,6 +41,12 @@ import {
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { scanDynamicDispatch } from './dynamic-boundaries';
+import {
+  lastQualifierPart,
+  matchesSymbol,
+  findAllSymbols,
+  resolveNamedSymbolFlow,
+} from '../graph/named-symbol-flow';
 import { getUpdateNotice } from '../upgrade/update-check';
 import { ExploreDiagnostics } from './explore-diagnostics';
 import {
@@ -108,14 +114,6 @@ const MAX_INPUT_LENGTH = 10_000;
  */
 const MAX_PATH_LENGTH = 4_096;
 
-/**
- * Rust path roots that have no file-system equivalent — `crate` is the
- * current crate, `super` is the parent module, `self` is the current
- * module. Used by `matchesSymbol` to strip these before file-path
- * matching so `crate::configurator::stage_apply::run` resolves the
- * same as `configurator::stage_apply::run`.
- */
-const RUST_PATH_PREFIXES = new Set(['crate', 'super', 'self']);
 
 /**
  * Node kinds that contain other symbols. For these, `codegraph_node` with
@@ -127,16 +125,6 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
   'class', 'struct', 'union', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
 ]);
 
-/**
- * Last `::` / `.` / `/`-separated segment of a qualified symbol. An Erlang
- * arity tail (`mod::fn/3`, `fn/3`) is stripped first — the useful last segment
- * is the function name, never the digits (#1610).
- */
-function lastQualifierPart(symbol: string): string {
-  const noArity = symbol.replace(/\/\d{1,3}$/, '') || symbol;
-  const parts = noArity.split(/::|[./]/).filter((p) => p.length > 0);
-  return parts[parts.length - 1] ?? symbol;
-}
 
 /**
  * Normalize Erlang-native symbol spellings in an explore query into the shapes
@@ -2557,98 +2545,13 @@ export class ToolHandler {
     // processRunExecutionData) to the call site instead of dumping the whole body.
     const EMPTY = { text: '', pathNodeIds: new Set<string>(), namedNodeIds: new Set<string>(), uniqueNamedNodeIds: new Set<string>(), spineCallSites: new Map<string, number>() };
     try {
-      const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
-      // Strip only a REAL file extension (Create.cs → Create); KEEP qualified
-      // names (Class.method / Class::method) — the agent's most precise input,
-      // resolved exactly by findAllSymbols. (The old strip mangled Class.method
-      // into Class, throwing the method away.)
-      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro|erl|hrl)$/i;
-      const tokens = [...new Set(
-        query.split(/[\s,()[\]]+/)
-          .map((t) => t.replace(FILE_EXT, '').trim())
-          .filter((t) => t.length >= 3 && /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/.test(t))
-      )].slice(0, 16);
-      if (tokens.length < 2) return EMPTY;
-      // Pool of name SEGMENTS (Class + method from every token) used to
-      // disambiguate an ambiguous SIMPLE name: keep a candidate only if its
-      // CONTAINER class is itself named in the query.
-      const segPool = new Set<string>();
-      for (const t of tokens) for (const s of t.toLowerCase().split(/::|\./)) if (s) segPool.add(s);
-      const named = new Map<string, Node>();
-      // Nodes whose token is SPECIFIC — a (near-)unique callable name (<=3 defs in
-      // the whole graph). These are safe to SPARE a file on: the agent named THIS
-      // method (`getResponseWithInterceptorChain`, 1 def). A hyper-polymorphic name
-      // (`as_sql`, 110 defs across every Expression/Compiler subclass) is NOT here,
-      // so naming it doesn't keep every backend variant full and flood the budget.
-      const uniqueNamedNodeIds = new Set<string>();
-      // token → resolved node ids: drives the token-coverage check that gates
-      // the dynamic-boundary scan (a token is covered when ANY of its nodes
-      // lands on the main chain — overloads off the chain don't count against).
-      const tokenNodes = new Map<string, string[]>();
-      // token → its full same-name callable family (before the container filter).
-      // A LARGE family that fails to connect on the chain is a polymorphic
-      // interface/registry dispatch — surfaced by buildPolymorphicBoundaries below.
-      const tokenFamily = new Map<string, Node[]>();
-      // Non-callable endpoints (CONSTANT/VARIABLE/FIELD) connected by a SYNTHESIZED
-      // edge. RTK thunks are `const X = createAsyncThunk(...)`, so a thunk→thunk hop
-      // is constant→constant — the CALLABLE-only `named` set can't hold it, and
-      // without this the hop is invisible to the Flow path at every tier (the
-      // Relationships section catches it only on repos ≥500 files). Kept SEPARATE
-      // from `named` (which drives the call-chain + source sizing, callable-only);
-      // fed only to the dynamic-dispatch-links scan below.
-      const dynNamed = new Map<string, Node>();
-      const DYN_KINDS = new Set(['constant', 'variable', 'field', 'property']);
-      // Nodes resolved from a SHAPE-PRECISE token (camelCase / PascalCase /
-      // snake_case / qualified) — the same test the gather path uses. It is the
-      // difference between "the agent named this symbol" and "an ordinary English
-      // word in a prose question collided with a callable", and it is what makes
-      // the narrative-less return below safe (see `identityOnly`).
-      const isPreciseToken = (x: string) =>
-        /[._$]|::|\//.test(x) || /[a-z][A-Z]/.test(x) || /^[A-Z]/.test(x);
-      const preciseNamedIds = new Set<string>();
-      const hasHeuristicEdge = (id: string): boolean =>
-        [...cg.getCallers(id), ...cg.getCallees(id)].some(({ edge }) => edge.provenance === 'heuristic');
-      for (const t of tokens) {
-        const hits = this.findAllSymbols(cg, t).nodes;
-        const cands = hits.filter((n) => CALLABLE.has(n.kind));
-        tokenFamily.set(t, cands);
-        // A qualified or otherwise-specific name (<=3 hits) keeps all; an
-        // ambiguous simple name keeps only candidates whose container is named.
-        const specific = cands.length <= 3;
-        const pick = specific
-          ? cands
-          : cands.filter((n) => {
-              const segs = (n.qualifiedName || '').toLowerCase().split(/::|\./).filter(Boolean);
-              const container = segs.length >= 2 ? segs[segs.length - 2] : '';
-              return !!container && segPool.has(container);
-            });
-        const kept = pick.slice(0, 6);
-        tokenNodes.set(t, kept.map((n) => n.id));
-        const precise = isPreciseToken(t);
-        for (const n of kept) {
-          named.set(n.id, n);
-          if (specific) uniqueNamedNodeIds.add(n.id);
-          if (precise) preciseNamedIds.add(n.id);
-        }
-        // Same token, non-callable synth endpoints (capped, precision-gated on an
-        // actual heuristic edge so plain config constants never qualify).
-        // Per-token sub-cap so one token's many endpoints (10 nix option writes
-        // of `programs.git.enable` across test configs) can't fill the pool
-        // before later tokens (`home.file`) get a slot.
-        if (dynNamed.size < 12) {
-          let tokenDyn = 0;
-          for (const n of hits) {
-            if (CALLABLE.has(n.kind) || !DYN_KINDS.has(n.kind) || dynNamed.has(n.id)) continue;
-            if (hasHeuristicEdge(n.id)) {
-              dynNamed.set(n.id, n);
-              if (precise) preciseNamedIds.add(n.id);
-              tokenDyn++;
-            }
-            if (dynNamed.size >= 12 || tokenDyn >= 4) break;
-          }
-        }
-        if (named.size > 40) break;
-      }
+      // Token resolution — parsing, overload disambiguation, the CONSTANT/
+      // VARIABLE synth endpoints — is shared with `/api/flow`, so a name written
+      // in the viewer's search box resolves to the same nodes it does here.
+      const flow = resolveNamedSymbolFlow(cg, query);
+      const { named, dynNamed, tokenNodes, tokenFamily, uniqueNamedNodeIds, preciseNamedIds } =
+        flow;
+      if (flow.tokens.length < 2) return EMPTY;
       // Surface synthesized (heuristic) edges incident to a named symbol — INCLUDING
       // the non-callable CONSTANT endpoints in `dynNamed`. `skipInChain` drops a hop
       // already shown in the rendered main chain (a 2-node chain renders nothing, so a
@@ -2720,47 +2623,16 @@ export class ToolHandler {
         out.push('> Full source for these symbols is below.\n');
         return { text: out.join('\n'), pathNodeIds: new Set(), namedNodeIds: new Set<string>([...named.keys(), ...dynNamed.keys()]), uniqueNamedNodeIds, spineCallSites: new Map<string, number>() };
       }
-      const MAX_HOPS = 7;
-      let best: Array<{ node: Node; edge: Edge | null }> | null = null;
-      // BFS the full call graph (incl. synth edges) from each named seed, but
-      // only ACCEPT a sink that is also named — both ends anchored to symbols the
-      // agent named, so the chain stays on-topic while bridging intermediates
-      // (e.g. the exact interface overload) that the token resolution missed.
-      for (const seed of [...named.values()].slice(0, 8)) {
-        const parent = new Map<string, { prev: string | null; edge: Edge | null; node: Node }>();
-        parent.set(seed.id, { prev: null, edge: null, node: seed });
-        const q: Array<{ id: string; depth: number; streak: number }> = [{ id: seed.id, depth: 0, streak: 0 }];
-        let deep: string | null = null, deepDepth = 0;
-        const MAX_BRIDGE = 1; // ≤1 consecutive UNNAMED hop: bridge one missing intermediate, never wander a god-function's fan-out
-        for (let h = 0; h < q.length && parent.size < 1500; h++) {
-          const { id, depth, streak } = q[h]!;
-          if (id !== seed.id && named.has(id) && depth > deepDepth) { deep = id; deepDepth = depth; }
-          if (depth >= MAX_HOPS - 1) continue;
-          for (const c of cg.getCallees(id)) {
-            if (c.edge.kind !== 'calls' || parent.has(c.node.id)) continue;
-            const newStreak = named.has(c.node.id) ? 0 : streak + 1;
-            if (newStreak > MAX_BRIDGE) continue;
-            parent.set(c.node.id, { prev: id, edge: c.edge, node: c.node });
-            q.push({ id: c.node.id, depth: depth + 1, streak: newStreak });
-          }
-        }
-        if (!deep) continue;
-        const chain: Array<{ node: Node; edge: Edge | null }> = [];
-        let cur: string | null = deep;
-        while (cur) { const p = parent.get(cur); if (!p) break; chain.push({ node: p.node, edge: p.edge }); cur = p.prev; }
-        chain.reverse();
-        if (!best || chain.length > best.length) best = chain;
-      }
+      // The search itself lives in `../graph/named-symbol-flow`, so the viewer's
+      // Flow strip rides exactly this path finder rather than a second one that
+      // could disagree with it. What stays here is the PROSE — the narrative,
+      // the dynamic-dispatch links, the boundary announcements.
+      const best = flow.chains[0]?.steps ?? null;
       const hasMain = !!best && best.length >= 3;
       const pathIds = new Set((best ?? []).map((s) => s.node.id));
-      // Where each spine node calls the NEXT hop (best[i+1].edge is the edge from
-      // best[i] → best[i+1]; its line is the call site inside best[i]'s body). Lets
-      // the assembler window an oversize spine method to the call instead of dumping it.
-      const spineCallSites = new Map<string, number>();
-      if (best) for (let i = 0; i < best.length - 1; i++) {
-        const ln = best[i + 1]?.edge?.line;
-        if (ln && ln > 0 && !spineCallSites.has(best[i]!.node.id)) spineCallSites.set(best[i]!.node.id, ln);
-      }
+      // Where each spine node calls the NEXT hop — lets the assembler window an
+      // oversize spine method to the call instead of dumping the whole body.
+      const spineCallSites = flow.chains[0]?.callSites ?? new Map<string, number>();
 
       // Dynamic-boundary scan (#687) — fires ONLY when the flow the agent
       // asked about did not fully connect: some token resolved to nodes but
@@ -6715,71 +6587,11 @@ export class ToolHandler {
    * Returns the best match and a note about alternatives if any.
    */
   /**
-   * Check if a node matches a symbol query.
-   *
-   * Accepts simple names (`run`) and three flavors of qualifier:
-   *   - dotted     `Session.request`         (TS/JS/Python)
-   *   - colon-pair `stage_apply::run`        (Rust, C++, Ruby)
-   *   - slash      `configurator/stage_apply` (path-ish)
-   *
-   * Multi-level qualifiers compose: `crate::configurator::stage_apply::run`
-   * works. Rust path prefixes (`crate`, `super`, `self`) are stripped so
-   * the canonical `crate::module::symbol` form resolves.
-   *
-   * Resolution order, last part must always equal `node.name`:
-   *   1. Suffix-match against `qualifiedName` (handles class-scoped methods
-   *      where the extractor builds the qualified name from the AST stack)
-   *   2. File-path containment (handles file-derived modules in Rust/
-   *      Python — `stage_apply::run` matches a `run` in `stage_apply.rs`)
+   * Check if a node matches a symbol query — see `matchesSymbol` in
+   * `../graph/named-symbol-flow`, which owns the rules.
    */
   private matchesSymbol(node: Node, symbol: string): boolean {
-    // Erlang arity spelling (`fn/3`, `mod:fn/3` → normalized `mod.fn/3`): when
-    // the node's qualifiedName carries an arity (`mod::fn/3`, #1610), the
-    // written arity must match it exactly; the remaining comparison then runs
-    // on the arity-less spelling. A node with no arity in its qualifiedName
-    // keeps the original symbol (a `/` there means a path-ish name instead).
-    const aritySpelling = /^(.+)\/(\d{1,3})$/.exec(symbol);
-    if (aritySpelling) {
-      const nodeArity = /\/(\d{1,3})$/.exec(node.qualifiedName ?? '')?.[1];
-      if (nodeArity !== undefined) {
-        if (nodeArity !== aritySpelling[2]) return false;
-        symbol = aritySpelling[1]!;
-      }
-    }
-    // Simple name match
-    if (node.name === symbol) return true;
-    // File basename match (e.g., "product-card" matches "product-card.liquid")
-    if (node.kind === 'file' && node.name.replace(/\.[^.]+$/, '') === symbol) return true;
-
-    // Qualified-name lookups: split on any supported separator. `\w` keeps
-    // identifier chars (incl. `_`) intact; everything else is treated as
-    // a separator we tolerate.
-    if (!/[.\/]|::/.test(symbol)) return false;
-    const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
-    if (parts.length < 2) return false;
-
-    const lastPart = parts[parts.length - 1]!;
-    if (node.name !== lastPart) return false;
-
-    // Stage 1: qualified-name suffix match. The extractor joins the
-    // semantic hierarchy with `::`, so `Session.request` and
-    // `Session::request` both become `Session::request` here.
-    const colonSuffix = parts.join('::');
-    if (node.qualifiedName.includes(colonSuffix)) return true;
-
-    // Stage 2: file-path containment. Rust modules and Python packages
-    // are not in `qualifiedName` — they're encoded in the file path. So
-    // `stage_apply::run` matches a `run` in any file whose path
-    // contains a `stage_apply` segment (with or without an extension).
-    //
-    // Filter out Rust path prefixes that have no file-system equivalent.
-    const containerHints = parts.slice(0, -1).filter((p) => !RUST_PATH_PREFIXES.has(p));
-    if (containerHints.length === 0) return false;
-
-    const segments = node.filePath.split('/').filter((s) => s.length > 0);
-    return containerHints.every((hint) =>
-      segments.some((seg) => seg === hint || seg.replace(/\.[^.]+$/, '') === hint)
-    );
+    return matchesSymbol(node, symbol);
   }
 
   /**
@@ -6843,64 +6655,12 @@ export class ToolHandler {
   /**
    * Find ALL symbols matching a name. Used by callers/callees/impact to aggregate
    * results across all matching symbols (e.g., multiple classes with an `execute` method).
+   *
+   * The resolution itself lives in `../graph/named-symbol-flow`, so the Flow
+   * strip and `codegraph_explore` resolve a written name to the same nodes.
    */
   private findAllSymbols(cg: CodeGraph, symbol: string): { nodes: Node[]; note: string } {
-    // Nix option paths: the declaration is stored as `options.<path>` and
-    // config writes carry longer/quoted tails (`<path>."git/config".text`),
-    // so a dotted option token (`xdg.configFile`, `launchd.user.agents`) has
-    // no exact-name node and would degrade to bare-tail FTS soup — burying
-    // the declaration hub the nix-option-path edges hang off. Resolve the
-    // convention directly: declaration first, then the exact write, then a
-    // capped prefix scan of write sites. Three index hits; non-nix graphs
-    // fall straight through.
-    if (/^[a-z][\w'-]*(?:\.[\w'-]+)+$/.test(symbol)) {
-      const optionHits = [
-        ...cg.getNodesByName(`options.${symbol}`),
-        ...cg.getNodesByName(symbol),
-        ...cg.getNodesByNamePrefix(`${symbol}.`, 12),
-      ].filter((n) => n.language === 'nix');
-      if (optionHits.length > 0) {
-        const seen = new Set<string>();
-        const nodes = optionHits.filter((n) => !seen.has(n.id) && !!seen.add(n.id)).slice(0, 10);
-        return { nodes, note: '' };
-      }
-    }
-    let results = cg.searchNodes(symbol, { limit: 50 });
-
-    // Mirror the fallback in `findSymbol` for qualified queries — FTS
-    // strips colons, so a module-qualified lookup needs a second pass
-    // by the bare last part.
-    if (results.length === 0 && /[.\/]|::/.test(symbol)) {
-      const tail = lastQualifierPart(symbol);
-      if (tail && tail !== symbol) results = cg.searchNodes(tail, { limit: 50 });
-    }
-
-    if (results.length === 0) {
-      return { nodes: [], note: '' };
-    }
-
-    const exactMatches = results.filter(r => this.matchesSymbol(r.node, symbol));
-
-    if (exactMatches.length <= 1) {
-      const node = exactMatches[0]?.node ?? results[0]!.node;
-      return { nodes: [node], note: '' };
-    }
-
-    // Same generated-file down-rank as findSymbol — keeps callers/callees
-    // /impact aggregation aligned (a query against "Send" returns the
-    // hand-written implementations before the protobuf scaffold).
-    const isGen = cg.generatedFilePredicate(exactMatches.map((r) => r.node.filePath));
-    const ranked = [...exactMatches].sort((a, b) => {
-      const aGen = isGen(a.node.filePath) ? 1 : 0;
-      const bGen = isGen(b.node.filePath) ? 1 : 0;
-      return aGen - bGen;
-    });
-
-    const locations = ranked.map(r =>
-      `${r.node.kind} at ${r.node.filePath}:${r.node.startLine}`
-    );
-    const note = `\n\n> **Note:** Aggregated results across ${ranked.length} symbols named "${symbol}": ${locations.join(', ')}`;
-    return { nodes: ranked.map(r => r.node), note };
+    return findAllSymbols(cg, symbol);
   }
 
   /**

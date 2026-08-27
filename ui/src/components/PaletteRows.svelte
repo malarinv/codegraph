@@ -71,6 +71,11 @@
           <span class="nm">{item.url}</span>
           <span class="sig">{item.handler}</span>
         </span>
+      {:else if item.type === 'flow'}
+        <KindGlyph kind="route" />
+        <span class="mid">
+          <span class="nm">{item.name}</span>
+        </span>
       {:else}
         <KindGlyph kind={item.node.kind} />
         <span class="mid">

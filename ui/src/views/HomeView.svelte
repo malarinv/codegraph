@@ -12,7 +12,7 @@
   import PaletteRows from '../components/PaletteRows.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPalette, type PaletteItem } from '../lib/search-model';
-  import { fileHref, navigate } from '../lib/router.svelte';
+  import { fileHref, flowHref, navigate } from '../lib/router.svelte';
   import { walkTo } from '../lib/walk';
 
   interface Props {
@@ -27,6 +27,12 @@
   let entries = $derived(buildEntryPalette(palette.entries));
 
   function pick(item: PaletteItem) {
+    // The empty screen only ever shows entry points, which are never flows —
+    // but the row type is shared, so the branch is here rather than assumed away.
+    if (item.type === 'flow') {
+      navigate(flowHref({ from: item.from, to: item.to }));
+      return;
+    }
     const id = item.type === 'route' ? item.nodeId : item.id;
     if (!id) return;
     // A file opens the File view — its outline plus the import rails. The

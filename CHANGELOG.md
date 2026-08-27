@@ -26,6 +26,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   It opens on your project's source directory; a picker switches to any other top-level folder or the whole repository, a checkbox brings tests in, and `depth` splits a large folder into its sub-folders — useful on a monorepo. What you're looking at lives in the address, so the view is shareable.
 
+- **Ask how one symbol reaches another, in `codegraph ui`.** Type "how does execute reach getFile" into the search box — or `execute -> getFile` — and the Flow strip draws the call path between them, left to right, one card per hop. Each card is opened at the exact line that makes the next call rather than at the top of the function, so reading the strip is reading the handful of lines that actually carry the work; the identifier being called is a link, and clicking a card opens it in the symbol screen with the trail already set to the path you've read so far.
+
+  A dashed link is a hop nobody can see in the source — a callback, an interface dispatch, a React re-render, a JSX child — and it names the mechanism and, where CodeGraph knows it, the exact line the handler was wired at. When a name means several definitions, the strip says so and names the one the path runs through, offers the alternatives in a picker, and can draw them together as one branching diagram. "Not connected" is an answer rather than a failure: a flow that runs through a dispatch no static edge records genuinely has no path, and the screen says so instead of inventing one.
+
+  The **"Read as flow"** button on the trail turns a walk you did by hand into the same strip. It is the same path finder `codegraph_explore` leads its answers with, so the picture and what your agent tells you can't disagree.
+
 
 ## [1.6.0] - 2026-08-26
 

@@ -1,7 +1,7 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Nine endpoints, one per screen, each answering in a single round-trip — the
+ * Ten endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
  * have to ask a follow-up question. Everything here is a *reader* of the
  * existing schema; nothing indexes, resolves, or writes.
@@ -16,6 +16,7 @@
  * GET /api/routes                    the URL to handler map, when there is one
  * GET /api/entrypoints               where to start reading: routes, roots, hubs
  * GET /api/map?root=&depth=          the module map: modules, links, cycles
+ * GET /api/flow?from=&to=            the flow strip: one card per hop
  * ```
  *
  * It mounts on the `api` seam of `startUiServer`, which means it sits *behind*
@@ -39,12 +40,22 @@ import { buildRoutes } from './routes';
 import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
+import { buildFlow } from './flow';
 
 export { GraphSession } from './session';
 export { ApiError } from './respond';
 export * from './wire';
 export type { WireEntryPoints, WireEntryFile, WireEntryHub } from './entrypoints';
 export type { WireNodeRefs } from './nodes';
+export type {
+  WireFlowPayload,
+  WireFlow,
+  WireFlowHop,
+  WireFlowEdge,
+  WireFlowSource,
+  WireFlowCallRef,
+  WireFlowAmbiguity,
+} from './flow';
 export type {
   WireMapPayload,
   WireMapModule,
@@ -90,6 +101,11 @@ const API_INDEX = {
       params: ['root', 'depth'],
     },
     {
+      path: '/api/flow',
+      description: 'The call path between symbols: one hop per card, opened at the calling line.',
+      params: ['from', 'to', 'symbols', 'hop', 'limit'],
+    },
+    {
       path: '/api/entrypoints',
       description: 'Where to start reading: routes, files that run something, and hubs.',
       params: ['limit'],
@@ -122,6 +138,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildNodeRefs(session.acquire(), ctx.query), ctx.method);
         case '/api/source':
           return ok(res, await buildSource(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
+        case '/api/flow':
+          return ok(res, await buildFlow(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         default:
           return dispatchPathRoutes(route, res, ctx, session);
       }

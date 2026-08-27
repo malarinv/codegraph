@@ -30,10 +30,11 @@ export interface FlowQuery {
 /**
  * "how does X reach Y", "X -> Y", "X → Y".
  *
- * Phase 1 has no Flow view to send this to, but the question is worth
- * recognising anyway: someone who types it gets both endpoints looked up
- * instead of a search for the whole sentence, which matches nothing. CG-50
- * turns the same parse into a computed path.
+ * The parse drives two things: the palette's first row, which opens the Flow
+ * strip for exactly this pair, and the search underneath it, which looks up
+ * both endpoints rather than searching the whole sentence (which matches
+ * nothing). Both are useful — the flow answers the question, the endpoints let
+ * a reader who spelled a name wrong see what they actually named.
  */
 const FLOW_SENTENCE =
   /^\s*(?:how\s+(?:does|do|would|can)\s+)?([\w$.]+)\s+(?:reach|reaches|call|calls|hit|hits|get\s+to|end\s+up\s+(?:in|at))\s+([\w$.]+)\s*\??\s*$/i;
@@ -58,7 +59,8 @@ export function parseFlowQuery(query: string): FlowQuery | null {
 
 export type PaletteItem =
   | { type: 'symbol'; id: string; node: WireNodeRef; name: string; meta: string; location: string }
-  | { type: 'route'; id: string; url: string; handler: string; location: string; nodeId: string | null };
+  | { type: 'route'; id: string; url: string; handler: string; location: string; nodeId: string | null }
+  | { type: 'flow'; id: string; from: string; to: string; name: string; meta: string; location: string };
 
 export interface PaletteSection {
   /** Sentence-case caption, e.g. "Methods", "Files that run something". */
@@ -177,10 +179,29 @@ export function buildSearchPalette(
       : answers[0]?.results.items ?? [];
 
   const sections = groupByKind(results);
+  // The flow row goes FIRST, so Enter opens the path: someone who typed
+  // "how does X reach Y" asked for the path, not for a list of symbols.
+  if (flow) {
+    sections.unshift({
+      title: 'Flow',
+      note: 'The call path between them, one card per hop.',
+      items: [
+        {
+          type: 'flow',
+          id: `flow:${flow.from}:${flow.to}`,
+          from: flow.from,
+          to: flow.to,
+          name: `${flow.from} → ${flow.to}`,
+          meta: '',
+          location: 'read as a flow',
+        },
+      ],
+    });
+  }
   const items = sections.flatMap((section) => section.items);
 
   const hint = flow
-    ? `Reading the path between two symbols arrives with the Flow view. Here is what ${flow.from} and ${flow.to} name.`
+    ? `Reading the path from ${flow.from} to ${flow.to}. Below it, what each name matches.`
     : null;
 
   return {

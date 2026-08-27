@@ -1884,6 +1884,11 @@ Pick a symbol and you see who calls it on the left, its source in the middle,
 and what it calls on the right at the height of the line that calls it. Search
 with / (or Cmd-K), click a file path for the file's outline and its imports.
 
+Ask "how does execute reach getFile" (or "execute -> getFile") in the search
+box for the flow between two symbols: one card per hop, opened at the line that
+makes the next call, with dynamic-dispatch hops drawn dashed and named. The Map
+tab draws the whole project by module, with dependencies pointing down.
+
 The viewer listens on 127.0.0.1 only, so nothing on your network can reach it,
 and it is read-only: it opens an index that already exists and never changes
 your project or your graph. Requests from any other host are refused, and

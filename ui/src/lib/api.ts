@@ -367,6 +367,79 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
+/* ------------------------------------------------------------- flow strip -- */
+
+export interface WireFlowEdge extends WireEdge {
+  /** The link's label: "calls", "via callback · registered at file:line". */
+  label: string;
+  /** This hop reads callee → caller — the reader stepped UP into it. */
+  upward: boolean;
+  /** Confidence below 0.6: the link is dashed `2 3`. */
+  uncertain: boolean;
+  /** A synthesized dynamic-dispatch bridge: dashed `5 3`. */
+  synthesized: boolean;
+}
+
+export interface WireFlowSource {
+  file: string;
+  language: string;
+  from: number;
+  to: number;
+  /** Absent when `drift` — a mis-sliced window is worse than an empty card. */
+  lines?: string[];
+  highlight?: WireHighlight;
+  drift: boolean;
+  reason?: string;
+}
+
+/** The call site a card is opened at — the identifier drawn as an accent link. */
+export interface WireFlowCallRef {
+  line: number;
+  col: number | null;
+  name: string;
+  targetId: string;
+  /** The link points back at the previous card, not on to the next one. */
+  backwards: boolean;
+}
+
+export interface WireFlowHop {
+  node: WireNodeRef;
+  /** The edge from the PREVIOUS hop into this one; null on the first. */
+  edge: WireFlowEdge | null;
+  callRef: WireFlowCallRef | null;
+  source: WireFlowSource | null;
+}
+
+export interface WireFlow {
+  id: string;
+  /** "execute → rowToFileRecord", for the header's flow picker. */
+  label: string;
+  hops: WireFlowHop[];
+}
+
+export interface WireFlowAmbiguity {
+  token: string;
+  chosen: WireNodeRef | null;
+  others: WireNodeRef[];
+}
+
+export interface WireFlowPayload {
+  query: {
+    kind: 'directed' | 'symbols' | 'trail';
+    from: string | null;
+    to: string | null;
+    symbols: string[];
+  };
+  flows: WireFlow[];
+  ambiguous: WireFlowAmbiguity[];
+  /** Tokens that named nothing in this index. */
+  unresolved: string[];
+  /** Why there is no flow, when there is none. */
+  reason: string | null;
+  index: { lastIndexedAt: number | null; edges: number; files: number };
+  timing: { elapsedMs: number };
+}
+
 /* -------------------------------------------------------------- the map -- */
 
 export interface WireMapModule {
@@ -486,4 +559,25 @@ export function fetchMap(
   if (opts.depth) params.set('depth', String(opts.depth));
   const query = params.toString();
   return getJson<WireMapPayload>(`api/map${query ? `?${query}` : ''}`, signal);
+}
+
+/**
+ * A flow. Exactly one of the three shapes is sent:
+ *
+ * - `{ from, to }` — "how does X reach Y", from the search box.
+ * - `{ symbols }` — `codegraph_explore`'s own question, verbatim.
+ * - `{ trail }` — the hops the reader walked, as `<dir><id>` strings. Each one
+ *   is its own parameter, because a node id can be a file path and a file path
+ *   can contain a comma.
+ */
+export function fetchFlow(
+  spec: { from?: string; to?: string; symbols?: string; trail?: readonly string[] },
+  signal?: AbortSignal
+): Promise<WireFlowPayload> {
+  const params = new URLSearchParams();
+  if (spec.from) params.set('from', spec.from);
+  if (spec.to) params.set('to', spec.to);
+  if (spec.symbols) params.set('symbols', spec.symbols);
+  for (const hop of spec.trail ?? []) params.append('hop', hop);
+  return getJson<WireFlowPayload>(`api/flow?${params}`, signal);
 }

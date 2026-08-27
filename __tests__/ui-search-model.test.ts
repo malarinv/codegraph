@@ -124,14 +124,24 @@ describe('the palette', () => {
     expect(interleaveResults(a, [result({ id: 'a2' })]).map((r) => r.id)).toEqual(['a1', 'a2']);
   });
 
-  it('explains that a flow question is answered by both endpoints for now', () => {
+  it('offers the flow FIRST for a flow question, then what each name matches', () => {
     const palette = buildSearchPalette(
       [answer([result({ id: 'a', name: 'sync' })]), answer([result({ id: 'b', name: 'read' })])],
       { from: 'sync', to: 'read' }
     );
-    expect(palette.items.map((i) => i.id)).toEqual(['a', 'b']);
+    // First row, so Enter opens the path: the question asked for the path.
+    expect(palette.sections[0]?.title).toBe('Flow');
+    expect(palette.items[0]).toMatchObject({ type: 'flow', from: 'sync', to: 'read' });
+    expect(palette.items.map((i) => i.id).slice(1)).toEqual(['a', 'b']);
+    expect(palette.items).toEqual(palette.sections.flatMap((s) => s.items));
     expect(palette.hint).toContain('sync');
     expect(palette.hint).toContain('read');
+  });
+
+  it('offers no flow row when the query is not a flow question', () => {
+    const palette = buildSearchPalette([answer([result({ id: 'a' })])], null);
+    expect(palette.sections.some((s) => s.title === 'Flow')).toBe(false);
+    expect(palette.items.every((i) => i.type !== 'flow')).toBe(true);
   });
 
   it('names a kind bucket in sentence case, singular when there is one', () => {

@@ -3,14 +3,6 @@
   import { trail, hopLabel, encodeTrail } from '../lib/trail.svelte';
   import { navigate, symbolHref, flowHref } from '../lib/router.svelte';
 
-  /**
-   * "Read as flow" replays the trail as a computed path in the Flow view,
-   * which is phase 2 (CG-50). The control is built and wired; it stays hidden
-   * until there is a view to send it to, because a button that lands on a
-   * placeholder is worse than no button.
-   */
-  const READ_AS_FLOW = false;
-
   let hops = $derived(trail.hops);
 
   function step(index: number) {
@@ -20,9 +12,14 @@
     navigate(symbolHref(hop.id, { trail: encodeTrail(trail.hops) }));
   }
 
+  /**
+   * The walk itself IS the flow: the Flow view does not search for a path, it
+   * looks up the edge already joining each consecutive pair and draws the cards
+   * at those lines. So the trail travels under the same `t` param it uses
+   * everywhere else — a flow read from a trail is one walk under two lenses.
+   */
   function readAsFlow() {
-    // The flow key is the walk itself; the Flow view (phase 2) replays it.
-    navigate(flowHref(encodeTrail(hops)));
+    navigate(flowHref({ trail: encodeTrail(hops) }));
   }
 
   /**
@@ -84,7 +81,7 @@
 
   <span class="spacer"></span>
 
-  {#if READ_AS_FLOW && hops.length > 1}
+  {#if hops.length > 1}
     <button type="button" class="tb-btn" onclick={readAsFlow}>Read as flow</button>
   {/if}
   {#if hops.length > 0}
