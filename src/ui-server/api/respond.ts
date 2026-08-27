@@ -8,7 +8,7 @@
  * the CLI and the MCP tools do. What it never does is leak a stack trace.
  */
 
-import type { ServerResponse } from 'http';
+import type { IncomingMessage, ServerResponse } from 'http';
 import { sendJson } from '../static';
 
 /**
@@ -86,6 +86,54 @@ export function fail(res: ServerResponse, err: unknown, method: string): true {
     method
   );
   return true;
+}
+
+// =============================================================================
+// Request bodies
+// =============================================================================
+
+/**
+ * Bytes a request body may carry.
+ *
+ * The only body this server reads is a saved trail: a name and up to 64 node
+ * ids. 64 KB is generous for that and small enough that a runaway client cannot
+ * make the process hold a megabyte per socket.
+ */
+export const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * Read a request body as JSON.
+ *
+ * Counts BYTES, not characters, and stops at the cap by destroying the socket
+ * rather than draining a body nobody is going to parse — a `Content-Length`
+ * header is a claim, and the only limit that holds is the one applied to what
+ * actually arrives.
+ *
+ * @throws {ApiError} `bad-request` for a body that is too large or is not JSON.
+ */
+export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of req) {
+      const buf = chunk as Buffer;
+      size += buf.length;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        throw badRequest(`That request body is too large (max ${MAX_BODY_BYTES} bytes).`);
+      }
+      chunks.push(buf);
+    }
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw badRequest('That request body could not be read.');
+  }
+  if (size === 0) throw badRequest('That request needs a JSON body.');
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf-8')) as unknown;
+  } catch {
+    throw badRequest('That request body is not valid JSON.');
+  }
 }
 
 // =============================================================================

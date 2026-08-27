@@ -60,8 +60,9 @@ codegraph ui                     # the project you're standing in
 codegraph ui ~/code/my-app       # a project indexed elsewhere
 codegraph ui --port 8080         # pin a port (fails if it's taken)
 codegraph ui --no-open           # just print the URL (headless boxes, SSH)
+codegraph ui --read-only         # refuse every write, including saved trails
 ```
 
 Without `--port` it takes 4747, or the next free port. `CODEGRAPH_BROWSER=<command>` chooses which browser opens; `CODEGRAPH_BROWSER=none` never opens one. `codegraph web` is an alias.
 
-The viewer listens on `127.0.0.1` only and is read-only: it opens an index that already exists, never creates one, never writes to your project or your graph, and sends nothing anywhere.
+The viewer listens on `127.0.0.1` only: it opens an index that already exists, never creates one, never changes your graph or a line of your code, and sends nothing anywhere. The one thing it writes is a trail you asked it to save, under `.codegraph/ui/trails/`; `--read-only` refuses even that.

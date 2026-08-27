@@ -28,6 +28,7 @@ import {
   FlowStrip,
   SearchPalette,
   SymbolView,
+  SavedTrails,
   TrailBar,
   TypeHierarchy,
   createHttpAdapter,
@@ -406,8 +407,22 @@ function mockAdapter(): { adapter: GraphAdapter; calls: string[] } {
         corroborated: true,
         timing: { elapsedMs: 1 },
       }),
-    // Deliberately no `events`: a host without a live channel is the normal
-    // case, and nothing may poll in its absence.
+    trails: () =>
+      seen('trails', {
+        trails: [],
+        // A host with nowhere to keep trails still ANSWERS the question — it
+        // says it is read-only rather than omitting the method, so the screens
+        // show the section explained instead of showing a Save that does
+        // nothing.
+        readOnly: true,
+        readOnlyReason: 'This host does not store trails.',
+        directory: '.codegraph/ui/trails',
+        skipped: 0,
+        bounded: false,
+      }),
+    // Deliberately no `events`, `saveTrail` or `deleteTrail`: a host without a
+    // live channel and without anywhere to write is the normal case, and
+    // nothing may poll or offer to save in their absence.
   };
   return { adapter, calls };
 }
@@ -599,6 +614,27 @@ describe('@colbymchenry/codegraph-ui — a host renders the package', () => {
 
     await render(SearchPalette, {});
     expect(host.querySelector('input[role="combobox"]')).not.toBeNull();
+  });
+
+  it('offers no Save when the adapter cannot write, and says why in the list', async () => {
+    const { adapter } = mockAdapter();
+    setGraphAdapter(adapter);
+
+    trail.push({ id: SYMBOL.node.id, name: 'parseToken', kind: 'function', dir: 'start' });
+    await render(TrailBar, {});
+    // The one screen affordance that must never appear against a read-only
+    // host: an adapter with no `saveTrail` has no button, not a button that
+    // fails.
+    expect(host.textContent ?? '').not.toContain('Save trail');
+
+    void unmount(mounted as Record<string, unknown>);
+    mounted = null;
+    host.innerHTML = '';
+
+    await render(SavedTrails, { hideWhenEmpty: false });
+    const text = host.textContent ?? '';
+    expect(text).toContain('Saved trails');
+    expect(text).toContain('This host does not store trails.');
   });
 
   it('CodegraphUi installs the adapter before its children ask for data', async () => {

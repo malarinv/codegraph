@@ -1374,6 +1374,21 @@ export class CodeGraph {
   }
 
   /**
+   * Every symbol carrying an exact qualified name.
+   *
+   * The identity that survives a re-index. A node's id contains its start line,
+   * so any edit ABOVE a symbol gives it a different id — anything that has to
+   * name the same symbol across two indexes (a saved trail, a bookmark, a
+   * review comment) has to key on this instead, and then disambiguate the
+   * result by kind and file. Index-backed; unlike
+   * {@link GraphQueryManager.findByQualifiedName} it takes no pattern and scans
+   * nothing.
+   */
+  getNodesByQualifiedName(qualifiedName: string): Node[] {
+    return this.queries.getNodesByQualifiedNameExact(qualifiedName);
+  }
+
+  /**
    * Outgoing edges for many source nodes at once — the batch form of
    * {@link getOutgoingEdges}. See {@link QueryBuilder.getOutgoingEdgesFrom}.
    */

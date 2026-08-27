@@ -1856,8 +1856,10 @@ function printNoIndexGuidance(projectPath: string): void {
  * codegraph ui [path]  (alias: web)
  *
  * The browser reader: serves the built viewer (`dist/viewer/`) over loopback
- * and opens it. Read-only in every sense — it answers GET, it opens the index
- * for reading, and it never writes to the project or the graph.
+ * and opens it. It opens the index for reading and never writes to it, never
+ * indexes, and never changes a line of the project's code. The single thing it
+ * writes is a trail the reader saved, as JSON under `.codegraph/ui/trails/`;
+ * `--read-only` turns even that off.
  *
  * Deliberately absent from TELEMETRY_FLUSH_COMMANDS above: the command's own
  * banner tells the user nothing leaves their machine, so it must not be the
@@ -1870,6 +1872,7 @@ program
   .description('Open the CodeGraph viewer in your browser — read your indexed project as a graph')
   .option('--port <number>', `Port to listen on (default: ${DEFAULT_UI_PORT}, or the next free one)`)
   .option('--no-open', 'Print the URL instead of opening a browser')
+  .option('--read-only', 'Refuse every write — saved trails can be opened but not saved or deleted')
   .addHelpText(
     'after',
     `
@@ -1897,10 +1900,17 @@ The page keeps up with the project while it is open: save a file and it says so
 within about a third of a second, and whatever is on screen re-reads the graph
 when something re-indexes it. It watches for that; it never polls.
 
-The viewer listens on 127.0.0.1 only, so nothing on your network can reach it,
-and it is read-only: it opens an index that already exists and never changes
-your project or your graph. Requests from any other host are refused, and
-nothing is sent anywhere: no code, no paths, no analytics.
+Save a walk you want to keep: name the trail and it is written to
+.codegraph/ui/trails/ (already gitignored) as plain JSON, listed on the empty
+screen, and reopened at the symbol you left. Hops are remembered by name rather
+than by position, so a saved trail survives re-indexing and says which hop moved
+when one does. Pass --read-only to refuse every write.
+
+The viewer listens on 127.0.0.1 only, so nothing on your network can reach it.
+It opens an index that already exists, never indexes, and never changes a line
+of your code — the one thing it writes is a trail you asked it to save.
+Requests from any other host are refused, and nothing is sent anywhere: no code,
+no paths, no analytics.
 
 Without --port it takes ${DEFAULT_UI_PORT}, or the next free port if that one is busy.
 
@@ -1908,7 +1918,7 @@ Set ${BROWSER_ENV}=<command> to choose which browser opens, or
 ${BROWSER_ENV}=none to never open one.
 `
   )
-  .action(async (pathArg: string | undefined, options: { port?: string; open?: boolean }) => {
+  .action(async (pathArg: string | undefined, options: { port?: string; open?: boolean; readOnly?: boolean }) => {
     // An explicit --port stays explicit: a scripted `--port 8080` that quietly
     // lands on 8081 is worse than one that says the port is busy. The default
     // port is the only one we're free to walk away from.
@@ -1942,10 +1952,17 @@ ${BROWSER_ENV}=none to never open one.
       '../ui-server'
     );
 
-    // The read-only JSON API the viewer reads its screens from. It opens the
-    // index lazily on the first request, so a slow first paint is the only cost
-    // of mounting it here rather than after the browser connects.
-    const api = createGraphApi({ projectRoot: projectPath });
+    // The JSON API the viewer reads its screens from. It opens the index lazily
+    // on the first request, so a slow first paint is the only cost of mounting
+    // it here rather than after the browser connects.
+    const readOnly = options.readOnly === true;
+    const api = createGraphApi({
+      projectRoot: projectPath,
+      readOnly,
+      readOnlyReason: readOnly
+        ? 'This viewer was started with --read-only, so trails cannot be saved.'
+        : undefined,
+    });
 
     let handle: UiServerHandle;
     try {
@@ -1968,7 +1985,12 @@ ${BROWSER_ENV}=none to never open one.
     console.log('');
     console.log(`  ${chalk.dim('Reading')}  ${projectPath}`);
     console.log(`  ${chalk.dim('URL')}      ${chalk.cyan(handle.url)}`);
-    console.log(`  ${chalk.dim('Access')}   this machine only ${getGlyphs().dash} read-only, nothing leaves your computer`);
+    console.log(
+      `  ${chalk.dim('Access')}   this machine only ${getGlyphs().dash} ` +
+        (readOnly
+          ? 'read-only, nothing leaves your computer'
+          : 'nothing leaves your computer; saved trails are the only thing written')
+    );
     console.log('');
 
     const opened = options.open === false ? false : openBrowser(handle.url);

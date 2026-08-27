@@ -266,13 +266,43 @@ describe('codegraph ui server', () => {
     });
   });
 
-  describe('read-only', () => {
-    it('refuses every method that is not GET or HEAD', async () => {
-      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+  describe('methods', () => {
+    it('refuses every method it has never answered', async () => {
+      for (const method of ['PUT', 'PATCH', 'OPTIONS', 'TRACE']) {
         const res = await request(server.port, '/', { method });
+        expect(res.status, method).toBe(405);
+        expect(res.headers['allow']).toBe('GET, HEAD, POST, DELETE');
+      }
+    });
+
+    /**
+     * The static side stayed a pure reader when `/api/trails` gained a write
+     * (CG-60). A POST at an asset path is 405 with `Allow: GET, HEAD` — the
+     * narrower answer, since nothing under the viewer bundle will ever take
+     * one.
+     */
+    it('refuses a write outside /api/, whatever it carries', async () => {
+      for (const method of ['POST', 'DELETE']) {
+        const res = await request(server.port, '/', {
+          method,
+          headers: { 'X-CodeGraph-UI': '1' },
+        });
         expect(res.status, method).toBe(405);
         expect(res.headers['allow']).toBe('GET, HEAD');
       }
+    });
+
+    /**
+     * Under `/api/` a write is answered as JSON even when refused — the viewer
+     * parses these, and a text/plain body surfaces as a parse error rather than
+     * the refusal it is. No API is mounted on this server, so the refusal is
+     * the boundary's own and not an endpoint's.
+     */
+    it('refuses an unmarked write under /api/ as JSON', async () => {
+      const res = await request(server.port, '/api/trails', { method: 'POST' });
+      expect(res.status).toBe(403);
+      expect(res.headers['content-type']).toContain('application/json');
+      expect(JSON.parse(res.body).code).toBe('refused');
     });
   });
 

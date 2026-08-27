@@ -14,6 +14,7 @@
    * start a flow, is `#/entry` (`EntryView`); this screen links to it.
    */
   import PaletteRows from '../components/PaletteRows.svelte';
+  import SavedTrails from '../components/SavedTrails.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPalette, type PaletteItem } from '../lib/search-model';
   import { entryHref, fileHref, flowHref, navigate } from '../lib/navigation';
@@ -71,6 +72,13 @@
     </p>
   </div>
 
+  <!-- Above the derived lists on purpose: a walk somebody named and kept is a
+       better place to start than any ranking, when there is one. It draws
+       nothing at all when there is not. -->
+  <div class="saved">
+    <SavedTrails />
+  </div>
+
   {#if entries.sections.length > 0}
     <section class="entries" aria-label="Where to start">
       <div class="entries-h">
@@ -94,6 +102,11 @@
      only its bottom padding changes here, to sit against the list below. */
   .scroll :global(.emptystate) {
     padding-bottom: 8px;
+  }
+
+  .saved {
+    max-width: 800px;
+    padding: 8px 40px 0;
   }
 
   .entries {

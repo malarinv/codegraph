@@ -258,7 +258,10 @@ afterAll(async () => {
 describe('GET /api', () => {
   it('lists the endpoints it answers', async () => {
     const body = await getJson('/api');
-    expect(body.readOnly).toBe(true);
+    // Not a blanket claim any more (CG-60): saved trails are the one thing
+    // this server writes, and it names it rather than implying there is none.
+    expect(body.readOnly).toBe(false);
+    expect(body.writes).toEqual(['POST /api/trails', 'DELETE /api/trails/<id>']);
     const paths = body.endpoints.map((e: any) => e.path);
     expect(paths).toEqual(
       expect.arrayContaining([

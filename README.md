@@ -351,6 +351,7 @@ What you get on that screen:
 - **And when the path runs out, it says where.** A flow that doesn't get there ends in "Where the graph stops": the kind of dispatch that ended it (a computed member call, a `getattr`, a reflective invoke, a message bus), its line, the key when the source spells one out, and a shortlist of what could be on the other side — plus the name-only matches CodeGraph refused to follow, with their confidence. Nothing is guessed, and a flow that does connect never shows it.
 - **The map**: the whole project at module granularity, laid out from the graph with dependencies pointing down — never drawn by hand, and the same picture every time. Cycles are listed rather than straightened away.
 - **Take the picture with you.** A flow strip or a map can be copied as an image straight into a pull-request comment, or saved as an SVG for a README — always in the light theme, whichever one you are reading in, with a caption saying what the picture is. The SVG is real text, so it stays sharp at any size and the names in it are selectable.
+- **Keep a walk.** Press **Save trail** on the trail bar, name it, and the path is kept — listed on the empty screen and on Entry points, above the suggestions, and reopened at the symbol you left with the whole walk restored. Steps are remembered by what they are, not where they sat, so a saved trail survives editing the code it describes; when something does move it says which step moved, which was renamed away, and how much of the walk still opens. Trails are plain JSON under `.codegraph/ui/trails/` (git already ignores it), and **Export** hands you the file if you would rather commit one.
 - **It keeps up.** Save a file and a banner appears within about a third of a second saying the index hasn't caught up yet — and the screen switches to the file's current source rather than a body sliced at lines it no longer has. When something re-indexes, whatever is on screen refetches itself and says "Index updated · reloaded". A symbol that moved because you added a line above it is followed, not lost. Nothing polls: the viewer watches, and if it loses touch with the server it retries a few times and then says so instead of hammering it.
 
 Options: `--port <n>` to pin a port (without it the viewer takes 4747, or the next free one),
@@ -359,10 +360,11 @@ Options: `--port <n>` to pin a port (without it the viewer takes 4747, or the ne
 `codegraph web` is an alias for the same command.
 
 **Privacy:** the viewer listens on `127.0.0.1` only, so nothing on your network can reach it,
-and requests claiming to come from any other host are refused. It is read-only — it opens an
-index that already exists, never writes to your project or your graph, and never creates an
-index. **It sends nothing anywhere**: no code, no paths, no analytics. There is no account and
-no cloud in this feature at all.
+and requests claiming to come from any other host are refused. It opens an index that already
+exists, never creates one, and never changes your graph or a line of your code. The one thing
+it writes is a trail you asked it to save, into `.codegraph/ui/trails/`; `codegraph ui
+--read-only` refuses even that. **It sends nothing anywhere**: no code, no paths, no analytics.
+There is no account and no cloud in this feature at all.
 
 The viewer reads an index that already exists — it never creates one — so `codegraph init` has
 to have run first. `codegraph ui /path/to/project` points it at a project you indexed elsewhere.
@@ -573,7 +575,7 @@ codegraph uninit [path]           # Remove CodeGraph from a project (--force to 
 codegraph index [path]            # Full index (--force to re-index, --quiet for less output)
 codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
-codegraph ui [path]               # Open the browser viewer for an indexed project (alias: web; --port, --no-open)
+codegraph ui [path]               # Open the browser viewer for an indexed project (alias: web; --port, --no-open, --read-only)
 codegraph unlock [path]           # Remove a stale lock file that's blocking indexing
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
 codegraph explore <query>         # Relevant symbols' source + call paths in one shot (same output as the codegraph_explore MCP tool)

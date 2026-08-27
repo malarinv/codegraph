@@ -3,8 +3,8 @@
  * through one {@link GraphAdapter} (task CG-61).
  *
  * The viewer shipped by `codegraph ui` uses {@link createHttpAdapter}, which is
- * the read-only JSON API over loopback. A host that already holds the graph —
- * CodeGraph Pro, which opens the index in-process — implements the same twelve
+ * the JSON API over loopback. A host that already holds the graph — CodeGraph
+ * Pro, which opens the index in-process — implements the same thirteen required
  * methods against its own reads and never makes an HTTP request. The components
  * cannot tell the difference, which is the whole point: one implementation of
  * the Symbol view, the Flow strip and the Map, drawn from whichever side of the
@@ -41,6 +41,7 @@ import type {
   WireSource,
   WireStats,
   WireSymbolPayload,
+  WireTrails,
 } from './wire';
 
 /* ---------------------------------------------------------------- errors -- */
@@ -144,6 +145,20 @@ export interface DeadCodeRequest {
   includeGenerated?: boolean;
 }
 
+/**
+ * A trail to save: a name, an optional note, and the walk as ids.
+ *
+ * Ids and directions only. Everything else a saved hop records — the name, the
+ * kind, the file, the line — is read out of the graph by the answering side, so
+ * a saved trail is always a claim the index itself made and can therefore
+ * re-check when it next changes.
+ */
+export interface SaveTrailRequest {
+  name: string;
+  note?: string;
+  hops: ReadonlyArray<{ dir: 'start' | 'down' | 'up'; id: string }>;
+}
+
 /* ----------------------------------------------------------------- live -- */
 
 /**
@@ -171,8 +186,11 @@ export interface LiveHandlers {
  * `source`, `file`, `flow`, `map`, `routes` — and the rest are what the screens
  * around them need: `stats` (the blast bar's denominator and the top bar's
  * counts), `nodes` (a trail arrives from a URL as bare ids), `fileCode` (the
- * whole-file view), `entryPoints` (where a reader starts) and `deadCode` (where
- * nobody goes).
+ * whole-file view), `entryPoints` (where a reader starts), `deadCode` (where
+ * nobody goes) and `trails` (the walks the reader kept).
+ *
+ * Everything here answers a question except `saveTrail`/`deleteTrail`, which
+ * are optional for exactly that reason.
  */
 export interface GraphAdapter {
   /** The index's own facts: counts, thresholds, the blast scale. */
@@ -198,6 +216,26 @@ export interface GraphAdapter {
   entryPoints(request?: EntryPointsRequest, signal?: AbortSignal): Promise<WireEntryPoints>;
   /** Symbols nothing reaches, grouped by file, with every exclusion counted. */
   deadCode(request?: DeadCodeRequest, signal?: AbortSignal): Promise<WireDeadCode>;
+  /**
+   * The reader's saved trails, each hop re-resolved against the current graph.
+   *
+   * A host with nowhere to keep them answers `{ trails: [], readOnly: true, … }`
+   * rather than omitting the method: the screens then show the section as
+   * empty-and-explained instead of showing a Save button that does nothing.
+   */
+  trails(signal?: AbortSignal): Promise<WireTrails>;
+  /**
+   * Save a trail, answering the full list as it now stands.
+   *
+   * OPTIONAL, and the only mutating pair in this interface. An adapter that
+   * refuses to write simply omits {@link saveTrail} and {@link deleteTrail} —
+   * a host must be able to render the reader without inheriting a filesystem
+   * write it never asked for, and the viewer hides Save when they are absent
+   * exactly as it does when the server answers `readOnly`.
+   */
+  saveTrail?(request: SaveTrailRequest, signal?: AbortSignal): Promise<WireTrails>;
+  /** Remove a saved trail by id, answering the list as it now stands. */
+  deleteTrail?(id: string, signal?: AbortSignal): Promise<WireTrails>;
   /**
    * Subscribe to index/disk changes. Optional — a host without a live channel
    * omits it and nothing polls. Returns a function that closes the stream.
@@ -229,7 +267,18 @@ function query(params: URLSearchParams): string {
 }
 
 /**
- * The default adapter: the read-only JSON API `codegraph ui` serves.
+ * The header every write carries.
+ *
+ * The server refuses a `POST`/`DELETE` without it. It is not a secret and is
+ * not trying to be: a custom request header cannot be sent cross-origin without
+ * a CORS preflight, and the viewer's server answers none — so its presence is
+ * proof the request came from a page the server itself served. Must match
+ * `WRITE_HEADER` in `src/ui-server/security.ts`.
+ */
+export const WRITE_HEADER = 'X-CodeGraph-UI';
+
+/**
+ * The default adapter: the JSON API `codegraph ui` serves.
  *
  * Every failure it can describe comes back as an {@link ApiFailure} carrying
  * the server's own sentence. The one it cannot describe — the server was
@@ -241,13 +290,10 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
   const doFetch = options.fetch ?? ((...args: Parameters<typeof globalThis.fetch>) =>
     globalThis.fetch(...args));
 
-  async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  async function call<T>(path: string, init: RequestInit, signal?: AbortSignal): Promise<T> {
     let response: Response;
     try {
-      response = await doFetch(`${base}${path}`, {
-        signal,
-        headers: { accept: 'application/json' },
-      });
+      response = await doFetch(`${base}${path}`, { ...init, signal });
     } catch (cause) {
       if (signal?.aborted) throw cause;
       throw new ApiFailure(
@@ -269,6 +315,24 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
       );
     }
     return body as T;
+  }
+
+  function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+    return call<T>(path, { headers: { accept: 'application/json' } }, signal);
+  }
+
+  /** A write: the marker header, and a JSON body when there is one to send. */
+  function write<T>(path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const headers: Record<string, string> = {
+      accept: 'application/json',
+      [WRITE_HEADER]: '1',
+    };
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    return call<T>(
+      path,
+      { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) },
+      signal
+    );
   }
 
   return {
@@ -345,6 +409,13 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
       if (request.includeGenerated) params.set('generated', '1');
       return getJson<WireDeadCode>(`api/deadcode${query(params)}`, signal);
     },
+
+    trails: (signal) => getJson<WireTrails>('api/trails', signal),
+
+    saveTrail: (request, signal) => write<WireTrails>('api/trails', 'POST', request, signal),
+
+    deleteTrail: (id, signal) =>
+      write<WireTrails>(`api/trails/${encodeURIComponent(id)}`, 'DELETE', undefined, signal),
 
     events(handlers) {
       if (typeof EventSource === 'undefined') return () => {};

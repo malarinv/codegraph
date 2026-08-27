@@ -64,8 +64,8 @@ build so that mistake cannot land twice.
 
 Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `FileView`,
 `FileSourceView`, `EntryPointsView`, `DeadCodeView`, `TypeHierarchy`, `TrailBar`,
-`SearchPalette`, `PalettePanel`, `PaletteRows`, `DriftBanner`, `KindGlyph`,
-`ExportButtons`, `CodegraphUi` — plus every pure model function the screens are
+`SavedTrails`, `SearchPalette`, `PalettePanel`, `PaletteRows`, `DriftBanner`,
+`KindGlyph`, `ExportButtons`, `CodegraphUi` — plus every pure model function the screens are
 built from (`buildCalleeRail`, `buildFlowLayout`, `buildMapLayout`,
 `buildHierarchyModel`, `tokensByLine`, …) and the `Wire*` types an adapter
 answers in.
@@ -91,6 +91,11 @@ interface GraphAdapter {
   routes(request?, signal?): Promise<WireRoutes>;
   entryPoints(request?, signal?): Promise<WireEntryPoints>;
   deadCode(request?, signal?): Promise<WireDeadCode>;
+  trails(signal?): Promise<WireTrails>;
+
+  // The only mutating pair, and the only optional methods besides `events`.
+  saveTrail?(request, signal?): Promise<WireTrails>;
+  deleteTrail?(id, signal?): Promise<WireTrails>;
   events?(handlers): () => void;   // optional: the live channel
 }
 ```
@@ -99,14 +104,23 @@ The shapes are exactly what `src/ui-server/api/` serialises, and they live in
 `src/lib/wire.ts` — no imports, no runtime — so a host can depend on the
 vocabulary without depending on the viewer. The default implementation,
 `createHttpAdapter()`, is the loopback JSON API; a host that already holds the
-index implements the same twelve methods against its own reads and never makes
-an HTTP request. `scripts/check-ui-package.mjs` asserts that no module in the
+index implements the same thirteen required methods against its own reads and
+never makes an HTTP request. `scripts/check-ui-package.mjs` asserts that no module in the
 built package but `lib/adapter.js` touches the network, because a screen that
 reached past the adapter would be a screen that ignored the host.
 
 `events` is optional. Omit it and nothing connects and nothing polls; a host
 that learns about a sync some other way calls `live.signal('index')` instead,
 which is the same code path the stream uses.
+
+`saveTrail` / `deleteTrail` are optional for a different reason: they are the
+only methods in the interface that CHANGE anything, and a host must be able to
+render the reader without inheriting a write it never asked for. Omit them and
+`TrailBar` grows no Save button and `SavedTrails` says the host does not store
+them — the same thing it does when `trails()` answers `readOnly: true`, which is
+how a host that *can* store them declines a particular project. `trails()` itself
+is required: a host with nowhere to keep them answers an empty read-only list, so
+the screen is explained rather than silently missing.
 
 ### Three things that will bite
 
@@ -165,6 +179,8 @@ src/
   App.svelte              top bar / trail bar / main, global keys
   lib/router.svelte.ts    hash router: #/s/<id>, #/file/<path>, #/map, #/flow, #/entry
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
+  lib/trails.svelte.ts    saved trails: one shared fetch, and the two writes
+  lib/trails-model.ts     what a saved trail's row says, incl. its decay (pure)
   lib/kinds.ts            kind glyph letters
   lib/map-model.ts        the Map's deterministic layered layout (pure)
   lib/flow-model.ts       the Flow strip's card/link geometry + the end cap — a DAG (pure)
@@ -174,7 +190,7 @@ src/
   lib/export-image.ts     rasterising that SVG to PNG, clipboard and download
   lib/live.svelte.ts      /api/events: two counters every screen refreshes from
   lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
-  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, ExportButtons, map/, flow/, symbol/, file/, entry/
+  components/             TopBar, TrailBar, SavedTrails, KindGlyph, DriftBanner, Toast, ExportButtons, map/, flow/, symbol/, file/, entry/
   views/                  one component per route
 ```
 

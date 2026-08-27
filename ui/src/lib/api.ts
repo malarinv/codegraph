@@ -11,7 +11,7 @@
  * shape it answers with.
  */
 
-import { getGraphAdapter } from './adapter';
+import { ApiFailure, getGraphAdapter } from './adapter';
 import type {
   WireDeadCode,
   WireEntryPoints,
@@ -25,7 +25,9 @@ import type {
   WireSource,
   WireStats,
   WireSymbolPayload,
+  WireTrails,
 } from './wire';
+import type { SaveTrailRequest } from './adapter';
 
 export * from './wire';
 export { ApiFailure } from './adapter';
@@ -38,6 +40,7 @@ export type {
   LiveHandlers,
   MapRequest,
   RoutesRequest,
+  SaveTrailRequest,
   SearchRequest,
   SourceRequest,
 } from './adapter';
@@ -157,4 +160,50 @@ export function fetchFlow(
   signal?: AbortSignal
 ): Promise<WireFlowPayload> {
   return getGraphAdapter().flow(spec, signal);
+}
+
+/* ---------------------------------------------------------- saved trails -- */
+
+/**
+ * The reader's saved trails, every hop re-resolved against the current index.
+ *
+ * A trail is stored by qualified name rather than by node id, so this is where
+ * the graph gets to say what became of each hop since it was written: still
+ * there, moved, now ambiguous, or gone.
+ */
+export function fetchTrails(signal?: AbortSignal): Promise<WireTrails> {
+  return getGraphAdapter().trails(signal);
+}
+
+/**
+ * Whether trails can be written at all through the installed adapter.
+ *
+ * Separate from the `readOnly` flag on the payload: that one is the *answering
+ * side* declining, this one is an adapter that never offered. Both hide Save,
+ * and the screens say which it was.
+ */
+export function canWriteTrails(): boolean {
+  const adapter = getGraphAdapter();
+  return typeof adapter.saveTrail === 'function' && typeof adapter.deleteTrail === 'function';
+}
+
+/** Save a trail, answering the whole list as it now stands. */
+export function saveTrail(
+  request: SaveTrailRequest,
+  signal?: AbortSignal
+): Promise<WireTrails> {
+  const adapter = getGraphAdapter();
+  if (!adapter.saveTrail) {
+    return Promise.reject(new ApiFailure(0, 'refused', 'This viewer cannot save trails.', null));
+  }
+  return adapter.saveTrail(request, signal);
+}
+
+/** Remove a saved trail, answering the whole list as it now stands. */
+export function deleteTrail(id: string, signal?: AbortSignal): Promise<WireTrails> {
+  const adapter = getGraphAdapter();
+  if (!adapter.deleteTrail) {
+    return Promise.reject(new ApiFailure(0, 'refused', 'This viewer cannot delete trails.', null));
+  }
+  return adapter.deleteTrail(id, signal);
 }

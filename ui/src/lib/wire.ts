@@ -686,3 +686,75 @@ export interface WireDeadCode {
   corroborated: boolean;
   timing: { elapsedMs: number };
 }
+
+/* ---------------------------------------------------------- saved trails -- */
+
+/**
+ * How a saved hop fared against the index as it is NOW.
+ *
+ * A trail is stored by qualified name rather than by node id (a node id
+ * contains its start line, so any edit above a symbol renames it), and every
+ * hop is re-resolved on the way out. This is what that re-resolution found.
+ */
+export type WireTrailHopStatus = 'ok' | 'moved' | 'ambiguous' | 'missing';
+
+export interface WireTrailHop {
+  dir: 'start' | 'down' | 'up';
+  /** The name as it was when the trail was saved. */
+  name: string;
+  qualifiedName: string;
+  kind: string;
+  savedFile: string;
+  savedLine: number;
+  status: WireTrailHopStatus;
+  /** The symbol's id NOW. Null when nothing answers to it any more. */
+  id: string | null;
+  file: string | null;
+  line: number | null;
+  /** Finished screen wording for a status that is not `ok`; null when it is. */
+  note: string | null;
+}
+
+export interface WireTrail {
+  id: string;
+  name: string;
+  note: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  hops: WireTrailHop[];
+  /** Hops that still resolve to a symbol in this index. */
+  resolved: number;
+  /** Every hop resolved, and none of them moved. */
+  intact: boolean;
+  /**
+   * The longest run of CONSECUTIVE resolved hops, as the `t` param. Null when
+   * nothing in the trail resolves. Never stitched across a hole — the trail is
+   * a path, and a fabricated adjacency is worse than a short one.
+   */
+  encoded: string | null;
+  /** 1-based index of the first hop `encoded` carries. */
+  openFrom: number;
+  /** How many hops `encoded` carries. */
+  openCount: number;
+  /** The symbol the trail opens at — the last hop of that run. */
+  openId: string | null;
+}
+
+export interface WireTrails {
+  trails: WireTrail[];
+  /** Writes are off. Save and Delete are hidden, and the screen says why. */
+  readOnly: boolean;
+  readOnlyReason: string | null;
+  /** Project-relative directory the files live in. */
+  directory: string;
+  /** Files in that directory that were not readable trails. */
+  skipped: number;
+  bounded: boolean;
+  /** The id just written, on the answer to a save. */
+  saved?: string;
+  /** That save replaced a trail of the same name. */
+  replaced?: boolean;
+  /** The id just removed, on the answer to a delete. */
+  deleted?: string;
+}

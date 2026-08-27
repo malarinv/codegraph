@@ -54,6 +54,7 @@ export type {
   LiveHandlers,
   MapRequest,
   RoutesRequest,
+  SaveTrailRequest,
   SearchRequest,
   SourceRequest,
 } from './lib/adapter';
@@ -102,8 +103,10 @@ export { default as DeadCodeView } from './views/DeadCodeView.svelte';
 
 /* -------------------------------------------------------- the furniture -- */
 
-/** The path walked, with its arrows and its "read as flow". */
+/** The path walked, with its arrows, its "read as flow" and its Save. */
 export { default as TrailBar } from './components/TrailBar.svelte';
+/** The trails somebody kept, each hop re-resolved against the current graph. */
+export { default as SavedTrails } from './components/SavedTrails.svelte';
 /** The search box, its keyboard and its results panel — one component. */
 export { default as SearchPalette } from './components/SearchPalette.svelte';
 /** The results panel alone, for a host that owns the input. */
@@ -124,6 +127,7 @@ export { default as TypeHierarchy } from './components/symbol/TypeHierarchy.svel
 export { trail, resolveTrailNames } from './lib/trail.svelte';
 export { encodeTrail, decodeTrail, hopLabel } from './lib/trail-codec';
 export type { HopDirection, TrailHop } from './lib/trail-codec';
+export { trails } from './lib/trails.svelte';
 export { live, liveRefresh, touchesFile } from './lib/live.svelte';
 export type { LiveChanged, LiveHello, LiveIndexEvent, LiveIndexRevision } from './lib/live.svelte';
 export { project } from './lib/project.svelte';
@@ -229,6 +233,20 @@ export {
   groupMeta as deadCodeGroupMeta,
   DEAD_CODE_CAVEAT,
 } from './lib/deadcode-model';
+
+export {
+  hopStatusWord,
+  isOpenable as isTrailOpenable,
+  replacedTrail,
+  trailDecay,
+  trailExport,
+  trailMeta,
+  trailNameProblem,
+  trailOpens,
+  trailTitle,
+  MAX_NAMED_DECAYED,
+} from './lib/trails-model';
+export type { TrailDecay } from './lib/trails-model';
 
 export { buildEntryPanel, flowPair, matchEntries } from './lib/entry-model';
 export type {

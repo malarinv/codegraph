@@ -1,11 +1,16 @@
 /**
  * The `codegraph ui` server.
  *
- * A loopback-only, read-only `node:http` server that hands the browser the
- * built viewer (`dist/viewer/`) and, through the JSON API mounted on the `api`
- * seam below (`./api`), a read-only view of one indexed project. No framework,
- * no new dependency: it answers GET, serves files, and refuses everything
- * else.
+ * A loopback-only `node:http` server that hands the browser the built viewer
+ * (`dist/viewer/`) and, through the JSON API mounted on the `api` seam below
+ * (`./api`), a view of one indexed project. No framework, no new dependency: it
+ * answers GET, serves files, and refuses everything else.
+ *
+ * It is a reader with one exception, added deliberately and scoped as narrowly
+ * as it could be: `POST`/`DELETE /api/trails` saves and removes the reader's own
+ * named trails, as JSON files under `.codegraph/ui/trails/`. Nothing else it
+ * serves has a side effect, no other path accepts a write, and `--read-only`
+ * turns even that one off. See `security.ts` for what a write has to carry.
  *
  * The interesting part is not the routing, it is the boundary in `security.ts`.
  * Read that first.
@@ -17,9 +22,13 @@ import * as path from 'path';
 import { resolveViewerDir } from './assets';
 import {
   ALLOWED_METHODS,
+  READ_METHODS,
+  WRITE_HEADER,
   isAllowedHost,
   isAllowedOrigin,
   isSafeRequestPath,
+  isWriteMethod,
+  isWriteRequest,
   resolveStaticAsset,
 } from './security';
 import { sendFile, sendJson, sendText, shouldFallBackToIndex } from './static';
@@ -35,10 +44,15 @@ export {
 } from './constants';
 export {
   ALLOWED_METHODS,
+  READ_METHODS,
+  WRITE_HEADER,
+  WRITE_METHODS,
   PathRefusalError,
   isAllowedHost,
   isAllowedOrigin,
   isSafeRequestPath,
+  isWriteMethod,
+  isWriteRequest,
   resolveProjectFile,
   resolveStaticAsset,
 } from './security';
@@ -58,7 +72,11 @@ export interface UiRequestContext {
   query: URLSearchParams;
   /** Absolute path of the indexed project this server is reading. */
   projectRoot: string;
-  /** The request method — `GET` or `HEAD`; nothing else reaches a handler. */
+  /**
+   * The request method. `GET` or `HEAD` for every read; `POST` or `DELETE`
+   * only for a request that already passed {@link isWriteRequest}, which is
+   * `/api/trails` and nothing else.
+   */
   method: string;
 }
 
@@ -66,9 +84,9 @@ export interface UiRequestContext {
  * A handler mounted under `/api/`. Returns `true` when it answered the request
  * (i.e. wrote a response), `false` to fall through to a 404.
  *
- * This is the seam the read-only JSON API plugs into. Everything it serves out
- * of the user's repository must go through `resolveProjectFile` — see
- * `security.ts`.
+ * This is the seam the JSON API plugs into. Everything it reads out of — or
+ * writes into — the user's repository must go through `resolveProjectFile`;
+ * see `security.ts`.
  */
 export type UiApiHandler = (
   req: http.IncomingMessage,
@@ -228,7 +246,7 @@ async function handleRequest(
 
   if (!ALLOWED_METHODS.includes(method)) {
     res.setHeader('Allow', ALLOWED_METHODS.join(', '));
-    sendText(res, 405, `codegraph ui is read-only — ${method} is not allowed.`, method);
+    sendText(res, 405, `codegraph ui does not answer ${method}.`, method);
     return;
   }
 
@@ -258,6 +276,24 @@ async function handleRequest(
   // the viewer parses these responses, and a text/plain body here would surface
   // as a parse error instead of the refusal it actually is.
   const jsonNamespace = rawPath === '/api' || rawPath.startsWith('/api/');
+
+  // The one place this server stops being a pure reader. A write has to be
+  // under /api/ and carry the marker header — see `isWriteRequest` for what
+  // that closes that Host and Origin do not.
+  if (isWriteMethod(method)) {
+    const verdict = isWriteRequest(rawPath, {
+      marker: readHeader(req, WRITE_HEADER),
+      contentType: readHeader(req, 'content-type'),
+    });
+    if (!verdict.ok) {
+      if (!jsonNamespace) res.setHeader('Allow', READ_METHODS.join(', '));
+      const body = `Refused: ${verdict.reason}`;
+      if (jsonNamespace) sendJson(res, 403, { error: body, code: 'refused' }, method);
+      else sendText(res, 405, body, method);
+      return;
+    }
+  }
+
   if (!isSafeRequestPath(rawPath)) {
     if (jsonNamespace) {
       sendJson(res, 404, { error: 'Not found', code: 'not-found' }, method);

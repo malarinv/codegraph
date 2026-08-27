@@ -20,8 +20,11 @@
  * - **No CORS headers, ever.** Not adding `Access-Control-Allow-Origin` is what
  *   keeps a cross-origin reader from seeing a response body even if it does
  *   reach us. There is deliberately no way to turn this on.
- * - **GET/HEAD only.** The viewer is a reader; nothing it serves has a side
- *   effect, so there is no state for a forged request to change.
+ * - **GET/HEAD everywhere; POST/DELETE only under `/api/`, and only for a
+ *   request that could not have been forged by a form.** See
+ *   {@link isWriteRequest} below — the viewer went from a pure reader to one
+ *   that saves trails into `.codegraph/ui/`, and that is the entire change to
+ *   this boundary.
  * - **Every path resolves through {@link validatePathWithinRoot}** — the same
  *   chokepoint the MCP read sinks use, which catches `../` traversal AND
  *   in-tree symlinks pointing out of the root (#527).
@@ -40,8 +43,65 @@ export { PathRefusalError };
  */
 const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '::1']);
 
-/** HTTP methods the viewer server answers. Everything else is 405. */
-export const ALLOWED_METHODS: readonly string[] = ['GET', 'HEAD'];
+/** Methods that answer anywhere: the viewer's assets and every read endpoint. */
+export const READ_METHODS: readonly string[] = ['GET', 'HEAD'];
+
+/**
+ * Methods that answer under `/api/` only, and only for a request carrying
+ * {@link WRITE_HEADER}. The viewer's one write is a saved trail.
+ */
+export const WRITE_METHODS: readonly string[] = ['POST', 'DELETE'];
+
+/** HTTP methods the viewer server answers at all. Everything else is 405. */
+export const ALLOWED_METHODS: readonly string[] = [...READ_METHODS, ...WRITE_METHODS];
+
+/**
+ * The header a write has to carry.
+ *
+ * Belt and braces behind the `Host` and `Origin` checks, and worth the two
+ * lines because it fails *differently*: a custom request header cannot be sent
+ * cross-origin without a CORS preflight, and this server answers no preflight
+ * and sends no `Access-Control-*` header, so the browser never issues the real
+ * request. That closes the one shape those checks lean on a header for — a
+ * `<form method="post">` submitted from another page, which sends no `Origin`
+ * in some older browsers and cannot set a custom header in any of them.
+ */
+export const WRITE_HEADER = 'x-codegraph-ui';
+
+/** The content type a write body must declare. A form can send none of these. */
+const WRITE_CONTENT_TYPE = 'application/json';
+
+export function isWriteMethod(method: string): boolean {
+  return WRITE_METHODS.includes(method);
+}
+
+/**
+ * Whether a mutating request is one the viewer could have made.
+ *
+ * @param method     the request method, already known to be a write method
+ * @param pathname   the raw request path
+ * @param headers    `x-codegraph-ui` and, for a body-carrying method, `content-type`
+ */
+export function isWriteRequest(
+  pathname: string,
+  headers: { marker: string | undefined; contentType: string | undefined }
+): { ok: true } | { ok: false; reason: string } {
+  // Writes live under /api/ and nowhere else. The static side of this server
+  // serves a built bundle; there is nothing there to POST to.
+  if (pathname !== '/api' && !pathname.startsWith('/api/')) {
+    return { ok: false, reason: 'Only the /api/ endpoints accept writes.' };
+  }
+  if (headers.marker === undefined || headers.marker.trim() === '') {
+    return { ok: false, reason: `A write must carry the ${WRITE_HEADER} header.` };
+  }
+  if (headers.contentType !== undefined) {
+    const type = headers.contentType.split(';')[0]?.trim().toLowerCase();
+    if (type !== '' && type !== WRITE_CONTENT_TYPE) {
+      return { ok: false, reason: `A write body must be ${WRITE_CONTENT_TYPE}.` };
+    }
+  }
+  return { ok: true };
+}
 
 interface HostParts {
   hostname: string;

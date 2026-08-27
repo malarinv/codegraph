@@ -143,6 +143,7 @@ for (const name of [
   'ArchitectureMap',
   'DeadCodeView',
   'TrailBar',
+  'SavedTrails',
   'SearchPalette',
   'CodegraphUi',
   'setGraphAdapter',

@@ -377,6 +377,47 @@ of an ancestor's member, names the language calls by itself, vendored directorie
 islands — the Map's job, not this list's), names the resolver failed to resolve somewhere, names shared with a symbol that IS
 referenced, and — the only rule that reads a file — names written more than once in a file that can reach them.
 
+### 3.12 Saved trails (CG-60)
+A **Save trail** button on the trail bar, and a list of what was saved on the empty screen and the entry-points panel.
+The viewer's only write.
+
+**Saving.** `Save trail` sits with `Read as flow` and `Clear` on the right of the trail bar — sans, `4px 8px`,
+`--rule-soft` border, same as its neighbours — and appears only once the trail has a hop and the answering side accepts
+writes. It opens a **one-field inline form** as a second row inside the bar (never a dialog: naming a walk is a thought the
+reader is already having, and anything modal stops the reading to ask about filing). The row is a 12px `--ink-2` sans label,
+a **30px** `--paper` input with a `--rule-soft` border exactly like the search box, `Save`/`Cancel`, and an 11.5px hint that
+says what will happen *before* it happens: `3 hops · saved to .codegraph/ui/trails`, or, in `--amber`,
+`Replaces the saved trail of the same name.` The name is pre-filled with the current symbol's; Escape closes; a failure
+(a read-only checkout, a full disk) prints in `--accent` beside the buttons rather than vanishing. The trail bar's grid row
+is `auto` for this — it keeps its 34px on its own and grows only while the form is open.
+
+**The list.** Rows follow the search-result grid — `18px | 1fr | auto`, kind glyph of the first hop, name 12.5px mono, then
+`N hops · author` 11px mono `--ink-3` — inside a `--rule-soft` box with `--rule-faint` between rows, so the empty screen
+reads as one list rather than two. Two 11px `--rule-soft` actions sit at the right of each row, always drawn and receding to
+`--ink-3` (a control that appears when the pointer arrives is one a keyboard reader has to guess at): `Export`, and `Delete`
+which arms to `Delete?` in `--accent`/`--accent-soft` before it removes anything. The section sits **above** "Where to start":
+a walk somebody named beats any ranking, when there is one. It draws nothing at all on the empty screen when there are no
+trails, and draws itself explained on the entry-points panel, which is where a reader goes looking for one.
+
+**The honesty line is the feature.** A saved trail is somebody's explanation of code that has since moved, so every hop is
+re-resolved against the current index on the way out and each row prints what became of it, in 11.5px under the name:
+`--amber` for *"1 hop moved or renamed since this was saved — parseToken no longer in the index."* or *"…now names more than
+one symbol — showing the closest match."*, `--ink-3` for a hop that merely moved file. Because the trail is a **path**, a hole
+in it cannot be stitched: the row opens the longest run of *consecutive* resolved hops and says so — `Opens hops 2–4 of 6.` —
+and a trail where nothing resolves is drawn `--ink-3` and is not clickable.
+
+**Where it lives.** One JSON file per trail under `.codegraph/ui/trails/<slug>.json`, written atomically (temp + rename),
+newest save first. `.codegraph/.gitignore` already ignores everything, so a trail is local by default; `Export` downloads the
+same file for a reader who wants to commit it somewhere. Each hop is stored as its **qualified name, kind and file** with the
+node id kept only as a fast path — a node id contains its start line, so a trail keyed on ids would break the first time
+anybody edited the code it describes, which is exactly when it matters. Saving under an existing name replaces that trail and
+keeps its `createdAt`.
+
+**What a write has to be.** `POST /api/trails` and `DELETE /api/trails/<id>`, under `/api/` and nowhere else, carrying the
+`X-CodeGraph-UI` header and `Content-Type: application/json` — neither of which a cross-origin form can produce without a
+CORS preflight this server answers none of. `--read-only` refuses both and the screens say so in the answering side's own
+words instead of showing a Save that fails.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a

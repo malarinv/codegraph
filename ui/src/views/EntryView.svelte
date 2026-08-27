@@ -17,6 +17,7 @@
    * at rest, the empty screen and this panel, so all three agree on the order.
    */
   import EntrySection from '../components/entry/EntrySection.svelte';
+  import SavedTrails from '../components/SavedTrails.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPanel, flowPair, type EntryRow } from '../lib/entry-model';
   import { flowHref, navigate } from '../lib/navigation';
@@ -120,6 +121,13 @@
     </div>
   {/if}
 
+  <!-- The one list here that a person wrote rather than the graph derived. It
+       is drawn in full (not hidden when empty) because this screen is where a
+       reader comes looking for one. -->
+  <div class="saved">
+    <SavedTrails hideWhenEmpty={false} />
+  </div>
+
   {#if palette.entriesFailure}
     <p class="state">Could not read the entry points — {palette.entriesFailure}</p>
   {:else if !palette.entriesSettled}
@@ -144,6 +152,11 @@
   .head {
     max-width: 760px;
     padding: 26px 40px 6px;
+  }
+
+  .saved {
+    max-width: 800px;
+    padding: 14px 40px 0;
   }
 
   .head h2 {

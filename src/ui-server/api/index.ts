@@ -1,12 +1,17 @@
 /**
  * The read-only JSON API the viewer reads its screens from.
  *
- * Twelve endpoints, one per screen, each answering in a single round-trip — the
- * same principle as `codegraph_explore`: return enough that the caller does not
- * have to ask a follow-up question — plus one that does not answer at all and
- * stays open instead (`/api/events`), so a screen learns that its answer went
- * stale rather than waiting to be asked again. Everything here is a *reader* of
- * the existing schema; nothing indexes, resolves, or writes.
+ * Thirteen endpoints, one per screen, each answering in a single round-trip —
+ * the same principle as `codegraph_explore`: return enough that the caller does
+ * not have to ask a follow-up question — plus one that does not answer at all
+ * and stays open instead (`/api/events`), so a screen learns that its answer
+ * went stale rather than waiting to be asked again.
+ *
+ * All but one are *readers* of the existing schema; nothing here indexes or
+ * resolves. The exception is `/api/trails`, which saves the reader's own named
+ * walks as JSON under `.codegraph/ui/trails/` — the only write the viewer makes,
+ * to the only directory it may write to, and refused outright under
+ * `--read-only`. See `./trail-store.ts`.
  *
  * ```
  * GET /api/stats                     what this index is and how much to trust it
@@ -22,20 +27,25 @@
  * GET /api/deadcode                  symbols nothing reaches, and what was excluded
  * GET /api/flow?from=&to=            the flow strip: one card per hop
  * GET /api/events                    the live channel (SSE): drift and refresh
+ * GET /api/trails                    saved trails, re-resolved against the index
+ * POST /api/trails                   save one   (refused under --read-only)
+ * DELETE /api/trails/<id>            remove one (refused under --read-only)
  * ```
  *
  * It mounts on the `api` seam of `startUiServer`, which means it sits *behind*
  * the loopback boundary in `security.ts`: the `Host` allowlist, the absence of
- * CORS headers and the GET/HEAD restriction are already enforced by the time a
- * handler here runs. The one obligation that remains ours is the read
- * chokepoint — `resolveProjectFile` for anything that touches the repository —
- * and it lives in `source.ts`, the only module here that opens a file.
+ * CORS headers and the method restriction are already enforced by the time a
+ * handler here runs — including the extra shape a write has to have. The one
+ * obligation that remains ours is the path chokepoint, `resolveProjectFile` for
+ * anything that touches the repository. Two modules here reach the filesystem
+ * and no others: `source.ts` reads the project's code, and `trail-store.ts`
+ * reads and writes `.codegraph/ui/trails/`.
  */
 
 import type { UiApiHandler, UiRequestContext } from '../index';
 import { PathRefusalError } from '../security';
 import { GraphSession } from './session';
-import { ApiError, badRequest, fail, notFound, ok } from './respond';
+import { ApiError, badRequest, fail, notFound, ok, readJsonBody } from './respond';
 import { buildStats } from './stats';
 import { buildSearch } from './search';
 import { buildNode } from './node';
@@ -48,6 +58,7 @@ import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
 import { buildDeadCode } from './deadcode';
 import { buildFlow } from './flow';
+import { buildTrails, removeTrail, saveTrail, type TrailsOptions } from './trails';
 import { EventHub } from './events';
 
 export { GraphSession } from './session';
@@ -99,6 +110,28 @@ export type {
   WireDeadCodeRow,
 } from './deadcode';
 export { MAX_DEAD_CODE_MEMBERS, MAX_DEAD_CODE_ROWS } from './deadcode';
+export type {
+  WireTrail,
+  WireTrailHop,
+  WireTrailHopStatus,
+  WireTrails,
+  SaveTrailRequest,
+  TrailsOptions,
+} from './trails';
+export { buildTrails, encodeResolvedRun, resolveHop, resolveTrail } from './trails';
+export type { StoredHop, StoredTrail } from './trail-store';
+export {
+  MAX_TRAILS,
+  MAX_TRAIL_HOPS,
+  MAX_TRAIL_NAME,
+  MAX_TRAIL_NOTE,
+  TRAILS_RELATIVE_DIR,
+  TRAIL_FORMAT_VERSION,
+  isTrailId,
+  listStoredTrails,
+  parseTrail,
+  slugify,
+} from './trail-store';
 
 /**
  * A mounted API, plus the handle it holds open.
@@ -114,12 +147,29 @@ export interface GraphApi {
 export interface GraphApiOptions {
   /** Absolute path of the indexed project to read. */
   projectRoot: string;
+  /**
+   * Refuse every write, so the viewer is a pure reader again.
+   *
+   * The one thing it would otherwise write is a saved trail into
+   * `.codegraph/ui/trails/`. Turning this on is for a checkout that must not
+   * change (a review sandbox, a read-only mount, a shared machine); the viewer
+   * still lists trails that are already there, and says why Save is gone.
+   */
+  readOnly?: boolean;
+  /** The sentence shown in place of Save. Defaults to a generic one. */
+  readOnlyReason?: string;
 }
 
 /** What `GET /api` answers: the endpoint list, for anyone poking at it by hand. */
 const API_INDEX = {
   name: 'codegraph ui',
-  readOnly: true,
+  /**
+   * Every endpoint but `/api/trails` is a pure read. Kept as a field rather
+   * than dropped, because it was `true` and something may be reading it; it is
+   * now the honest, narrower claim.
+   */
+  readOnly: false,
+  writes: ['POST /api/trails', 'DELETE /api/trails/<id>'],
   endpoints: [
     { path: '/api/stats', description: 'Index state, graph counts, detected frameworks.' },
     { path: '/api/search', description: 'Ranked symbol search.', params: ['q', 'limit'] },
@@ -167,6 +217,12 @@ const API_INDEX = {
       description: 'Where to start reading: routes, files that run something, and hubs.',
       params: ['limit'],
     },
+    {
+      path: '/api/trails',
+      description:
+        'Saved trails, each hop re-resolved against the current index. POST saves one, ' +
+        'DELETE /api/trails/<id> removes it. The only endpoint that writes.',
+    },
   ],
 };
 
@@ -175,12 +231,25 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
   // Watches nothing until a browser subscribes, and stops again when the last
   // one goes away — mounting the API costs no watch descriptors.
   const events = new EventHub(options.projectRoot, session);
+  const trails: TrailsOptions = {
+    readOnly: options.readOnly === true,
+    readOnlyReason:
+      options.readOnly === true
+        ? options.readOnlyReason ?? 'This viewer is running read-only, so trails cannot be saved.'
+        : null,
+  };
 
   // Async because `/api/source` highlights: everything else answers straight
   // out of SQLite and resolves on the same tick.
   const handler: UiApiHandler = async (req, res, ctx) => {
     const route = normalize(ctx.pathname);
     try {
+      // Writes first: they are the only requests that carry a body, and
+      // routing them beside the readers would put a `case` that mutates in a
+      // switch every other arm of which is a query.
+      if (ctx.method === 'POST' || ctx.method === 'DELETE') {
+        return await dispatchWrite(route, req, res, ctx, session, trails);
+      }
       switch (route) {
         case '/api':
           return ok(res, API_INDEX, ctx.method);
@@ -196,6 +265,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildDeadCode(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/entrypoints':
           return ok(res, buildEntryPoints(session.acquire(), ctx.query), ctx.method);
+        case '/api/trails':
+          return ok(res, buildTrails(session.acquire(), ctx.projectRoot, trails), ctx.method);
         case '/api/nodes':
           return ok(res, buildNodeRefs(session.acquire(), ctx.query), ctx.method);
         case '/api/source':
@@ -229,6 +300,47 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
       session.close();
     },
   };
+}
+
+/**
+ * The write half: `/api/trails` and nothing else.
+ *
+ * Kept to one function so the answer to "what can this server change?" is one
+ * place a reviewer can read in full. Anything else that arrives with a write
+ * method is a 405 naming the endpoint that does accept one — by the time this
+ * runs, `isWriteRequest` has already established the request could not have
+ * been forged from another origin, so an unhelpfully vague refusal here would
+ * only confuse the person poking at their own API.
+ */
+async function dispatchWrite(
+  route: string,
+  req: Parameters<UiApiHandler>[0],
+  res: Parameters<UiApiHandler>[1],
+  ctx: UiRequestContext,
+  session: GraphSession,
+  trails: TrailsOptions
+): Promise<boolean> {
+  if (ctx.method === 'POST' && route === '/api/trails') {
+    const body = await readJsonBody(req);
+    return ok(res, saveTrail(session.acquire(), ctx.projectRoot, body, trails), ctx.method);
+  }
+
+  if (ctx.method === 'DELETE') {
+    const id = suffixAfter(route, '/api/trails/');
+    if (id !== null && id !== '') {
+      return ok(res, removeTrail(session.acquire(), ctx.projectRoot, id, trails), ctx.method);
+    }
+    if (route === '/api/trails') {
+      throw badRequest('Deleting a trail needs its id: DELETE /api/trails/<id>.');
+    }
+  }
+
+  res.setHeader('Allow', 'GET, HEAD');
+  throw new ApiError(
+    'bad-request',
+    `${ctx.method} ${route} is not something this server changes.`,
+    'The only endpoint that writes is /api/trails (POST to save, DELETE /api/trails/<id> to remove).'
+  );
 }
 
 /**

@@ -48,10 +48,26 @@ If the viewer ever loses touch with the server, it retries a handful of times wi
 - **Search** with `/` or Cmd-K: every symbol and file, grouped by kind, with signature and `file:line`. Arrow keys and Enter, no mouse needed.
 - **Entry points** on the opening screen, and in full on the **Entry points** tab (`e`) — see below.
 - **Typing a name also finds entry points.** They come back under their own heading below the symbol matches, so searching `payroll` returns the URL *with* the symbol that serves it, not just the URL.
-- **A trail** records the path you walked, with an arrow per hop showing whether you stepped into a call or up to a caller. Click any hop to jump back to it. The trail lives in the URL, so you can send someone the exact route you took.
+- **A trail** records the path you walked, with an arrow per hop showing whether you stepped into a call or up to a caller. Click any hop to jump back to it. The trail lives in the URL, so you can send someone the exact route you took — or press **Save trail** to keep it (see below).
 - **Keyboard:** arrow keys move within a column, left/right switch columns, Enter follows, Backspace steps back.
 
 Clicking any file path opens the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
+
+## Saved trails
+
+A trail you want to come back to is worth a name. Press **Save trail** on the trail bar, type one, and it is kept — listed on the opening screen and on the **Entry points** tab, above the derived suggestions. Opening one puts you back at the symbol you left with the whole walk restored in the bar. Explaining "how a request is served" to a new teammate becomes a name and a link.
+
+**A saved trail survives your project changing.** Each step is remembered by what it *is* — its qualified name, its kind, the file it was in — rather than by where it sat, so editing the file above a function does not lose it. When something does move, the row says so rather than quietly showing you something else:
+
+- a step that moved to another file still opens, and the row names both files;
+- a step that was renamed or deleted is called out by name, and the row says how much of the walk still opens (`Opens hops 2–4 of 6`);
+- a name now carried by several symbols is marked as a guess.
+
+A gap is never stitched over. The trail is a *path*, so a row opens the longest run of consecutive steps that still resolve — joining step 2 to step 4 would draw a call that does not exist.
+
+**Where they live.** One JSON file per trail under `.codegraph/ui/trails/`, which git already ignores, so trails are yours by default. **Export** on any row hands you the same file if you would rather commit one for the team; drop it back into that directory in another checkout and it re-resolves against *that* index.
+
+This is the only thing the viewer writes. Start it with `codegraph ui --read-only` and it will not write even this — saved trails can still be opened, just not saved or deleted.
 
 ## Entry points
 
@@ -124,13 +140,16 @@ An eight-hop strip comes out around half a megabyte, well inside what GitHub acc
 | `codegraph ui [path]` | Read a specific indexed project instead of the current directory |
 | `--port <n>` | Pin a port. Without it the viewer takes 4747, or the next free one |
 | `--no-open` | Print the URL instead of opening a browser (headless boxes, SSH) |
+| `--read-only` | Refuse every write — saved trails can be opened, but not saved or deleted |
 | `CODEGRAPH_BROWSER=<command>` | Choose which browser opens. `CODEGRAPH_BROWSER=none` never opens one |
 
 `codegraph web` is an alias for the same command.
 
 ## Privacy
 
-The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It is read-only: it opens an index that already exists, never creates one, and never writes to your project or your graph.
+The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It opens an index that already exists, never creates one, and never changes your graph or a line of your code.
+
+The one thing it writes is a trail you asked it to save, as JSON under `.codegraph/ui/trails/`. Nothing else it serves has a side effect, no other endpoint accepts a write, and `codegraph ui --read-only` refuses that one too.
 
 It sends nothing anywhere — no code, no paths, no analytics. The page in your browser talks only to the server on your own machine, and that server makes no outbound connections at all. See [Telemetry](https://github.com/colbymchenry/codegraph/blob/main/TELEMETRY.md) for the complete picture.
 

@@ -78,11 +78,15 @@ h3 {
 /* ---------- app shell ----------
    Design spec §3.1: top bar 48px / trail bar 34px / main. The grid is on
    index.html's mount host, which App.svelte fills directly (no wrapper — a
-   second #app would duplicate the id). */
+   second #app would duplicate the id).
+
+   The trail row is `auto`, not `--trailbar-h`: the bar keeps that height on
+   its own (see TrailBar.svelte) and grows only while the save-trail form is
+   open. Pinning the row instead would clip the form. */
 #app {
   height: 100vh;
   display: grid;
-  grid-template-rows: var(--topbar-h) var(--trailbar-h) 1fr;
+  grid-template-rows: var(--topbar-h) auto 1fr;
 }
 
 /* ---------- cross-view primitives ---------- */

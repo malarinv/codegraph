@@ -23,6 +23,7 @@
   } from './lib/router.svelte';
   import { palette } from './lib/palette.svelte';
   import { trail, resolveTrailNames } from './lib/trail.svelte';
+  import { trails } from './lib/trails.svelte';
   import { project } from './lib/project.svelte';
   import { live } from './lib/live.svelte';
   import { toast } from './lib/toast.svelte';
@@ -53,6 +54,10 @@
       // kept — so without this the resting palette, the empty screen and the
       // entry-points panel would all keep describing the graph as it was.
       void palette.reloadEntries();
+      // Saved trails are re-resolved by the server against the index that just
+      // moved, so their decay lines are stale the moment it does — a hop that
+      // was "gone" a minute ago may be back, and vice versa.
+      void trails.reload();
       toast.show('Index updated · reloaded');
     });
   });
