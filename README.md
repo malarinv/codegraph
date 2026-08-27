@@ -53,6 +53,7 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 - [Language Support](#language-support)
 - [Why CodeGraph?](#why-codegraph)
 - [Key Features](#key-features)
+- [Read your graph in the browser](#read-your-graph-in-the-browser)
 - [Framework-aware Routes](#framework-aware-routes)
 - [Mixed iOS / React Native / Expo bridging](#mixed-ios--react-native--expo-bridging)
 - [Quick Start](#quick-start)
@@ -125,6 +126,16 @@ codegraph init
 ### 4. No more syncing!
 
 Auto-sync is enabled by default. CodeGraph watches the project and updates the graph on every file change — while your agent edits code, or you add, modify, or delete files. **The index is never stale, and there is nothing to re-run.**
+
+### 5. See what your agent sees
+
+```bash
+codegraph ui
+```
+
+Opens the graph in your browser at `http://127.0.0.1:4747` — callers on the left, the symbol's
+source in the middle, what it calls on the right. See
+[Read your graph in the browser](#read-your-graph-in-the-browser).
 
 ### Uninstall
 
@@ -309,6 +320,46 @@ The handful of cases where manual `codegraph sync` makes sense: the watcher is d
 → Full deep-dive in [Guides → Indexing a Project](https://colbymchenry.github.io/codegraph/guides/indexing/#stay-fresh-automatically).
 
 </details>
+
+---
+
+## Read your graph in the browser
+
+`codegraph ui` opens a viewer for a project you have already indexed. It is the same graph
+your agent reads, on screen: pick a symbol and you see **who calls it on the left**, its
+**verbatim source in the middle**, and **what it calls on the right — each one drawn level
+with the line that calls it**.
+
+```bash
+codegraph init          # once per project, if you haven't already
+codegraph ui            # opens http://127.0.0.1:4747 in your browser
+```
+
+<img src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/codegraph-ui-symbol-view.png?v=1" alt="The CodeGraph viewer: callers on the left, the symbol's source in the middle with a marker on every calling line, and the symbols it calls on the right, each level with its call site" width="100%">
+
+What you get on that screen:
+
+- **Callers, grouped by file**, each with the exact line it calls from — click one to jump there. Test callers fold into a single line so real callers stay in view.
+- **The real source**, syntax-highlighted, with a marker in the gutter on every line that calls something.
+- **Callees on the right**, positioned at the line that calls them, joined by a hairline. Hover either end and both light up.
+- **Blast radius** — direct dependents, everything within three hops, and how many files and test files that touches.
+- **Honest edges.** A guess CodeGraph isn't sure about is folded away as "uncertain" rather than shown as fact, and a symbol no test reaches within three hops says so.
+- **Search** (`/` or ⌘K) over every symbol and file, **entry points** to start from (routes, hubs, files that run code at import time), and a **trail** of the path you walked that lives in the URL, so you can send someone the exact route you took.
+- Click any file path to open the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
+
+Options: `--port <n>` to pin a port (without it the viewer takes 4747, or the next free one),
+`--no-open` to just print the URL for a headless box or an SSH session, and
+`CODEGRAPH_BROWSER=<command>` to choose the browser (`CODEGRAPH_BROWSER=none` never opens one).
+`codegraph web` is an alias for the same command.
+
+**Privacy:** the viewer listens on `127.0.0.1` only, so nothing on your network can reach it,
+and requests claiming to come from any other host are refused. It is read-only — it opens an
+index that already exists, never writes to your project or your graph, and never creates an
+index. **It sends nothing anywhere**: no code, no paths, no analytics. There is no account and
+no cloud in this feature at all.
+
+The viewer reads an index that already exists — it never creates one — so `codegraph init` has
+to have run first. `codegraph ui /path/to/project` points it at a project you indexed elsewhere.
 
 ---
 
@@ -516,6 +567,7 @@ codegraph uninit [path]           # Remove CodeGraph from a project (--force to 
 codegraph index [path]            # Full index (--force to re-index, --quiet for less output)
 codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
+codegraph ui [path]               # Open the browser viewer for an indexed project (alias: web; --port, --no-open)
 codegraph unlock [path]           # Remove a stale lock file that's blocking indexing
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
 codegraph explore <query>         # Relevant symbols' source + call paths in one shot (same output as the codegraph_explore MCP tool)

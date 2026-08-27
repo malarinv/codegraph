@@ -12,6 +12,14 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- **Read your graph in a browser: `codegraph ui`.** Point it at a project you've already indexed and it opens a viewer for it on your own machine. Pick a symbol and you see who calls it on the left, its real source in the middle with a marker on every line that calls something, and what it calls on the right, each one drawn level with the line that calls it. Hover either end and both light up; click anything to step into it. Test callers fold into a single line so real callers stay in view, edges CodeGraph isn't confident about are folded away as "uncertain" rather than shown as fact, and a symbol no test reaches within three caller hops says so on a badge. A blast-radius strip counts what a change would reach. Search with `/` or Cmd-K across every symbol and file, start from suggested entry points (routes, hubs, files that run code when imported), and follow a trail of the path you walked that lives in the URL, so you can send someone the exact route you took. Click any file path for that file's outline in source order between everything it depends on and everything that depends on it.
+
+  Run `codegraph ui` in an indexed project, or `codegraph ui /path/to/project` for one indexed elsewhere (`codegraph web` is an alias). It takes port 4747, or the next free one; `--port <n>` pins a specific port and `--no-open` just prints the URL for a headless box or an SSH session. Set `CODEGRAPH_BROWSER=<command>` to choose the browser, or `CODEGRAPH_BROWSER=none` to never open one.
+
+  The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It is read-only: it opens an index that already exists, never creates one, and never writes to your project or your graph. It sends nothing anywhere.
+
 
 ## [1.6.0] - 2026-08-26
 

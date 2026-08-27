@@ -20,7 +20,7 @@
  *   codegraph callees <symbol>   Find what a function/method calls
  *   codegraph impact <symbol>    Analyze what code is affected by changing a symbol
  *   codegraph affected [files]   Find test files affected by changes
- *   codegraph ui [path]          Open the browser viewer for an indexed project
+ *   codegraph ui [path]          Open the browser viewer for an indexed project (alias: web)
  *   codegraph upgrade [version]  Update CodeGraph to the latest release
  */
 
@@ -1878,10 +1878,16 @@ Examples:
   $ codegraph ui ~/code/my-app      Read a specific indexed project
   $ codegraph ui --port 8080        Use one specific port (fails if it's taken)
   $ codegraph ui --no-open          Just print the URL (headless boxes, SSH)
+  $ codegraph web                   Same command under its alias
+
+Pick a symbol and you see who calls it on the left, its source in the middle,
+and what it calls on the right at the height of the line that calls it. Search
+with / (or Cmd-K), click a file path for the file's outline and its imports.
 
 The viewer listens on 127.0.0.1 only, so nothing on your network can reach it,
 and it is read-only: it opens an index that already exists and never changes
-your project or your graph. Requests from any other host are refused.
+your project or your graph. Requests from any other host are refused, and
+nothing is sent anywhere: no code, no paths, no analytics.
 
 Without --port it takes ${DEFAULT_UI_PORT}, or the next free port if that one is busy.
 
