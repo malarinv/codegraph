@@ -19,6 +19,8 @@
   import FlowCard from '../components/flow/FlowCard.svelte';
   import FlowLink from '../components/flow/FlowLink.svelte';
   import FlowEndCap from '../components/flow/FlowEndCap.svelte';
+  import ExportButtons from '../components/ExportButtons.svelte';
+  import { exportFilename, flowSvg } from '../lib/export-svg';
   import { fetchFlow, type WireFlow, type WireFlowPayload } from '../lib/api';
   import { live } from '../lib/live.svelte';
   import { navigate, symbolHref } from '../lib/router.svelte';
@@ -223,6 +225,30 @@
     }
     return 'The longest call path among the symbols you named, the same one codegraph_explore leads with.';
   }
+
+  /**
+   * The strip as it stands, for a PR comment or a README.
+   *
+   * Built from `layout` — the same object the canvas is drawing — so the image
+   * cannot say something the screen does not. The caption names the path,
+   * because an image pasted into a review has lost the header that did.
+   */
+  const exportLabel = $derived(
+    showAll && flows.length > 1
+      ? `all ${flows.length} paths`
+      : (activeFlow?.label ?? 'flow')
+  );
+
+  function buildSvg(scale: number): string {
+    if (layout === null) throw new Error('There is no strip to export yet.');
+    const hops = activeFlow?.hops.length ?? 0;
+    return flowSvg(layout, {
+      scale,
+      activeFlowId: picked,
+      showAll,
+      caption: showAll ? exportLabel : `${exportLabel}${hops > 1 ? ` · ${hops} hops` : ''}`,
+    });
+  }
 </script>
 
 <div class="flowview">
@@ -250,6 +276,9 @@
     {/if}
     {#if payload}
       <p class="note">{note(payload)}</p>
+    {/if}
+    {#if layout !== null}
+      <ExportButtons build={buildSvg} filename={exportFilename('flow', exportLabel)} />
     {/if}
   </header>
 

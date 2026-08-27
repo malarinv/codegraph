@@ -46,15 +46,38 @@ src/
   lib/flow-model.ts       the Flow strip's card/link geometry + the end cap — a DAG (pure)
   lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
   lib/entry-model.ts      the entry-points panel: rows, file groups, flow arming (pure)
+  lib/export-svg.ts       the Flow strip and the Map as a standalone SVG (pure)
+  lib/export-image.ts     rasterising that SVG to PNG, clipboard and download
   lib/live.svelte.ts      /api/events: two counters every screen refreshes from
   lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
-  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, map/, flow/, symbol/, file/, entry/
+  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, ExportButtons, map/, flow/, symbol/, file/, entry/
   views/                  one component per route
 ```
 
 Fonts (Archivo Variable, IBM Plex Mono) are vendored through `@fontsource*` and
 emitted into `dist/viewer/assets`: a local reader must work offline and must not
 announce the project to a font CDN.
+
+## Export
+
+The Flow strip's header and the Map's side panel carry **Copy image** (a PNG on
+the clipboard) and **Download SVG** (a file for a README). Both render the
+**light** theme whatever the viewer is set to — an image is read on somebody
+else's screen — with 24px of paper around the drawing, a caption naming the path
+or the root, and a "CodeGraph" mark in the corner.
+
+`export-svg.ts` **serialises the layout object**; it does not scrape the DOM.
+`buildFlowLayout` and `buildMapLayout` already compute every rectangle, port and
+curve before a component renders, so the image and the screen come from one
+piece of arithmetic and cannot disagree — and the exporter is a pure function
+that a test can run with no browser at all. The output is presentation-only SVG
+(no script, no `foreignObject`, no external reference), which is what GitHub
+will render in a README.
+
+Fonts travel as `font-family` stacks rather than embedded bytes. An SVG loaded
+as an image may not fetch a webfont, so a raster falls back to the platform's
+own monospace; every fallback in the stack advances at ~0.6em like IBM Plex
+Mono, so the code grid survives and only the letterforms change.
 
 ## Routes
 

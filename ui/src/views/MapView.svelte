@@ -18,6 +18,7 @@
   import ModuleNode from '../components/map/ModuleNode.svelte';
   import ModuleEdge from '../components/map/ModuleEdge.svelte';
   import MapSidePanel from '../components/map/MapSidePanel.svelte';
+  import { exportFilename, mapSvg } from '../lib/export-svg';
   import { fetchMap, type WireMapPayload } from '../lib/api';
   import { live } from '../lib/live.svelte';
   import { mapHref, navigate } from '../lib/router.svelte';
@@ -167,6 +168,25 @@
     navigate(mapHref({ root: next, depth, tests }));
   }
 
+  /**
+   * The map as it stands, for a README.
+   *
+   * Serialised from `layout` — the object the canvas is drawing — so the file
+   * carries the same layering, the same hidden thin links and the same
+   * selection the reader is looking at. SVG rather than PNG is the point here:
+   * a forty-module map is a wide, mostly-empty drawing that scales, and GitHub
+   * renders SVG in a README.
+   */
+  function buildSvg(scale: number): string {
+    if (layout === null) throw new Error('There is no map to export yet.');
+    const root = payload?.root ?? '';
+    return mapSvg(layout, {
+      scale,
+      selected,
+      caption: `${root || 'the project'} · ${layout.nodes.length} modules${selected ? ` · ${selected} selected` : ''}`,
+    });
+  }
+
   function setTests(next: boolean): void {
     selected = null;
     navigate(mapHref({ root, depth, tests: next }));
@@ -267,6 +287,8 @@
       {selected}
       includeTests={tests}
       files={selectedFiles}
+      buildSvg={buildSvg}
+      exportName={exportFilename('map', payload.root ?? '')}
       onToggleTests={setTests}
       onSelectRoot={setRoot}
       onSelect={(id) => (selected = id)}

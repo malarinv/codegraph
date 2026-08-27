@@ -11,6 +11,7 @@
   can audit is a diagram that gets believed too much.
 -->
 <script lang="ts">
+  import ExportButtons from '../ExportButtons.svelte';
   import { fileHref } from '../../lib/router.svelte';
   import { plural } from '../../lib/symbol-model';
   import type { WireMapLink, WireMapPayload } from '../../lib/api';
@@ -25,6 +26,10 @@
     onToggleTests: (value: boolean) => void;
     onSelectRoot: (root: string) => void;
     onSelect: (id: string | null) => void;
+    /** Builds the map as an SVG at a given device-pixel scale. */
+    buildSvg: (scale: number) => string;
+    /** File stem for a downloaded map, without an extension. */
+    exportName: string;
   }
 
   let {
@@ -36,6 +41,8 @@
     onToggleTests,
     onSelectRoot,
     onSelect,
+    buildSvg,
+    exportName,
   }: Props = $props();
 
   const selectedModule = $derived(
@@ -69,6 +76,10 @@
     depends on, so reading top to bottom follows the dependency direction. Line weight is how many
     calls, imports and type references cross the link.
   </p>
+
+  <!-- The map is the thing people paste into a README, so the way out sits
+       directly under the sentence explaining what it is. -->
+  <ExportButtons build={buildSvg} filename={exportName} />
 
   <label class="field">
     <span>Showing</span>

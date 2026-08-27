@@ -107,6 +107,16 @@ It is honest about what it leaves out. Links carrying only a handful of referenc
 
 The map opens on your project's source directory. The picker switches to any other top-level folder or the whole repository, the checkbox brings test modules in, and `?depth=2` in the address splits a large folder into its sub-folders — the useful setting on a monorepo. What you are looking at lives in the URL, so the view is shareable.
 
+## Take the picture with you
+
+The flow strip and the map both carry **Copy image** and **Download SVG**.
+
+Copy image puts a PNG on the clipboard, ready to paste into a pull-request comment or a chat — the fastest way to say "this is what your change touches" without asking anyone to install something. Download SVG saves a file for a README: it is real text rather than a bitmap, so it stays sharp at any size and the symbol names in it are selectable and searchable.
+
+Both render the **light** theme whatever you are reading in, because the image is going to be read on somebody else's screen. Both carry a caption saying what the picture is — the path, or the root and how many modules — and a small CodeGraph mark in the corner. What you export is exactly what is on screen: the same hops, the same dashed dynamic-dispatch links, the same modules dimmed or brought forward by your selection, the same links hidden for being thin.
+
+An eight-hop strip comes out around half a megabyte, well inside what GitHub accepts inline.
+
 ## Options
 
 | | |

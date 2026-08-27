@@ -285,6 +285,38 @@ Three banner variants, because what follows the dash is what the screen actually
 
 Measured: banner 360 ms after a save; toast 440 ms after `codegraph sync` returns; 0 requests in 4 idle seconds.
 
+### 3.9 Export (CG-55)
+"Copy image" and "Download SVG" on the Flow strip's header and in the Map's side panel. The image renders the **light** theme
+whatever the viewer is set to, at **2x** device pixels for the raster, with **24px** of `--paper` padding around the drawing and a
+"CodeGraph" mark in 11px `--mono` `--ink-3` at the bottom right; a caption in the same type sits at the bottom left, naming the path
+or the root. SVG keeps fonts as `font-family` **stacks** (no embedding) and inlines the token colours as literal hex. PNG for an
+8-hop strip stays under 1 MB.
+
+**As built.** The exporter (`ui/src/lib/export-svg.ts`) **serialises the layout object**, it does not scrape the DOM — no
+`html-to-image`, no `foreignObject`, no new dependency. `buildFlowLayout` and `buildMapLayout` already compute every rectangle, port
+and curve before anything renders, so the image and the screen come from one piece of arithmetic and cannot drift apart; the export
+is a pure function testable with no browser. The price, and the thing to know before changing a card's padding: the *visual* rules
+(paddings, baselines, type sizes) are stated twice — in the component's `<style>` and in the exporter — while the *placing* numbers
+(heights, widths, columns) are imported from the layout models and stated once.
+
+- Output is presentation-only SVG (`rect`, `line`, `path`, `polygon`, `text`, `tspan`, `clipPath`) — no script, no `foreignObject`,
+  no external reference, no `data:` URL — which is what GitHub's sanitiser will accept in a README.
+- `scale` multiplies only the root `width`/`height`; the `viewBox` stays in CSS pixels, so the raster step draws an image whose
+  *intrinsic* size is already 2x rather than upscaling a 1x bitmap.
+- Fonts fall back through the stack in a raster (an SVG loaded as an image may not fetch a webfont). Every fallback in the mono
+  stack advances at ~0.6em like IBM Plex Mono, so the code grid survives; only the letterforms change. Embedding would add ~90 kB of
+  base64 to every export.
+- Text is truncated arithmetically with an ellipsis — the twin of the components' `text-overflow` — and clipped as well, so a wider
+  fallback font cannot spill a source line out of a card.
+- The end cap measures its own wrapped lines rather than trusting `endCapHeight`'s character estimate: a `min-height` box on screen
+  can grow, an image cannot.
+- The clipboard write is attempted with the `ClipboardItem` **promise** form (Safari discards the gesture across an `await`), and
+  falls back to downloading the PNG, saying which happened rather than claiming a copy it did not make.
+
+Measured on this repository: `execute -> rowToFileRecord` (8 hops) exports 3690x253 CSS px, **491 kB** PNG at 2x / 38 kB SVG; the
+16-module map exports 566x1077 and reproduces the on-screen picture exactly (16 boxes, 52 links, 9 layer rules, both band labels;
+with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a
