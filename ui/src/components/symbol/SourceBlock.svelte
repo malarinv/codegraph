@@ -4,21 +4,25 @@
 
   Two things make this more than a <pre>:
 
-  * The lexer state is threaded across lines AND across the gaps between
-    windows, so the first line after a skipped block is not mis-read as the
-    inside of a comment that closed 200 lines ago.
+  * Syntax classification arrives already done, from `/api/source` — real
+    TextMate grammars, run server-side, indexed by file line. The whole slice
+    is tokenised in one pass there, so a window that starts 200 lines into a
+    body still knows it is inside a block comment; nothing is re-lexed here.
   * Each ref is matched to an actual token rather than to a column, because the
     recorded column points at the start of the calling expression — see
-    `assignRefs`.
+    `assignRefs`. The overlay CLAIMS a token the highlighter produced; it never
+    re-cuts one, which is what keeps the accent underline landing on the
+    callee's own name whatever boundaries a grammar chose.
 -->
 <script lang="ts">
-  import { newLexState, tokenClass, tokenize, type Token } from '../../lib/highlight';
+  import { tokenClass, type Token } from '../../lib/highlight';
   import { assignRefs, type CodeBlock, type LineRef } from '../../lib/symbol-model';
   import { hot } from '../../lib/focus.svelte';
 
   interface Props {
     block: CodeBlock;
-    language: string;
+    /** Classified source by 1-based file line — see `tokensByLine`. */
+    tokens: Map<number, Token[]>;
     refs: Map<number, LineRef[]>;
     /** The line the definition's own name sits on — it is set in bold there. */
     defLine: number;
@@ -28,7 +32,7 @@
     onfollow: (ref: LineRef) => void;
   }
 
-  let { block, language, refs, defLine, defName, highlight, onfollow }: Props = $props();
+  let { block, tokens, refs, defLine, defName, highlight, onfollow }: Props = $props();
 
   interface Part {
     text: string;
@@ -52,33 +56,37 @@
     lines: RenderedLine[];
   }
 
-  let chunks = $derived.by<Chunk[]>(() => {
-    const state = newLexState();
-    return block.windows.map((window, windowIndex) => ({
+  let chunks = $derived.by<Chunk[]>(() =>
+    block.windows.map((window, windowIndex) => ({
       gapBefore: windowIndex === 0 ? 0 : (block.gapsAfter[windowIndex - 1] ?? 0),
       lines: window.lines.map((text, offset) => {
         const n = window.start + offset;
-        const tokens = tokenize(text, state, language);
+        const lineTokens = tokens.get(n) ?? [{ cls: 'other' as const, text, col: 0 }];
         const lineRefs = refs.get(n) ?? [];
-        const claimed = assignRefs(tokens, lineRefs);
+        const claimed = assignRefs(lineTokens, lineRefs);
         return {
           n,
-          parts: toParts(tokens, claimed, n === defLine ? defName : null),
+          parts: toParts(lineTokens, claimed, n === defLine ? defName : null),
           port: portFor(lineRefs),
           targets: [...new Set(lineRefs.map((r) => r.targetId).filter((id): id is string => !!id))],
         };
       }),
-    }));
-  });
+    }))
+  );
 
-  function toParts(tokens: Token[], claimed: Map<number, LineRef>, definition: string | null): Part[] {
-    return tokens.map((token, index) => {
+  function toParts(line: Token[], claimed: Map<number, LineRef>, definition: string | null): Part[] {
+    return line.map((token, index) => {
       const ref = claimed.get(index) ?? null;
       return {
         text: token.text,
         cls: ref ? null : tokenClass(token.cls),
         ref,
-        def: !ref && definition !== null && token.cls === 'ident' && token.text === definition,
+        def:
+          !ref &&
+          definition !== null &&
+          token.text === definition &&
+          token.cls !== 'comment' &&
+          token.cls !== 'string',
       };
     });
   }
@@ -215,9 +223,11 @@
     font-size: 11px;
   }
 
-  /* ---- token classes (near-monochrome by design, spec §2.2) ---- */
+  /* ---- token classes (near-monochrome by design, spec §2.2) ----
+     Comments use --code-comment rather than --ink-3: the spec's colour reads
+     at 3.46:1 on paper, under AA for 12.5px text. See app.css. */
   .t-c {
-    color: var(--ink-3);
+    color: var(--code-comment);
   }
 
   .t-s {

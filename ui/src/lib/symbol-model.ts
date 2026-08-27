@@ -286,6 +286,13 @@ function outsideRefs(outside: WireOutsideIndex): Array<{ line: number; ref: Line
  * unclaimed one, then the last — is what makes `this.mutex.withLock(…)` mark
  * `withLock` instead of `this`.
  *
+ * A candidate is any token whose TEXT is the identifier and that is not inside
+ * a comment or a string. Deliberately not "any token the highlighter called an
+ * identifier": grammars disagree about that constantly — Go scopes `string` as
+ * `storage.type`, Java scopes a declared type name the same way — and a link
+ * that vanished because a grammar had an opinion about a scope name would be a
+ * highlighting change silently breaking navigation.
+ *
  * @returns token index → the ref that claimed it
  */
 export function assignRefs(
@@ -296,7 +303,8 @@ export function assignRefs(
   for (const ref of refs) {
     const candidates: number[] = [];
     tokens.forEach((token, index) => {
-      if (token.cls === 'ident' && token.text === ref.ident) candidates.push(index);
+      if (token.cls === 'comment' || token.cls === 'string') return;
+      if (token.text === ref.ident) candidates.push(index);
     });
     if (candidates.length === 0) continue;
 

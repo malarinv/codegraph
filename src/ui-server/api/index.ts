@@ -87,7 +87,9 @@ const API_INDEX = {
 export function createGraphApi(options: GraphApiOptions): GraphApi {
   const session = new GraphSession(options.projectRoot);
 
-  const handler: UiApiHandler = (_req, res, ctx) => {
+  // Async because `/api/source` highlights: everything else answers straight
+  // out of SQLite and resolves on the same tick.
+  const handler: UiApiHandler = async (_req, res, ctx) => {
     const route = normalize(ctx.pathname);
     try {
       switch (route) {
@@ -104,7 +106,7 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
         case '/api/nodes':
           return ok(res, buildNodeRefs(session.acquire(), ctx.query), ctx.method);
         case '/api/source':
-          return ok(res, buildSource(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
+          return ok(res, await buildSource(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         default:
           return dispatchPathRoutes(route, res, ctx, session);
       }

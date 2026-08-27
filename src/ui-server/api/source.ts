@@ -30,6 +30,7 @@ import * as path from 'path';
 import type { FileRecord } from '../../types';
 import type { CodeGraph } from '../../index';
 import { resolveProjectFile } from '../security';
+import { highlightLines, type HighlightResult } from '../highlight';
 import { ApiError, badRequest, intParam, notFound, textParam } from './respond';
 
 /**
@@ -186,13 +187,23 @@ export interface SourceResult {
   lines?: string[];
   truncated?: boolean;
   reason?: string;
+  /**
+   * The same lines, classified for the code block — one entry per line, each a
+   * list of `[classId, text]` pairs indexed into `highlight.classes`.
+   *
+   * It rides with the slice rather than living behind its own endpoint because
+   * the two are only ever wanted together, and because a second round-trip
+   * would let the viewer paint unhighlighted source and then reflow it. Absent
+   * whenever `lines` is — a drifted file is not served at all.
+   */
+  highlight?: HighlightResult;
 }
 
-export function buildSource(
+export async function buildSource(
   cg: CodeGraph,
   projectRoot: string,
   query: URLSearchParams
-): SourceResult {
+): Promise<SourceResult> {
   const requested = textParam(query, 'file');
   // Refusal first, index lookup second — see `resolveRequestedFile`.
   const { record, storedPath, absolute } = resolveRequestedFile(cg, projectRoot, requested);
@@ -265,13 +276,21 @@ export function buildSource(
   const start = from;
   const requestedEnd = to === 0 ? all.length : Math.min(to, all.length);
   const end = Math.min(requestedEnd, start + MAX_SOURCE_LINES - 1);
+  const slice = all.slice(start - 1, end);
 
   return {
     ...base,
     totalLines: all.length,
     from: start,
     to: end,
-    lines: all.slice(start - 1, end),
+    lines: slice,
     truncated: end < requestedEnd,
+    // Keyed on the content hash, so the cache is invalidated by the file
+    // changing rather than by a clock, and two viewers looking at the same
+    // symbol share one tokenisation.
+    highlight: await highlightLines(slice, {
+      language: record.language,
+      cacheKey: `${record.contentHash}:${start}:${end}`,
+    }),
   };
 }

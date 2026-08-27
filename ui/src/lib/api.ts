@@ -11,6 +11,8 @@
  * carries the server's own sentence instead of "Failed to fetch".
  */
 
+import type { WireHighlight } from './highlight';
+
 /* ---------------------------------------------------------------- shapes -- */
 
 export type NodeKind = string;
@@ -153,6 +155,13 @@ export interface WireSource {
   lines?: string[];
   truncated?: boolean;
   reason?: string;
+  /**
+   * The same lines, classified by the server's TextMate grammars — one entry
+   * per line, each a list of `[classId, text]` pairs indexed into `classes`.
+   * Absent whenever `lines` is, and `engine: 'plain'` whenever no grammar
+   * covers the file. See `lib/highlight.ts`.
+   */
+  highlight?: WireHighlight;
 }
 
 export interface WireBlastScale {

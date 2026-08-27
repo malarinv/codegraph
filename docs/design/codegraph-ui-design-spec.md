@@ -61,10 +61,18 @@ media/`[data-theme]` block. `body { background: var(--paper); color: var(--ink) 
   section labels (`Called by`, `Calls`, `Blast radius`) `600 13px` sans; rail rows `12.5px` mono name + `11px` sans meta;
   chips `11px` mono; line numbers `11px` mono in `--ink-4`; badges `11.5px`; map node label `13px` mono, count `11px`;
   flow card name `600 13px` mono, window `12px/19px` mono; trail `12px` mono. Headings sentence case, `text-wrap: balance`.
-- Code token classes: comment `--ink-3`; string `--ink-2`; keyword weight 500 (same ink); number `--ink-2`; definition
+- Code token classes: comment `--code-comment`; string `--ink-2`; keyword weight 500 (same ink); number `--ink-2`; definition
   name on its own line weight 600; **call-site link** = `--accent`, underline `--accent-line`, offset 3px, hover/hot fill
   `--accent-soft`; uncertain link = `--ink-2`, dotted underline `--ink-4`; link to a symbol outside the index = `--ink-2`,
   underline `--rule-soft`, not clickable.
+  - *As built (CG-43) — comments are `--code-comment`, not `--ink-3`.* `--ink-3` measures 3.46:1 on `--paper` and 3.00:1 on
+    the hot-line tint `--accent-soft`, both under the 4.5:1 that 12.5px body text needs. `--code-comment` is the smallest
+    step along the same warm-grey ramp that clears 4.5:1 on every background a code line can have (`#6a675d` light —
+    paper 5.23, paper-2 4.92, accent-soft 4.53; `#8e8b81` dark — 5.36 / 5.10 / 4.51) while staying quieter than the
+    `--ink-2` strings and numbers use, so the recession order above is unchanged. Everything else in this list passes as
+    specified: ink 16.9/16.2, ink-2 7.03/8.89, accent 9.25/6.91 (8.02/5.80 on `--accent-soft`).
+  - *Line numbers remain `--ink-4` (1.99:1 light, 2.69:1 dark) — a known contrast gap, left as specified rather than
+    changed inside a rendering task. Worth a design call before phase 2.*
 
 ### 2.3 Kind glyphs
 
@@ -188,6 +196,20 @@ point.
   fallback if crossing quality demands it (never ELK). Symbol view = DOM + one SVG overlay (`ResizeObserver` re-layout).
 - Shiki (JavaScript regex engine, lazy grammars, custom near-monochrome theme as in §2.2) server-side in `/api/source`; tree-sitter-derived
   tokens replace it in phase 3.
+  - *As built (CG-43).* `@shikijs/core` + `@shikijs/engine-javascript` are runtime dependencies (~5 MB installed, no wasm, no native
+    module); `@shikijs/langs` is a **devDependency** and `npm run build:textmate` (`scripts/prune-grammars.mjs`) writes only the
+    closure the engine's 40-odd languages reach — 56 grammars, 2.6 MB — into **`dist/textmate/`**, checked by `scripts/check-ui-build.mjs`.
+    Shipping all 722 grammars would have been 11 MB.
+  - The theme classifies rather than colours: its foregrounds are sentinels the server maps to class names (`comment`, `string`,
+    `keyword`, `number`, `ident`, `other`), and the viewer paints them from the CSS custom properties above — so **one token stream
+    serves light and dark** with no refetch when `prefers-color-scheme` flips, and the ramp lives only in `ui/src/app.css`.
+  - Every code token is split into identifier runs before it goes on the wire, so the graph's call-site overlay claims a token the
+    highlighter produced rather than re-cutting a line — which is what keeps a link landing on the callee's own name whatever
+    boundaries a grammar chose, and keeps links working in the plain-text fallback.
+  - Measured on this machine (Shiki 4.4.3, JS regex engine, 3 000 lines cold): Python 35–47 ms, Go 43–57 ms, **TypeScript ~700 ms** —
+    the TS TextMate grammar is 5–7× the cost of any other and the oniguruma-wasm engine would run it in ~120 ms. Slices are therefore
+    cached by content hash + range, so a re-render (resize, theme flip, stepping back through the trail) is a map lookup (< 10 ms);
+    a symbol-sized slice (~280 lines of TS) is ~50 ms cold. Phase 1 only ever requests one symbol's range.
 - No native modules; no runtime dependency for the UI itself; the CLI serves **`dist/viewer/`** over `node:http`, loopback only.
   (Not `dist/ui/` — `src/ui/` is the engine's *terminal* ui and tsc already compiles it there; see `ui/README.md`.)
 

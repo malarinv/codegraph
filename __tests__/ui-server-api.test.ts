@@ -658,6 +658,29 @@ describe('GET /api/source', () => {
     expect(body.lines).toHaveLength(node.node.lines);
   });
 
+  it('carries the classified source beside the lines, one entry per line', async () => {
+    const body = await getJson('/api/source?file=src/cache.ts&from=1&to=3');
+    // Highlighting rides with the slice rather than behind its own endpoint:
+    // the two are only ever wanted together, and a second round-trip would let
+    // the code block paint unhighlighted source and then reflow it.
+    expect(body.highlight).toBeTruthy();
+    expect(body.highlight.classes).toEqual([
+      'other',
+      'ident',
+      'comment',
+      'string',
+      'keyword',
+      'number',
+    ]);
+    expect(body.highlight.lines).toHaveLength(body.lines.length);
+    // Every line's tokens reproduce that line exactly — the code block renders
+    // these, not the raw string.
+    for (let i = 0; i < body.lines.length; i++) {
+      const rebuilt = body.highlight.lines[i].map(([, text]: [number, string]) => text).join('');
+      expect(rebuilt).toBe(body.lines[i]);
+    }
+  });
+
   it('refuses to slice a file that changed on disk after the last sync', async () => {
     const target = path.join(projectRoot, 'src', 'handler.ts');
     const original = fs.readFileSync(target);
@@ -668,6 +691,9 @@ describe('GET /api/source', () => {
       expect(body.drift).toBe(true);
       // The whole point: no slice, rather than a slice of the wrong lines.
       expect(body.lines).toBeUndefined();
+      // And nothing to render it with either — a highlight with no source is
+      // just a second way to draw the wrong lines.
+      expect(body.highlight).toBeUndefined();
       expect(body.reason).toContain('changed on disk after the last index sync');
 
       // And every screen that renders indexed line ranges is told.

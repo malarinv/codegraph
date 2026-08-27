@@ -30,6 +30,18 @@
   --amber: #8a5a0b;
   --amber-soft: #f3e9d2;
 
+  /* The one code colour that is not a plain re-use of the ink ramp.
+     The spec asks for comments at --ink-3; measured against --paper that
+     is 3.46:1 and against the hot-line tint --accent-soft it is 3.00:1,
+     both under the 4.5:1 an AA reading of 12.5px body text needs. This is
+     the smallest step DOWN the same warm-grey ramp that clears 4.5:1 on
+     all three backgrounds a code line can have (paper 5.23, paper-2 4.92,
+     accent-soft 4.53) while staying quieter than --ink-2, which strings
+     and numbers use — so the recession order the spec describes is
+     unchanged, only legible. Dark needed the mirror step UP (4.51 on
+     accent-soft, where --ink-3 was 4.10). */
+  --code-comment: #6a675d;
+
   --sans: 'Archivo Variable', 'Archivo', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --code-size: 12.5px;
@@ -66,6 +78,7 @@
     --accent-line: #6b3a42;
     --amber: #d9a94a;
     --amber-soft: #2e2716;
+    --code-comment: #8e8b81;
   }
 }
 
@@ -87,6 +100,7 @@
   --accent-line: #6b3a42;
   --amber: #d9a94a;
   --amber-soft: #2e2716;
+  --code-comment: #8e8b81;
 }
 
 /* ---------- reset ---------- */

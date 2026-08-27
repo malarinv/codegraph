@@ -13,6 +13,11 @@
  * where tsc puts the TERMINAL ui, so a mis-pointed outDir silently deletes
  * modules the CLI requires at startup.
  *
+ * The pruned TextMate grammars in dist/textmate/ are checked the same way and
+ * for the same reason: without them every file the viewer shows falls back to
+ * unhighlighted text, which looks like a styling bug rather than a missing
+ * build step.
+ *
  * Usage: node scripts/check-ui-build.mjs [--root <dir>]
  *   --root  directory holding dist/ (default: the repo root). The release
  *           bundler points this at its staging dir to verify the copy.
@@ -90,4 +95,36 @@ for (const compiled of [join('bin', 'codegraph.js'), 'index.js', join('ui', 'shi
   }
 }
 
-console.log(`[check-ui-build] dist/viewer ok (index.html + ${assets} referenced asset(s)); dist/ engine intact`);
+// The pruned syntax grammars (scripts/prune-grammars.mjs). Their absence is
+// survivable at runtime — source is served unhighlighted — which is exactly why
+// it has to fail here: nothing downstream would ever complain.
+const textmateDir = join(root, 'dist', 'textmate');
+const manifestPath = join(textmateDir, 'manifest.json');
+if (!existsSync(manifestPath)) {
+  fail(
+    `missing ${manifestPath}`,
+    staged
+      ? 'this bundle was assembled before the syntax grammars were added, or dist/textmate was not copied'
+      : 'run `npm run build:textmate` (it needs @shikijs/langs from devDependencies)'
+  );
+}
+
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const languages = Object.keys(manifest.languages ?? {});
+if (languages.length === 0) fail('dist/textmate/manifest.json lists no languages');
+
+const grammarFiles = new Set(Object.values(manifest.languages).flat());
+const missingGrammars = [...grammarFiles].filter(
+  (name) => !existsSync(join(textmateDir, `${name}.json`))
+);
+if (missingGrammars.length > 0) {
+  fail(
+    `dist/textmate is missing ${missingGrammars.length} grammar file(s): ${missingGrammars.join(', ')}`,
+    'the prune step was interrupted or dist/textmate was copied incompletely'
+  );
+}
+
+console.log(
+  `[check-ui-build] dist/viewer ok (index.html + ${assets} referenced asset(s)); ` +
+    `dist/textmate ok (${languages.length} languages, ${grammarFiles.size} grammars); dist/ engine intact`
+);

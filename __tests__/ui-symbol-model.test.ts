@@ -26,7 +26,7 @@ import {
   HEAD_LINES,
   type LineRef,
 } from '../ui/src/lib/symbol-model';
-import { newLexState, tokenize } from '../ui/src/lib/highlight';
+import { decodeLine, plainLine, tokensByLine } from '../ui/src/lib/highlight';
 import type { WireRelation, WireSymbolPayload } from '../ui/src/lib/api';
 
 /* ------------------------------------------------------------- fixtures -- */
@@ -204,7 +204,7 @@ describe('buildCodeBlock', () => {
 /* ----------------------------------------------------------------- refs -- */
 
 describe('assignRefs', () => {
-  const toks = (line: string) => tokenize(line, newLexState(), 'typescript');
+  const toks = (line: string) => plainLine(line);
   const ref = (over: Partial<LineRef>): LineRef => ({
     ident: 'withLock',
     col: null,
@@ -249,10 +249,36 @@ describe('assignRefs', () => {
     expect(assignRefs(toks('return 1;'), [ref({ ident: 'nowhere' })]).size).toBe(0);
   });
 
-  it('never marks a keyword, a string or a comment as a call site', () => {
-    const tokens = toks('// call render here');
-    expect(assignRefs(tokens, [ref({ ident: 'render' })]).size).toBe(0);
-    expect(assignRefs(toks('const s = "render";'), [ref({ ident: 'render' })]).size).toBe(0);
+  it('never marks a word inside a comment or a string as a call site', () => {
+    // The classification comes from the server's grammar; what this pins is
+    // that the overlay respects it. Anything else — a keyword, a type name a
+    // grammar happened to scope as `storage.type` — stays claimable, because a
+    // grammar's opinion about a scope name must not decide what navigates.
+    const comment = [
+      { cls: 'comment', text: '// call render here', col: 0 },
+    ];
+    expect(assignRefs(comment, [ref({ ident: 'render' })]).size).toBe(0);
+
+    const string = [
+      { cls: 'keyword', text: 'const', col: 0 },
+      { cls: 'other', text: ' s = ', col: 5 },
+      { cls: 'string', text: '"render"', col: 10 },
+      { cls: 'other', text: ';', col: 18 },
+    ];
+    expect(assignRefs(string, [ref({ ident: 'render' })]).size).toBe(0);
+  });
+
+  it('still claims an identifier a grammar classified as something else', () => {
+    // Go scopes `string` as storage.type; Java does the same to a declared
+    // type name. A link that disappeared over that would be a highlighting
+    // change silently breaking navigation.
+    const tokens = [
+      { cls: 'keyword', text: 'Duration', col: 0 },
+      { cls: 'other', text: '.Since(t)', col: 8 },
+    ];
+    const claimed = assignRefs(tokens, [ref({ ident: 'Duration', col: 0 })]);
+    expect(claimed.size).toBe(1);
+    expect(tokens[[...claimed.keys()][0] as number]?.text).toBe('Duration');
   });
 });
 
@@ -456,90 +482,96 @@ describe('showsBody', () => {
 
 /* ---------------------------------------------------------------- lexer -- */
 
-describe('tokenize', () => {
-  const kinds = (line: string, state = newLexState(), language = 'typescript') =>
-    tokenize(line, state, language).map((t) => `${t.cls}:${t.text}`);
+describe('client-side token decoding', () => {
+  // The classification itself is the server's job (`src/ui-server/highlight/`,
+  // real TextMate grammars); what is worth pinning here is the decoding — the
+  // columns the call-site overlay matches against, and the plain fallback that
+  // has to keep links working when no grammar covers a file.
+  const CLASSES = ['other', 'ident', 'comment', 'string', 'keyword', 'number'];
 
-  it('separates the four things the near-monochrome theme colours', () => {
-    expect(kinds('const x = 1; // note')).toEqual([
+  it('resolves class ids through the payload table', () => {
+    const tokens = decodeLine(
+      [
+        [4, 'const'],
+        [0, ' '],
+        [1, 'x'],
+        [0, ' = '],
+        [5, '1'],
+        [0, '; '],
+        [2, '// note'],
+      ],
+      CLASSES
+    );
+    expect(tokens.map((t) => `${t.cls}:${t.text}`)).toEqual([
       'keyword:const',
-      'space: ',
+      'other: ',
       'ident:x',
-      'space: ',
-      'punct:=',
-      'space: ',
+      'other: = ',
       'number:1',
-      'punct:;',
-      'space: ',
+      'other:; ',
       'comment:// note',
     ]);
   });
 
-  it('carries a block comment across lines so the next line is not read as code', () => {
-    const state = newLexState();
-    expect(kinds('/* open', state)).toEqual(['comment:/* open']);
-    expect(state.block).toBe(true);
-    expect(kinds('still comment', state)).toEqual(['comment:still comment']);
-    expect(kinds('done */ const x = 1;', state)).toEqual([
-      'comment:done */',
-      'space: ',
-      'keyword:const',
-      'space: ',
-      'ident:x',
-      'space: ',
-      'punct:=',
-      'space: ',
-      'number:1',
-      'punct:;',
+  it('derives each column from the running text, which is how a ref finds its identifier', () => {
+    const tokens = decodeLine(
+      [
+        [0, '  '],
+        [4, 'return'],
+        [0, ' '],
+        [1, 'render'],
+        [0, '();'],
+      ],
+      CLASSES
+    );
+    expect(tokens.find((t) => t.text === 'render')?.col).toBe('  return '.length);
+    expect(tokens.at(-1)?.col).toBe('  return render'.length);
+  });
+
+  it('treats an unknown class id as unstyled rather than throwing', () => {
+    expect(decodeLine([[99, 'x']], CLASSES)[0]?.cls).toBe('other');
+  });
+
+  it('splits identifiers even with no grammar, so the links still land', () => {
+    expect(plainLine('  return this.mutex.withLock();').map((t) => `${t.cls}:${t.text}`)).toEqual([
+      'other:  ',
+      'ident:return',
+      'other: ',
+      'ident:this',
+      'other:.',
+      'ident:mutex',
+      'other:.',
+      'ident:withLock',
+      'other:();',
     ]);
-    expect(state.block).toBe(false);
   });
 
-  it('carries a template literal across lines, and closes it on the right backtick', () => {
-    const state = newLexState();
-    expect(kinds('const s = `open', state)).toContain('string:`open');
-    expect(state.stringEnd).toBe('`');
-    expect(kinds('closed` + x', state)).toEqual([
-      'string:closed`',
-      'space: ',
-      'punct:+',
-      'space: ',
-      'ident:x',
-    ]);
+  it('splits non-ASCII identifiers, because a symbol name can be one', () => {
+    expect(plainLine('取得データ()').map((t) => t.cls)).toEqual(['ident', 'other']);
   });
 
-  it('does not eat the rest of a window on an apostrophe in prose', () => {
-    // An unterminated single-line quote is punctuation in English far more
-    // often than a real string, so it stops at the line.
-    const state = newLexState();
-    kinds("// it's fine", state);
-    expect(state.stringEnd).toBeNull();
-    const after = kinds('const x = 1;', state);
-    expect(after[0]).toBe('keyword:const');
+  it('keys a slice by real file line, not by offset into the slice', () => {
+    const byLine = tokensByLine(['a();', 'b();'], 120, {
+      engine: 'shiki',
+      grammar: 'typescript',
+      classes: CLASSES,
+      lines: [
+        [
+          [1, 'a'],
+          [0, '();'],
+        ],
+        [
+          [1, 'b'],
+          [0, '();'],
+        ],
+      ],
+    });
+    expect([...byLine.keys()]).toEqual([120, 121]);
+    expect(byLine.get(121)?.[0]?.text).toBe('b');
   });
 
-  it('reads a # comment as a comment in Python and as code in TypeScript', () => {
-    expect(kinds('# note', newLexState(), 'python')).toEqual(['comment:# note']);
-    expect(kinds('x = 1  # note', newLexState(), 'python').at(-1)).toBe('comment:# note');
-    expect(kinds('# note', newLexState(), 'typescript')[0]).not.toBe('comment:# note');
-  });
-
-  it('closes a Python triple-quoted string on the triple, not on the first quote', () => {
-    const state = newLexState();
-    expect(kinds('"""docstring', state, 'python')).toEqual(['string:"""docstring']);
-    expect(state.stringEnd).toBe('"""');
-    expect(kinds('more"""', state, 'python')).toEqual(['string:more"""']);
-  });
-
-  it("reports each token's column, which is how a ref finds its identifier", () => {
-    const tokens = tokenize('  return render();', newLexState(), 'typescript');
-    const render = tokens.find((t) => t.text === 'render');
-    expect(render?.col).toBe('  return '.length);
-  });
-
-  it('falls back to a C-family reading for a language it has no table for', () => {
-    // Silence beats a wrong claim, but a plain `//` comment is not a claim
-    // worth getting wrong in a language we have not enumerated.
-    expect(kinds('// note', newLexState(), 'some-new-language')).toEqual(['comment:// note']);
+  it('falls back per line when the payload carries no highlight block at all', () => {
+    const byLine = tokensByLine(['render();'], 5, undefined);
+    expect(byLine.get(5)?.map((t) => t.cls)).toEqual(['ident', 'other']);
   });
 });

@@ -23,6 +23,7 @@
   import SourceBlock from '../components/symbol/SourceBlock.svelte';
   import SymbolHeader from '../components/symbol/SymbolHeader.svelte';
   import { ApiFailure, fetchSource, fetchSymbol, type WireNodeRef, type WireSource, type WireSymbolPayload } from '../lib/api';
+  import { tokensByLine, type Token } from '../lib/highlight';
   import { hot, railFocus } from '../lib/focus.svelte';
   import { project } from '../lib/project.svelte';
   import {
@@ -146,6 +147,18 @@
     if (!payload || !source?.lines) return null;
     const from = source.from ?? payload.node.line;
     return buildCodeBlock(from, source.lines, graphCallLines(payload));
+  });
+
+  /**
+   * Classified source by file line, from `/api/source`.
+   *
+   * Keyed by real file line rather than by window offset, because a windowed
+   * body renumbers nothing: the gaps are holes in the same numbering, and the
+   * code block looks a line up by the number it prints in the gutter.
+   */
+  let codeTokens = $derived.by(() => {
+    if (!source?.lines) return new Map<number, Token[]>();
+    return tokensByLine(source.lines, source.from ?? 1, source.highlight);
   });
 
   let origin = $derived(arrivedFrom());
@@ -432,7 +445,7 @@
           {:else if codeBlock}
             <SourceBlock
               block={codeBlock}
-              language={payload.node.language}
+              tokens={codeTokens}
               {refs}
               defLine={payload.node.line}
               defName={payload.node.name}
