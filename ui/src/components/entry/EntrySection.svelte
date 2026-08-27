@@ -14,7 +14,7 @@
 -->
 <script lang="ts">
   import KindGlyph from '../KindGlyph.svelte';
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import type { EntryRow, EntrySection } from '../../lib/entry-model';
 
   interface Props {

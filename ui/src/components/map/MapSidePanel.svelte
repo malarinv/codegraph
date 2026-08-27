@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
   import ExportButtons from '../ExportButtons.svelte';
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import { plural } from '../../lib/symbol-model';
   import type { WireMapLink, WireMapPayload } from '../../lib/api';
   import type { MapLayout } from '../../lib/map-model';

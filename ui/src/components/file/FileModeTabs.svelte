@@ -6,7 +6,7 @@
   the same mode, and `?src=1` is how it travels.
 -->
 <script lang="ts">
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
 
   interface Props {
     path: string;

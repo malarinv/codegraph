@@ -13,7 +13,7 @@
  * link reproduces the walk rather than starting a fresh one at the same symbol.
  */
 
-import { fileHref, navigate, symbolHref } from './router.svelte';
+import { fileHref, navigate, symbolHref } from './navigation';
 import { encodeTrail, trail, type HopDirection } from './trail.svelte';
 import type { EntryTarget } from './entry-model';
 

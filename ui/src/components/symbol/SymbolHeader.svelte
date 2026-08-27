@@ -10,7 +10,7 @@
 -->
 <script lang="ts">
   import KindGlyph from '../KindGlyph.svelte';
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import { kindPhrase, plural } from '../../lib/symbol-model';
   import type {
     WireNodeDetail,

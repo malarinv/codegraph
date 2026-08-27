@@ -13,7 +13,7 @@
 -->
 <script lang="ts">
   import KindGlyph from '../KindGlyph.svelte';
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import { hot, railFocus } from '../../lib/focus.svelte';
   import { basename, plural, type CallerRailModel, type CallerRow } from '../../lib/symbol-model';
   import type { WireNodeRef } from '../../lib/api';

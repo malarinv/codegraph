@@ -334,7 +334,7 @@ with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
     roughly double the token count on a dense line.
   - The classification is a class NAME, never a colour, and the viewer paints it from the CSS custom properties above — so **one
     token stream serves light and dark** with no refetch when `prefers-color-scheme` flips, and the ramp lives only in
-    `ui/src/app.css`. `type` is a distinct class painted at plain ink: the colouring is near-monochrome and a type name is not one
+    `ui/src/lib/theme.css`. `type` is a distinct class painted at plain ink: the colouring is near-monochrome and a type name is not one
     of the four things it moves off plain ink.
   - Every code token is split into identifier runs before it goes on the wire, so the graph's call-site overlay claims a token the
     classifier produced rather than re-cutting a line — which is what keeps a link landing on the callee's own name whatever
@@ -349,6 +349,26 @@ with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
     for the eight gate languages: `docs/design/cg57-highlighting-parity/`.
 - No native modules; no runtime dependency for the UI itself; the CLI serves **`dist/viewer/`** over `node:http`, loopback only.
   (Not `dist/ui/` — `src/ui/` is the engine's *terminal* ui and tsc already compiles it there; see `ui/README.md`.)
+
+### 4.1 The component library (`@colbymchenry/codegraph-ui`, CG-61)
+The same `ui/src` tree builds a second way — `svelte-package` into `ui/dist` — so CodeGraph Pro renders the Symbol view, the Flow
+strip and the Map over its own in-process engine reads without forking a component. One tree, because a fork is a second answer to
+the same question about the same graph.
+- **One seam: `GraphAdapter`** (`ui/src/lib/adapter.ts`) — eleven methods answering the `Wire*` shapes verbatim. `createHttpAdapter()`
+  is the loopback JSON API and is what the CLI's viewer runs on; a host implements the same methods and never makes a request.
+  The shapes live in `ui/src/lib/wire.ts`, which has no imports and no runtime, so a host can depend on the vocabulary alone.
+  `scripts/check-ui-package.mjs` asserts that nothing in the built package but `lib/adapter.js` reaches the network.
+- **`events` is optional.** No live channel means nothing connects and nothing polls; a host that learns of a sync some other way
+  calls `live.signal('index')`, the same code path the stream uses.
+- **Navigation is a driver, not a callback** (`ui/src/lib/navigation.ts`): the components build hrefs, because middle-click and
+  "copy link address" are how people read code. The default is the viewer's hash space; a host installs its own URL space. The
+  app's half — the hash parser and the live route — attaches window listeners at module scope and is **pruned out of the package**.
+- **Theming is colour and type only.** `theme.css` carries the §2.1 tokens and maps Svelte Flow's `--xy-*` variables onto them, so a
+  host never sees library defaults in the pane, controls or minimap. Geometry (34px rail rows, the 300/320px rails, the 20px code
+  line) is not themable: the Symbol view measures those against each other to put a callee row beside the line that calls it.
+- Versioned with the engine (`scripts/sync-ui-version.mjs`), because the payload shapes are versioned with the binary that serves
+  them. **Prepared, not published**: `"private": true` is the guard and `scripts/pack-npm.sh` only packs it under
+  `CODEGRAPH_PACK_UI=1`.
 
 ## 5. Copy rules
 Sentence case; controls say what happens ("Read as flow", "Clear"); counts always visible next to folds; honesty phrases fixed:

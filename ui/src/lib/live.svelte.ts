@@ -16,13 +16,17 @@
  *
  * ## Nothing polls, and nothing loops
  *
- * `EventSource` is the transport, but its own reconnect is not: left alone it
- * retries forever at a fixed interval, so a viewer left open against a stopped
+ * The transport is `GraphAdapter.events` — an `EventSource` on `/api/events`
+ * under `codegraph ui`, whatever a host already has under a host — but the
+ * reconnect is NOT the transport's. Left to itself an `EventSource` retries
+ * forever at a fixed interval, so a viewer left open against a stopped
  * `codegraph ui` becomes a request every three seconds until the tab is closed.
  * So each `error` closes the stream and schedules ONE reconnect on a backoff
  * that ends: after {@link MAX_ATTEMPTS} consecutive failures the connection
  * gives up and says so, and only a deliberate signal — the tab coming back to
- * the foreground, or the window regaining focus — starts it again.
+ * the foreground, or the window regaining focus — starts it again. An adapter
+ * with no `events` at all leaves every counter at zero and nothing connects;
+ * a host can still move them by hand with `live.signal`.
  *
  * The same rule covers the server's own bad day: a `degraded` event means live
  * watching has stopped for good on that side. The client records it and shows
@@ -31,6 +35,7 @@
  */
 
 import { untrack } from 'svelte';
+import { getGraphAdapter } from './adapter';
 
 /* ----------------------------------------------------------- wire shapes -- */
 
@@ -56,6 +61,21 @@ export interface LiveChanged {
   /** The change could not be described file by file — assume any file is affected. */
   scan: boolean;
   at: number;
+}
+
+/**
+ * What a host passes to `live.signal` — every field optional, because the
+ * counters are what the screens read and the detail is only there for the
+ * disk case, where "which files" decides whether a drift banner appears.
+ */
+export interface LiveSignalDetail {
+  files?: string[];
+  total?: number;
+  truncated?: boolean;
+  /** The change could not be described file by file — assume any file is hit. */
+  scan?: boolean;
+  index?: LiveIndexRevision;
+  at?: number;
 }
 
 export interface LiveIndexEvent {
@@ -86,10 +106,13 @@ let diskTick = $state(0);
 let lastIndex = $state<LiveIndexEvent | null>(null);
 let lastChanged = $state<LiveChanged | null>(null);
 
-let source: EventSource | null = null;
+/** Closes the current subscription, or null when there is none open. */
+let close: (() => void) | null = null;
 let retry: ReturnType<typeof setTimeout> | null = null;
 let attempts = 0;
 let started = false;
+/** The installed adapter has no live channel. Nothing to connect, ever. */
+let unsupported = false;
 
 /**
  * Ticks that arrived while the tab was in the background.
@@ -138,71 +161,66 @@ function flushDeferred(): void {
 /* ------------------------------------------------------------ connection -- */
 
 function open(): void {
-  if (source || typeof EventSource === 'undefined') return;
+  if (close !== null) return;
   if (retry !== null) {
     clearTimeout(retry);
     retry = null;
   }
   stopped = false;
 
-  const es = new EventSource('api/events');
-  source = es;
-
-  es.addEventListener('open', () => {
-    connected = true;
-  });
-
-  es.addEventListener('hello', (event) => {
-    const hello = parse<LiveHello>(event);
-    if (!hello) return;
-    // A hello is the only proof the stream is really working: `open` fires on
-    // the response headers, and a server that answered and then died would
-    // otherwise reset the backoff it should have been paying.
-    attempts = 0;
-    connected = true;
-    watching = hello.watching;
-    degraded = hello.degraded;
-  });
-
-  es.addEventListener('changed', (event) => {
-    const changed = parse<LiveChanged>(event);
-    if (changed) bumpDisk(changed);
-  });
-
-  es.addEventListener('index', (event) => {
-    const moved = parse<LiveIndexEvent>(event);
-    if (moved) bumpIndex(moved);
-  });
-
-  es.addEventListener('degraded', (event) => {
-    const note = parse<{ reason: string }>(event);
-    if (note) degraded = note.reason;
-  });
-
-  es.addEventListener('error', () => {
-    connected = false;
-    es.close();
-    if (source === es) source = null;
-    attempts += 1;
-    if (attempts >= MAX_ATTEMPTS) {
-      // Out of attempts. Nothing on a timer from here — the tab coming back to
-      // the foreground is the only thing that tries again.
-      stopped = true;
-      return;
-    }
-    const delay = BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)] ?? 30_000;
-    retry = setTimeout(open, delay);
-  });
-}
-
-function parse<T>(event: Event): T | null {
-  const data = (event as MessageEvent<string>).data;
-  if (typeof data !== 'string') return null;
-  try {
-    return JSON.parse(data) as T;
-  } catch {
-    return null;
+  // The transport belongs to the adapter, not to this module: `codegraph ui`
+  // answers it with an EventSource on `/api/events`, and a host that already
+  // knows when its index moved answers it with whatever it already has. An
+  // adapter with no live channel simply omits `events` — and then nothing here
+  // ever runs, which is the correct behaviour and not a degraded one.
+  const subscribe = getGraphAdapter().events;
+  if (!subscribe) {
+    unsupported = true;
+    return;
   }
+
+  close = subscribe({
+    hello(event) {
+      const hello = event as LiveHello | null;
+      if (!hello) return;
+      // A hello is the only proof the stream is really working: a connection
+      // opens on the response headers, and a server that answered and then
+      // died would otherwise reset the backoff it should have been paying.
+      attempts = 0;
+      connected = true;
+      watching = hello.watching;
+      degraded = hello.degraded;
+    },
+    changed(event) {
+      const changed = event as LiveChanged | null;
+      if (changed) bumpDisk(changed);
+    },
+    index(event) {
+      const moved = event as LiveIndexEvent | null;
+      if (moved) bumpIndex(moved);
+    },
+    degraded(event) {
+      const note = event as { reason: string } | null;
+      if (note) degraded = note.reason;
+    },
+    error() {
+      connected = false;
+      // Take the closer before calling it: a transport that calls `error`
+      // again from inside its own teardown must not re-enter this.
+      const closer = close;
+      close = null;
+      closer?.();
+      attempts += 1;
+      if (attempts >= MAX_ATTEMPTS) {
+        // Out of attempts. Nothing on a timer from here — the tab coming back
+        // to the foreground is the only thing that tries again.
+        stopped = true;
+        return;
+      }
+      const delay = BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)] ?? 30_000;
+      retry = setTimeout(open, delay);
+    },
+  });
 }
 
 /** Connect, once, for the life of the page. */
@@ -227,8 +245,8 @@ function start(): void {
     open();
   });
   window.addEventListener('pagehide', () => {
-    source?.close();
-    source = null;
+    close?.();
+    close = null;
   });
 
   open();
@@ -263,7 +281,44 @@ export const live = {
   get lastChanged(): LiveChanged | null {
     return lastChanged;
   },
+  /** The installed adapter has no live channel — this page never was live. */
+  get unsupported(): boolean {
+    return unsupported;
+  },
   start,
+
+  /**
+   * Move a counter from outside.
+   *
+   * A host that learns about a sync through its own machinery — a websocket, a
+   * webhook, a store it already owns — calls this instead of implementing
+   * `GraphAdapter.events`, and every mounted screen refetches exactly as it
+   * does under `codegraph ui`. It is the same code path the stream uses, so
+   * there is no second way for a screen to go stale.
+   */
+  signal(kind: 'index' | 'disk', detail: LiveSignalDetail = {}): void {
+    if (kind === 'index') {
+      bumpIndex({
+        type: 'index',
+        index: detail.index ?? { lastIndexedAt: null, files: 0 },
+        files: detail.files ?? [],
+        total: detail.total ?? detail.files?.length ?? 0,
+        truncated: detail.truncated ?? false,
+        at: detail.at ?? 0,
+      });
+      return;
+    }
+    bumpDisk({
+      type: 'changed',
+      files: detail.files ?? [],
+      total: detail.total ?? detail.files?.length ?? 0,
+      truncated: detail.truncated ?? false,
+      // No named files and no scan flag would mean "nothing changed", which is
+      // not what a caller asking for a disk tick means.
+      scan: detail.scan ?? (detail.files === undefined || detail.files.length === 0),
+      at: detail.at ?? 0,
+    });
+  },
 };
 
 /**

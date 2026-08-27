@@ -12,6 +12,7 @@ Distributed as `@colbymchenry/codegraph` on npm; same binary serves as installer
 
 ```bash
 npm run build           # tsc + copy schema.sql and *.wasm + build the viewer into dist/; chmods dist/bin/codegraph.js
+npm run build:lib       # the viewer's components as @colbymchenry/codegraph-ui (ui/dist) — NOT part of `build`
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -35,6 +36,22 @@ browser viewer into `dist/viewer/` (never `dist/ui/` — that's the terminal ui)
 `dist/extraction/wasm/` after every build and inside every release archive — the viewer's syntax
 highlighting reads a file with the same grammar the engine indexed it with, so a missing wasm is an
 unhighlighted screen as well as an extraction gap.
+
+`npm run build:lib` is separate and does NOT run as part of `npm run build`: it compiles the same
+`ui/src` tree a second way, with `svelte-package`, into `ui/dist` — the `@colbymchenry/codegraph-ui`
+component library the Pro app imports (task CG-61). `scripts/check-ui-package.mjs` then prunes the
+standalone app's shell out of it, resolves the extensionless import specifiers `svelte-package`
+leaves behind, and asserts the seam: nothing outside `lib/adapter.js` may reach the network. The
+package is **prepared, not published** — `ui/package.json` carries `"private": true` deliberately,
+and `scripts/pack-npm.sh` only packs a tarball when `CODEGRAPH_PACK_UI=1`.
+
+Tests run as **two vitest projects** (`vitest.workspace.mts`): `engine` (node) and `ui` (jsdom, the
+Svelte plugin, `resolve.conditions: ['browser']`) for the single `__tests__/ui-package.test.ts`.
+`npm test` still runs both. The split is not cosmetic — `browser` is a package-resolution
+condition, and applied globally it hands the engine's suites the browser builds of
+`web-tree-sitter` and friends. The root config (`vitest.config.mts`, `.mts` because the plugin is
+ESM-only and the repo is CJS) is the shared base; note that a workspace project **concatenates**
+the base's `include` with its own, which is why the `ui` project does not `extends` it.
 
 Node engines: `>=20.0.0 <25.0.0`. There is a hard exit on Node 25.x and below 20 (see `src/bin/node-version-check.ts`).
 

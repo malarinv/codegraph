@@ -16,7 +16,7 @@
   import PaletteRows from '../components/PaletteRows.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPalette, type PaletteItem } from '../lib/search-model';
-  import { entryHref, fileHref, flowHref, navigate } from '../lib/router.svelte';
+  import { entryHref, fileHref, flowHref, navigate } from '../lib/navigation';
   import { openEntryTarget, walkTo } from '../lib/walk';
 
   interface Props {

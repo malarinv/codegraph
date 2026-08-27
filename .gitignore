@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# svelte-package's scratch dir (ui/ library build)
+.svelte-kit/
+
 .cmem
 
 # IDE

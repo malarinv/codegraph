@@ -12,7 +12,7 @@
   is a drawing bug, and clamping silently would be a lie about the comparison.
 -->
 <script lang="ts">
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import { plural } from '../../lib/symbol-model';
   import type { WireBlastScale, WireBlastSummary } from '../../lib/api';
 

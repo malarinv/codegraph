@@ -14,7 +14,7 @@
   read as broken.
 -->
 <script lang="ts">
-  import { fileHref } from '../../lib/router.svelte';
+  import { fileHref } from '../../lib/navigation';
   import { plural } from '../../lib/symbol-model';
   import type { FileRailModel, FileRailRow } from '../../lib/file-model';
 

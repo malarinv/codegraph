@@ -62,10 +62,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   This also takes about 3 MB of grammar files and two dependencies out of the install.
 
+- **The viewer's screens are now a component library other tools can render.** The Symbol view, the Flow strip and the Map are packaged as `@colbymchenry/codegraph-ui` — the same components `codegraph ui` draws, not a copy of them — so another application can show you a symbol's callers, a call path or your architecture over its own copy of the graph. Everything a screen knows arrives through one small interface it is handed, so the tool doing the rendering decides where the data comes from and where a click goes; a design-token stylesheet ships with it so the screens can be themed to match whatever they are embedded in. It is versioned with the engine, so the reader and the graph it reads always match.
+
+  Nothing changes for `codegraph ui` itself — it is the same viewer, now the library's first user. The package is prepared, not yet on npm.
+
 ### Fixes
 
 - Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.
-
 
 ## [1.6.0] - 2026-08-26
 

@@ -23,7 +23,7 @@
   import { exportFilename, flowSvg } from '../lib/export-svg';
   import { fetchFlow, type WireFlow, type WireFlowPayload } from '../lib/api';
   import { live } from '../lib/live.svelte';
-  import { navigate, symbolHref } from '../lib/router.svelte';
+  import { navigate, symbolHref } from '../lib/navigation';
   import { trail, encodeTrail, type TrailHop } from '../lib/trail.svelte';
   import { decodeTrail } from '../lib/trail-codec';
   import { buildFlowLayout, type FlowCardLayout, type FlowLayout } from '../lib/flow-model';

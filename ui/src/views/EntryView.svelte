@@ -19,7 +19,7 @@
   import EntrySection from '../components/entry/EntrySection.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPanel, flowPair, type EntryRow } from '../lib/entry-model';
-  import { flowHref, navigate } from '../lib/router.svelte';
+  import { flowHref, navigate } from '../lib/navigation';
   import { openEntryTarget } from '../lib/walk';
 
   interface Props {

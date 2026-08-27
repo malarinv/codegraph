@@ -29,7 +29,7 @@
     buildFileRail,
     fileMetaLine,
   } from '../lib/file-model';
-  import { fileHref, navigate } from '../lib/router.svelte';
+  import { fileHref, navigate } from '../lib/navigation';
   import { liveRefresh } from '../lib/live.svelte';
   import { plural } from '../lib/symbol-model';
   import { walkTo } from '../lib/walk';

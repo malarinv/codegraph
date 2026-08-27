@@ -21,7 +21,7 @@
   import { exportFilename, mapSvg } from '../lib/export-svg';
   import { fetchMap, type WireMapPayload } from '../lib/api';
   import { live } from '../lib/live.svelte';
-  import { mapHref, navigate } from '../lib/router.svelte';
+  import { mapHref, navigate } from '../lib/navigation';
   import {
     buildMapLayout,
     isEdgeVisible,

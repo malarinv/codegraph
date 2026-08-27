@@ -18,7 +18,36 @@
  * encoded *per slash-separated segment* and rejoined on the way out: the URL
  * stays readable (`#/file/src/mcp/tools.ts`) and still round-trips a segment
  * that itself contains a reserved character.
+ *
+ * This module is the APP's half — it parses the hash and holds the live route,
+ * and it attaches window listeners to do it. The href builders and `navigate`
+ * live in `./navigation`, behind a driver a host can replace, and the shared
+ * components import them from there: rendering a Symbol view inside somebody
+ * else's app must not install a hash router in it. They are re-exported below
+ * so this file stays the app's one-stop import.
  */
+
+import { registerHashSync } from './navigation';
+
+export {
+  back,
+  entryHref,
+  fileHref,
+  flowHref,
+  getNavigationDriver,
+  hashNavigation,
+  mapHref,
+  navigate,
+  setNavigationDriver,
+  symbolHref,
+} from './navigation';
+export type {
+  FileHrefOptions,
+  FlowHrefOptions,
+  MapHrefOptions,
+  NavigationDriver,
+  SymbolHrefOptions,
+} from './navigation';
 
 export type Route =
   | { view: 'home' }
@@ -61,10 +90,6 @@ function decodeSegment(segment: string): string {
   } catch {
     return segment;
   }
-}
-
-function encodePath(value: string): string {
-  return value.split('/').map(encodeURIComponent).join('/');
 }
 
 function parseLine(params: URLSearchParams): number | null {
@@ -120,58 +145,6 @@ export function parseHash(hash: string): RouterLocation {
   return { route, params, raw };
 }
 
-/* ---------- href builders (the only place hashes are assembled) ---------- */
-
-export function symbolHref(id: string, opts: { line?: number; trail?: string } = {}): string {
-  const params = new URLSearchParams();
-  if (opts.trail) params.set('t', opts.trail);
-  if (opts.line) params.set('hl', String(opts.line));
-  const query = params.toString();
-  return `#/s/${encodePath(id)}${query ? `?${query}` : ''}`;
-}
-
-export function fileHref(
-  path: string,
-  opts: { line?: number; source?: boolean } = {}
-): string {
-  const params = new URLSearchParams();
-  // `src` before `hl` so the two file URLs a reader shares differ in their
-  // first character after the path, not somewhere in the middle.
-  if (opts.source) params.set('src', '1');
-  if (opts.line) params.set('hl', String(opts.line));
-  const query = params.toString();
-  return `#/file/${encodePath(path)}${query ? `?${query}` : ''}`;
-}
-
-export function mapHref(
-  opts: { root?: string | null; depth?: number; tests?: boolean } = {}
-): string {
-  const params = new URLSearchParams();
-  if (opts.root !== undefined && opts.root !== null) params.set('root', opts.root);
-  if (opts.depth && opts.depth !== 1) params.set('depth', String(opts.depth));
-  if (opts.tests) params.set('tests', '1');
-  const query = params.toString();
-  return `#/map${query ? `?${query}` : ''}`;
-}
-
-export function entryHref(): string {
-  return '#/entry';
-}
-
-export function flowHref(
-  opts: { from?: string; to?: string; symbols?: string; trail?: string } = {}
-): string {
-  const params = new URLSearchParams();
-  if (opts.from) params.set('from', opts.from);
-  if (opts.to) params.set('to', opts.to);
-  if (opts.symbols) params.set('symbols', opts.symbols);
-  // `t`, not `trail`: the trail already travels under that name everywhere
-  // else, and a flow read from one is the same walk under a different lens.
-  if (opts.trail) params.set('t', opts.trail);
-  const query = params.toString();
-  return `#/flow${query ? `?${query}` : ''}`;
-}
-
 /* ---------- the live route ---------- */
 
 const initial = parseHash(typeof location === 'undefined' ? '' : location.hash);
@@ -187,6 +160,10 @@ if (typeof window !== 'undefined') {
   // popstate too: `navigate(…, { replace: true })` and history.back() across
   // a replaced entry both move the hash without firing hashchange.
   window.addEventListener('popstate', sync);
+  // The hash driver writes `location.hash` directly; this is how it tells the
+  // route store to re-read. Registered here rather than imported there, so a
+  // host that never loads this module gets no window listeners at all.
+  registerHashSync(sync);
 }
 
 export const router = {
@@ -200,21 +177,3 @@ export const router = {
     return current.params;
   },
 };
-
-export function navigate(href: string, opts: { replace?: boolean } = {}): void {
-  const target = href.startsWith('#') ? href : `#${href}`;
-  if (opts.replace) {
-    history.replaceState(history.state, '', target);
-    sync();
-    return;
-  }
-  if (location.hash === target) return;
-  location.hash = target;
-  // hashchange fires asynchronously; sync() is idempotent, so calling it now
-  // keeps a navigate() immediately followed by a read consistent.
-  sync();
-}
-
-export function back(): void {
-  history.back();
-}

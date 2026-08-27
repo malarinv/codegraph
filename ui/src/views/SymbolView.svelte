@@ -50,7 +50,7 @@
   } from '../lib/symbol-model';
   import { encodeTrail, trail } from '../lib/trail.svelte';
   import { liveRefresh } from '../lib/live.svelte';
-  import { fileHref, navigate, symbolHref } from '../lib/router.svelte';
+  import { fileHref, navigate, symbolHref } from '../lib/navigation';
   import { arrivedFrom, walkTo } from '../lib/walk';
 
   interface Props {

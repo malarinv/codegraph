@@ -1,7 +1,7 @@
 <script lang="ts">
   import KindGlyph from './KindGlyph.svelte';
   import { trail, hopLabel, encodeTrail } from '../lib/trail.svelte';
-  import { navigate, symbolHref, flowHref } from '../lib/router.svelte';
+  import { navigate, symbolHref, flowHref } from '../lib/navigation';
 
   let hops = $derived(trail.hops);
 

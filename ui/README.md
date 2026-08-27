@@ -1,9 +1,20 @@
-# ui/ — the `codegraph ui` viewer
+# ui/ — the `codegraph ui` viewer, and `@colbymchenry/codegraph-ui`
 
-The browser reader for an indexed project: Svelte 5 + Vite, built as static
-files and served by the CLI over loopback. An npm workspace of the engine, so
-`npm ci` at the repo root installs its toolchain; nothing here is a runtime
-dependency of the engine and nothing here is published to npm on its own.
+One source tree, two builds.
+
+- **The app** — the browser reader for an indexed project: Svelte 5 + Vite,
+  built as static files into `../dist/viewer` and served by the CLI over
+  loopback.
+- **The library** — the same components, packaged with `svelte-package` into
+  `dist/` as `@colbymchenry/codegraph-ui`, so a host (CodeGraph Pro) renders
+  the Symbol view, the Flow strip and the Map over its **own** graph reads.
+
+They are one tree on purpose. A forked component is a second answer to the same
+question about the same graph, and sooner or later the two get quoted against
+each other in a review.
+
+An npm workspace of the engine, so `npm ci` at the repo root installs the
+toolchain for both.
 
 Design spec (every token, size and measurement):
 `../docs/design/codegraph-ui-design-spec.md`.
@@ -12,10 +23,15 @@ Design spec (every token, size and measurement):
 
 ```bash
 npm run build          # from the repo root: tsc -> copy-assets -> this app
-npm run build:ui       # just this app, plus the dist assertion
+npm run build:ui       # just the app, plus the dist assertion
+npm run build:lib      # the LIBRARY: svelte-package -> ui/dist, plus its checks
 npm run dev -w ui      # Vite dev server on 127.0.0.1:5174
 npm run check -w ui    # svelte-check
 ```
+
+`build:lib` is deliberately not part of `npm run build`: the CLI does not need
+it, and a release that fails because a component library would not compile is a
+release that failed for the wrong reason.
 
 `npm run build` emits **`dist/viewer/`** (`index.html` + hashed assets).
 `scripts/check-ui-build.mjs` then asserts the tree is complete, so a broken UI
@@ -32,12 +48,113 @@ and would also leave the static server handing out compiled engine internals.
 `check-ui-build.mjs` re-asserts the compiled engine is intact after every UI
 build so that mistake cannot land twice.
 
+## `@colbymchenry/codegraph-ui`
+
+```svelte
+<script lang="ts">
+  import { CodegraphUi, SymbolView, FlowStrip, ArchitectureMap }
+    from '@colbymchenry/codegraph-ui';
+  import '@colbymchenry/codegraph-ui/theme.css';
+</script>
+
+<CodegraphUi adapter={myAdapter} nav={myNavigation}>
+  <SymbolView id={symbolId} line={null} />
+</CodegraphUi>
+```
+
+Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `FileView`,
+`FileSourceView`, `EntryPointsView`, `TrailBar`, `SearchPalette`,
+`PalettePanel`, `PaletteRows`, `DriftBanner`, `KindGlyph`, `ExportButtons`,
+`CodegraphUi` — plus every pure model function the screens are built from
+(`buildCalleeRail`, `buildFlowLayout`, `buildMapLayout`, `tokensByLine`, …) and
+the `Wire*` types an adapter answers in.
+
+### The adapter is the only way data arrives
+
+```ts
+interface GraphAdapter {
+  stats(signal?): Promise<WireStats>;
+  search(query, opts?, signal?): Promise<WireSearch>;
+  node(id, signal?): Promise<WireSymbolPayload>;
+  nodes(ids, signal?): Promise<WireNodeRefs>;
+  source(request, signal?): Promise<WireSource>;
+  file(path, signal?): Promise<WireFilePayload>;
+  fileCode(path, signal?): Promise<WireFileCodePayload>;
+  flow(request, signal?): Promise<WireFlowPayload>;
+  map(request?, signal?): Promise<WireMapPayload>;
+  routes(request?, signal?): Promise<WireRoutes>;
+  entryPoints(request?, signal?): Promise<WireEntryPoints>;
+  events?(handlers): () => void;   // optional: the live channel
+}
+```
+
+The shapes are exactly what `src/ui-server/api/` serialises, and they live in
+`src/lib/wire.ts` — no imports, no runtime — so a host can depend on the
+vocabulary without depending on the viewer. The default implementation,
+`createHttpAdapter()`, is the loopback JSON API; a host that already holds the
+index implements the same eleven methods against its own reads and never makes
+an HTTP request. `scripts/check-ui-package.mjs` asserts that no module in the
+built package but `lib/adapter.js` touches the network, because a screen that
+reached past the adapter would be a screen that ignored the host.
+
+`events` is optional. Omit it and nothing connects and nothing polls; a host
+that learns about a sync some other way calls `live.signal('index')` instead,
+which is the same code path the stream uses.
+
+### Three things that will bite
+
+1. **Import `theme.css` once.** Every component paints from the design tokens.
+   Override any variable on a narrower selector — including on a container,
+   since custom properties inherit; `<CodegraphUi theme="light">` uses exactly
+   that to put a light reader inside a dark application.
+2. **The adapter and the navigation driver are module-level, not context.** The
+   pure model modules are plain TypeScript and cannot read a component's
+   context, so one page reads one project. `<CodegraphUi>` installs them during
+   initialisation, once — swapping projects means re-mounting the subtree
+   (`{#key project}`), not swapping the prop.
+3. **Geometry is not themable.** 34px rail rows, the 300/320px rails, the 20px
+   code line: the Symbol view measures these against each other to put a callee
+   row beside the line that calls it. Colour and type are yours.
+
+### Navigation
+
+Every link the components build goes through a `NavigationDriver`
+(`src/lib/navigation.ts`). The default is the viewer's own hash space
+(`#/s/<id>`); a host installs one that addresses its app instead, and the rails,
+breadcrumbs, chips and cards follow. They are hrefs rather than click handlers
+because middle-click, cmd-click and "copy link address" are how people read
+code.
+
+The app's half — parsing the hash, holding the live route — is
+`src/lib/router.svelte.ts`, which attaches `hashchange`/`popstate` listeners at
+module scope and is therefore **pruned out of the published package**. Nothing a
+host imports may drag a hash router into its application.
+
+### Versioning and publishing
+
+The package is versioned with the engine (`scripts/sync-ui-version.mjs` runs on
+every `build:lib`): `@colbymchenry/codegraph-ui@X.Y.Z` is the reader for
+`codegraph@X.Y.Z`, because the payload shapes are versioned with the binary that
+serves them.
+
+It is **prepared, not published.** `"private": true` in `package.json` is the
+guard — npm refuses to publish it — and `scripts/pack-npm.sh` only builds the
+tarball when `CODEGRAPH_PACK_UI=1`, into `release/npm-ui/` (never
+`release/npm/`, whose `codegraph-*` glob the release workflow publishes).
+Publishing is the maintainer's call and takes two deliberate edits.
+
 ## Layout
 
 ```
 src/
+  index.ts                the LIBRARY's entry — everything the package exports
   main.ts                 fonts + tokens, mounts App into index.html's #app
-  app.css                 design tokens (light/dark), reset, shell grid
+  app.css                 the app's reset, shell grid and primitives
+  lib/theme.css           the design tokens (light/dark) + the Svelte Flow map
+  lib/adapter.ts          GraphAdapter, createHttpAdapter, the registry
+  lib/wire.ts             every Wire* payload shape — types only, no runtime
+  lib/api.ts              the screens' calls, one line each, over the adapter
+  lib/navigation.ts       href builders + navigate, behind a driver
   App.svelte              top bar / trail bar / main, global keys
   lib/router.svelte.ts    hash router: #/s/<id>, #/file/<path>, #/map, #/flow, #/entry
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
