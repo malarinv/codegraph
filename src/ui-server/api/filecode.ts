@@ -18,7 +18,7 @@
  *   before a single page of source has arrived.
  *
  * The source itself does NOT ride along. A 6 800-line TypeScript file is ~1.5 s
- * of TextMate tokenising and megabytes of JSON; the viewer pages it through
+ * of parsing and megabytes of JSON; the viewer pages it through
  * `/api/source` as the reader scrolls, which is also what lets the graph
  * facts — ports, arcs, rail rows — be complete from the first frame while the
  * text fills in behind them.

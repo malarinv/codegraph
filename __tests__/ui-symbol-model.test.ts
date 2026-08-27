@@ -484,7 +484,7 @@ describe('showsBody', () => {
 
 describe('client-side token decoding', () => {
   // The classification itself is the server's job (`src/ui-server/highlight/`,
-  // real TextMate grammars); what is worth pinning here is the decoding — the
+  // the engine's own tree-sitter parse); what is worth pinning here is the decoding — the
   // columns the call-site overlay matches against, and the plain fallback that
   // has to keep links working when no grammar covers a file.
   const CLASSES = ['other', 'ident', 'comment', 'string', 'keyword', 'number'];
@@ -552,7 +552,7 @@ describe('client-side token decoding', () => {
 
   it('keys a slice by real file line, not by offset into the slice', () => {
     const byLine = tokensByLine(['a();', 'b();'], 120, {
-      engine: 'shiki',
+      engine: 'tree-sitter',
       grammar: 'typescript',
       classes: CLASSES,
       lines: [

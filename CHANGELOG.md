@@ -56,6 +56,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Any row that names a symbol can start a **flow**: press `Flow ›`, then type a second symbol or press `→ here` on another row, and you get the path between them — so "how does `POST /v1/payroll/cycles/{cycleID}/run` reach the database" is two clicks. Typing into the search box now finds entry points too, under their own heading below the symbol matches, so a URL comes back with its handler attached instead of on its own.
 
+- **Syntax colouring in `codegraph ui` now comes from CodeGraph's own reading of your code.** The viewer used to run a second syntax highlighter over source CodeGraph had already parsed, with its own separate set of grammars. It doesn't any more: the colouring is taken straight from the parse that built your graph, so a file is coloured by exactly the grammar that decided what its symbols are. Three things you will notice — the name a definition declares now stands out on the line that declares it, wherever it appears; calls written inside a string (`${user.name()}`, `#{...}`, `$"{...}"`) are read as code and are now clickable links like every other call site; and built-in type words such as `string`, `int` and `void` look the same in every language instead of one way in Go and another in TypeScript. A big file paints far faster, most visibly in TypeScript, which was by a wide margin the slowest before.
+
+  Two formats change for the worse and it is worth saying so: Liquid, Razor, YAML, Twig, XML and `.properties` files are shown without colouring now, and in `.svelte`, `.vue` and `.astro` files the `<script>` block is coloured but the surrounding markup is not. Nothing about navigation changes there — call sites in those files still link, exactly as before.
+
+  This also takes about 3 MB of grammar files and two dependencies out of the install.
+
 ### Fixes
 
 - Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.

@@ -1,57 +1,61 @@
 /**
- * Server-side syntax classification for the viewer's code block (CG-43).
+ * Server-side syntax classification for the viewer's code block.
  *
- * The viewer used to lex on the client with a hand-rolled dialect table. This
- * replaces it with real TextMate grammars, run once here, so a Go file reads as
- * Go rather than as "something with braces". Three properties keep that from
- * becoming a liability:
+ * The classes come off the engine's OWN tree-sitter parse (CG-57). Until then
+ * the viewer ran a second highlighter — Shiki, plus 56 pruned TextMate grammars
+ * shipped beside the binary — over source the engine had already parsed with a
+ * real grammar. That is gone: one grammar set, one opinion about what a `.ts`
+ * file is, nothing extra in the bundle, and roughly an order of magnitude off
+ * the cost on the language that used to be worst (see below).
  *
- * * **It never fails a request.** A missing grammar, a corrupt grammar file, an
- *   ESM import that did not resolve, a slice too big to be worth tokenising —
- *   every one of them answers `engine: 'plain'` with a reason and the source
- *   still goes out. Highlighting is the part that degrades; nothing else does.
+ * Three properties are unchanged, because they are what make this safe to
+ * depend on:
+ *
+ * * **It never fails a request.** A grammar that will not load, a parse that
+ *   throws, a language nobody wrote a grammar for, a slice too big to be worth
+ *   parsing — every one of them answers `engine: 'plain'` with a reason and the
+ *   source still goes out. Highlighting is the part that degrades; nothing else
+ *   does.
  * * **Identifiers survive whatever token boundaries the grammar chose.** Every
  *   code token is split into identifier runs before it goes on the wire, which
  *   is what lets the viewer wrap a call site as a link by *claiming a token*
- *   rather than re-tokenising the line on top of the highlighter's answer.
- * * **The classification is a class name, not a colour.** See `theme.ts` — the
- *   viewer paints from CSS custom properties, so one token stream serves light
- *   and dark and the design tokens live in exactly one place.
+ *   rather than re-tokenising the line on top of the classifier's answer.
+ * * **The classification is a class name, not a colour.** The viewer paints
+ *   from CSS custom properties, so one token stream serves light and dark and
+ *   the design tokens live in exactly one place.
  *
  * ## Cost, measured
  *
- * Shiki's JavaScript regex engine (no oniguruma wasm, no native module) runs at
- * roughly 17 us/line on Go, 34 us/line on Python and 230 us/line on TypeScript,
- * whose TextMate grammar is by a wide margin the most expensive one here. A
- * 3 000-line TypeScript file is therefore ~700 ms cold, which is why
- * {@link SLICE_CACHE_LIMIT} exists: a slice is keyed by the file's content hash
- * and its line range, so every re-render — a theme flip, a resize, stepping
- * back to a symbol — is a map lookup. Phase 1 only ever asks for one symbol's
- * range (tens of lines); the whole-file view is CG-52 and tree-sitter tokens
- * from the engine's own parse replace this module entirely in CG-57.
+ * On the dev Mac, 3 000 lines, cold (parse + classify + wire):
+ *
+ * | | TypeScript | Go | Python |
+ * |---|---|---|---|
+ * | Shiki (was) | ~700 ms | 43–57 ms | 35–47 ms |
+ * | tree-sitter (now) | 24–41 ms | ~30 ms | 25–29 ms |
+ *
+ * Rust, Ruby, PHP, C# and Swift all land between 14 and 27 ms on the same
+ * measurement. TypeScript's TextMate grammar was 5–7× every other one and the
+ * cost was regex *execution*, not compilation — nothing about the old module
+ * could have fixed it, and it is now the same order as everything else. The
+ * slice cache still exists, because a re-render (a theme flip, a resize,
+ * stepping back through the trail) should cost nothing at all, and because a
+ * whole-file view pages the same file repeatedly.
  */
 
-import type {
-  ShikiCoreModule,
-  ShikiHighlighter,
-  ShikiJavaScriptEngineModule,
-  ShikiThemedToken,
-} from './shiki-types';
-import { CLASS_ID, MONO_THEME, TOKEN_CLASSES, classOf, type TokenClassName } from './theme';
+import { SYNTAX_TOKEN_CLASSES, tokenizeSource, type SyntaxTokenClass } from '../../extraction/syntax-tokens';
+import type { Language } from '../../types';
 import { grammarFor } from './languages';
-import { loadManifest, readGrammarChain, type GrammarManifest } from './grammars';
 
-export { TOKEN_CLASSES } from './theme';
-export { LANGUAGE_GRAMMAR, REQUIRED_GRAMMARS, grammarFor } from './languages';
-export { TEXTMATE_PATH_ENV } from './grammars';
+export { COMPONENT_LANGUAGES, grammarFor, isHighlightable } from './languages';
+export { SYNTAX_TOKEN_CLASSES as TOKEN_CLASSES } from '../../extraction/syntax-tokens';
 
 /** One token on the wire: its class id, then its text. */
 export type WireToken = [number, string];
 
 export interface HighlightResult {
-  /** `shiki` when a grammar produced the classes; `plain` when nothing did. */
-  engine: 'shiki' | 'plain';
-  /** The TextMate grammar used, or null. */
+  /** `tree-sitter` when a grammar produced the classes; `plain` when nothing did. */
+  engine: 'tree-sitter' | 'plain';
+  /** The grammar the source was read with, or null. */
   grammar: string | null;
   /** Class names, indexed by the first element of every {@link WireToken}. */
   classes: readonly string[];
@@ -62,25 +66,25 @@ export interface HighlightResult {
 }
 
 /**
- * Lines above this are not tokenised.
+ * Lines above this are not classified.
  *
  * Matches `MAX_SOURCE_LINES`, so anything the source endpoint will serve, this
- * will try to highlight.
+ * will try to classify.
  */
 export const MAX_HIGHLIGHT_LINES = 4000;
 
 /**
- * Characters above this are not tokenised.
+ * Characters above this are not classified.
  *
  * The line cap alone does not bound the work: one minified bundle line can be
- * two megabytes, and a TextMate scanner walks it character by character. This
- * is the guard that keeps a single request from wedging a single-threaded
- * loopback server, and it is generous — 600 kB is far more source than any
- * screen renders.
+ * two megabytes, and a parser walks it character by character. This is the
+ * guard that keeps a single request from wedging a single-threaded loopback
+ * server, and it is generous — 600 kB is far more source than any screen
+ * renders.
  */
 export const MAX_HIGHLIGHT_CHARS = 600_000;
 
-/** Highlighted slices kept in memory. Most are one symbol's body. */
+/** Classified slices kept in memory. Most are one symbol's body. */
 export const SLICE_CACHE_LIMIT = 96;
 
 /**
@@ -94,105 +98,23 @@ export const SLICE_CACHE_LIMIT = 96;
  */
 export const SLICE_CACHE_LINES = 20_000;
 
-/* ----------------------------------------------------------- the runtime -- */
+/** Class name → its index in {@link SYNTAX_TOKEN_CLASSES}, which is what the wire carries. */
+const CLASS_ID = Object.fromEntries(
+  SYNTAX_TOKEN_CLASSES.map((name, index) => [name, index])
+) as Record<SyntaxTokenClass, number>;
 
 /**
- * tsc compiles `import()` to `require()` under `module: commonjs`, which fails
- * for an ESM-only package. Same escape hatch `src/bin/codegraph.ts` uses.
- */
-const importESM = new Function('specifier', 'return import(specifier)') as (
-  specifier: string
-) => Promise<unknown>;
-
-/**
- * Import an ESM-only package from this CommonJS build.
+ * Classes that are never merged with their neighbour.
  *
- * The `new Function` route is the one that runs in production. It does NOT run
- * under Vitest, whose module runner evaluates this file without a dynamic-import
- * callback ("A dynamic import callback was not specified") — there, the
- * transformed `import()` below is the working one, and in the shipped CommonJS
- * build it is the one that cannot work. Each covers exactly the other's gap;
- * neither alone is enough, which is why both are here.
+ * Every identifier-shaped token has to stay claimable on its own — the overlay
+ * wraps exactly one of them as a call-site link, and two merged into one token
+ * would underline both or neither.
  */
-async function loadEsm<T>(specifier: string): Promise<T> {
-  try {
-    return (await importESM(specifier)) as T;
-  } catch (err) {
-    if (!(err instanceof Error) || !/dynamic import callback/i.test(err.message)) throw err;
-    return (await import(/* @vite-ignore */ specifier)) as T;
-  }
-}
-
-interface Runtime {
-  highlighter: ShikiHighlighter;
-  dir: string;
-  manifest: GrammarManifest;
-}
-
-let runtimePromise: Promise<Runtime | null> | null = null;
-/** Why the runtime is unavailable, for the `reason` on a plain answer. */
-let runtimeFailure: string | null = null;
-
-async function getRuntime(): Promise<Runtime | null> {
-  if (!runtimePromise) runtimePromise = createRuntime();
-  return runtimePromise;
-}
-
-async function createRuntime(): Promise<Runtime | null> {
-  const found = loadManifest();
-  if (!found) {
-    runtimeFailure =
-      'No syntax grammars are installed with this build, so source is shown unhighlighted.';
-    return null;
-  }
-  try {
-    const core = await loadEsm<ShikiCoreModule>('@shikijs/core');
-    const engineModule = await loadEsm<ShikiJavaScriptEngineModule>('@shikijs/engine-javascript');
-    const highlighter = core.createHighlighterCoreSync({
-      themes: [MONO_THEME],
-      langs: [],
-      // The JavaScript regex engine, deliberately: no oniguruma wasm and no
-      // native module, so the viewer adds nothing to the install that has to
-      // be compiled or fetched per platform. `forgiving` skips the handful of
-      // Oniguruma-only patterns it cannot translate rather than refusing the
-      // whole grammar over them.
-      engine: engineModule.createJavaScriptRegexEngine({ forgiving: true, cache: new Map() }),
-    });
-    return { highlighter, dir: found.dir, manifest: found.manifest };
-  } catch (err) {
-    runtimeFailure = `Syntax highlighting is unavailable (${
-      err instanceof Error ? err.message : String(err)
-    }).`;
-    return null;
-  }
-}
-
-/** Grammar ids already handed to the highlighter, and the ones that failed. */
-const loadedGrammars = new Set<string>();
-const brokenGrammars = new Map<string, string>();
-
-function ensureGrammar(runtime: Runtime, id: string): string | null {
-  if (loadedGrammars.has(id)) return null;
-  const broken = brokenGrammars.get(id);
-  if (broken !== undefined) return broken;
-  try {
-    const chain = readGrammarChain(runtime.dir, runtime.manifest, id);
-    if (chain.length === 0) {
-      const reason = `No ${id} grammar shipped with this build, so it is shown unhighlighted.`;
-      brokenGrammars.set(id, reason);
-      return reason;
-    }
-    runtime.highlighter.loadLanguageSync(chain);
-    loadedGrammars.add(id);
-    return null;
-  } catch (err) {
-    const reason = `The ${id} grammar could not be loaded (${
-      err instanceof Error ? err.message : String(err)
-    }).`;
-    brokenGrammars.set(id, reason);
-    return reason;
-  }
-}
+const UNMERGEABLE: ReadonlySet<SyntaxTokenClass> = new Set<SyntaxTokenClass>([
+  'ident',
+  'type',
+  'def',
+]);
 
 /* -------------------------------------------------------------- the cache -- */
 
@@ -242,7 +164,7 @@ export interface HighlightOptions {
   language?: string | null;
   /**
    * A key that changes whenever the text does — the file's content hash plus
-   * the requested range. Omit it and the slice is tokenised every time.
+   * the requested range. Omit it and the slice is classified every time.
    */
   cacheKey?: string;
 }
@@ -265,13 +187,14 @@ export async function highlightLines(
     if (hit) return hit;
   }
 
-  const result = await highlightUncached(lines, grammar);
+  const result = await highlightUncached(lines, options.language ?? null, grammar);
   if (key) cachePut(key, result);
   return result;
 }
 
 async function highlightUncached(
   lines: readonly string[],
+  language: string | null,
   grammar: string | null
 ): Promise<HighlightResult> {
   if (!grammar) {
@@ -280,53 +203,82 @@ async function highlightUncached(
   if (lines.length > MAX_HIGHLIGHT_LINES) {
     return plain(lines, grammar, `Too many lines to highlight (over ${MAX_HIGHLIGHT_LINES}).`);
   }
-  let chars = 0;
-  for (const line of lines) chars += line.length + 1;
-  if (chars > MAX_HIGHLIGHT_CHARS) {
+  const text = lines.join('\n');
+  if (text.length > MAX_HIGHLIGHT_CHARS) {
     return plain(lines, grammar, 'Too much text on too few lines to highlight (minified?).');
   }
 
-  const runtime = await getRuntime();
-  if (!runtime) return plain(lines, grammar, runtimeFailure ?? undefined);
-
-  const failure = ensureGrammar(runtime, grammar);
-  if (failure) return plain(lines, grammar, failure);
-
-  let tokenized: ShikiThemedToken[][];
-  try {
-    tokenized = runtime.highlighter.codeToTokensBase(lines.join('\n'), {
-      lang: grammar,
-      theme: MONO_THEME.name,
-    });
-  } catch (err) {
-    // A grammar that throws once will throw again on the next request for the
-    // same file type, so it is retired rather than retried.
-    const reason = `The ${grammar} grammar failed on this file (${
-      err instanceof Error ? err.message : String(err)
-    }).`;
-    brokenGrammars.set(grammar, reason);
-    loadedGrammars.delete(grammar);
-    return plain(lines, grammar, reason);
+  const tokenized = await tokenizeSource(text, language as Language);
+  if (!tokenized || tokenized.spans.length === 0) {
+    return plain(lines, grammar, `The ${grammar} grammar is not available in this build.`);
   }
 
-  // A trailing empty line, or a grammar that answered short, must not shift the
-  // viewer's line numbering — the rows are indexed positionally.
-  const out: WireToken[][] = lines.map((line, i) => {
-    const row = tokenized[i];
-    return row ? atomize(row) : atomizePlain(line);
-  });
-
-  return { engine: 'shiki', grammar, classes: TOKEN_CLASSES, lines: out };
+  return {
+    engine: 'tree-sitter',
+    grammar: tokenized.grammars.join('+') || grammar,
+    classes: SYNTAX_TOKEN_CLASSES,
+    lines: toWireLines(lines, text, tokenized.spans),
+  };
 }
 
 function plain(lines: readonly string[], grammar: string | null, reason?: string): HighlightResult {
   return {
     engine: 'plain',
     grammar,
-    classes: TOKEN_CLASSES,
+    classes: SYNTAX_TOKEN_CLASSES,
     lines: lines.map(atomizePlain),
     ...(reason ? { reason } : {}),
   };
+}
+
+/* -------------------------------------------------------- spans to lines -- */
+
+/**
+ * Cut the classifier's spans into one token list per source line.
+ *
+ * The classifier answers over the whole slice, in string offsets, and leaves
+ * the gaps between spans unclassified — those are whitespace and the layout
+ * separators no grammar names. Here they become plain tokens, multi-line spans
+ * (a block comment, a heredoc) are split at the newlines, and every line ends
+ * up with a token list whose texts concatenate back to exactly that line.
+ *
+ * One entry per line, always: the code block indexes rows positionally, so a
+ * short answer would render every line below it against the wrong source.
+ */
+function toWireLines(
+  lines: readonly string[],
+  text: string,
+  spans: readonly { start: number; end: number; cls: SyntaxTokenClass }[]
+): WireToken[][] {
+  const pieces: { start: number; end: number; cls: SyntaxTokenClass }[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.end <= cursor) continue;
+    const start = Math.max(span.start, cursor);
+    if (start > cursor) pieces.push({ start: cursor, end: start, cls: 'other' });
+    pieces.push({ start, end: span.end, cls: span.cls });
+    cursor = span.end;
+  }
+  if (cursor < text.length) pieces.push({ start: cursor, end: text.length, cls: 'other' });
+
+  const out: WireToken[][] = [];
+  let lineStart = 0;
+  let first = 0;
+  for (const line of lines) {
+    const lineEnd = lineStart + line.length;
+    const row: WireToken[] = [];
+    while (first < pieces.length && (pieces[first] as { end: number }).end <= lineStart) first += 1;
+    for (let i = first; i < pieces.length; i++) {
+      const piece = pieces[i] as { start: number; end: number; cls: SyntaxTokenClass };
+      if (piece.start >= lineEnd) break;
+      const from = Math.max(piece.start, lineStart);
+      const to = Math.min(piece.end, lineEnd);
+      if (to > from) pushPiece(row, text.slice(from, to), piece.cls);
+    }
+    out.push(row);
+    lineStart = lineEnd + 1; // the '\n' the join put back
+  }
+  return out;
 }
 
 /* ---------------------------------------------------------- atomisation -- */
@@ -341,29 +293,23 @@ function plain(lines: readonly string[], grammar: string | null, reason?: string
 const IDENT = /[A-Za-z_$À-￿][\w$À-￿]*/g;
 
 /**
- * Split a grammar's tokens into identifier runs, merging everything else.
+ * Add one classified run to a line, splitting it into identifier atoms.
  *
  * This is the step that makes the graph's call-site links independent of how a
- * grammar chose to chunk a line. TextMate is free to emit `this.mutex.withLock`
- * as one token, three, or five, and the viewer has to be able to wrap exactly
- * `withLock`; giving it identifier-sized atoms up front means the overlay only
- * ever *claims* a token, never re-cuts one.
+ * grammar chose to chunk a line: the viewer has to be able to wrap exactly
+ * `withLock` in `this.mutex.withLock`, and giving it identifier-sized atoms up
+ * front means the overlay only ever *claims* a token, never re-cuts one.
  *
  * Comments and strings are left whole on purpose: no edge points inside one,
  * and a doc comment split into forty atoms is forty times the wire bytes for
  * nothing.
  */
-function atomize(tokens: readonly ShikiThemedToken[]): WireToken[] {
-  const out: WireToken[] = [];
-  for (const token of tokens) {
-    const cls = classOf(token.color);
-    if (cls === 'comment' || cls === 'string') {
-      push(out, cls, token.content);
-      continue;
-    }
-    splitIdentifiers(out, token.content, cls);
+function pushPiece(row: WireToken[], text: string, cls: SyntaxTokenClass): void {
+  if (cls === 'comment' || cls === 'string') {
+    push(row, cls, text);
+    return;
   }
-  return out;
+  splitIdentifiers(row, text, cls);
 }
 
 function atomizePlain(line: string): WireToken[] {
@@ -375,31 +321,35 @@ function atomizePlain(line: string): WireToken[] {
 /**
  * Emit `text` as alternating non-identifier and identifier runs.
  *
- * An identifier inside a token the grammar called a keyword keeps the keyword
+ * An identifier inside a run the grammar called a keyword keeps the keyword
  * class — `func` should still carry its weight — while the overlay's matcher
- * looks at a token's *text*, not its class, so a language whose grammar scopes
- * type names as `storage.type` still links.
+ * looks at a token's *text*, not its class, so a language whose grammar calls a
+ * declared type name something unexpected still links.
  */
-function splitIdentifiers(out: WireToken[], text: string, cls: TokenClassName): void {
+function splitIdentifiers(out: WireToken[], text: string, cls: SyntaxTokenClass): void {
   if (text === '') return;
   IDENT.lastIndex = 0;
   let at = 0;
   let match: RegExpExecArray | null;
   while ((match = IDENT.exec(text)) !== null) {
-    if (match.index > at) push(out, cls === 'ident' ? 'other' : cls, text.slice(at, match.index));
+    if (match.index > at) push(out, gapClass(cls), text.slice(at, match.index));
     push(out, cls === 'other' ? 'ident' : cls, match[0]);
     at = match.index + match[0].length;
   }
-  if (at < text.length) push(out, cls === 'ident' ? 'other' : cls, text.slice(at));
+  if (at < text.length) push(out, gapClass(cls), text.slice(at));
+}
+
+/** The class for the non-identifier remainder of a run. */
+function gapClass(cls: SyntaxTokenClass): SyntaxTokenClass {
+  return UNMERGEABLE.has(cls) ? 'other' : cls;
 }
 
 /** Append, merging into the previous token when it carries the same class. */
-function push(out: WireToken[], cls: TokenClassName, text: string): void {
+function push(out: WireToken[], cls: SyntaxTokenClass, text: string): void {
   if (text === '') return;
   const id = CLASS_ID[cls];
   const last = out[out.length - 1];
-  // Identifiers are never merged: each one has to stay claimable on its own.
-  if (last && last[0] === id && id !== CLASS_ID.ident) {
+  if (last && last[0] === id && !UNMERGEABLE.has(cls)) {
     last[1] += text;
     return;
   }

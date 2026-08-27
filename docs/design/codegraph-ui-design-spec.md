@@ -321,22 +321,32 @@ with `src/index.ts` selected, 15 links and 4 dimmed boxes, matching the canvas).
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a
   fallback if crossing quality demands it (never ELK). Symbol view = DOM + one SVG overlay (`ResizeObserver` re-layout).
-- Shiki (JavaScript regex engine, lazy grammars, custom near-monochrome theme as in §2.2) server-side in `/api/source`; tree-sitter-derived
-  tokens replace it in phase 3.
-  - *As built (CG-43).* `@shikijs/core` + `@shikijs/engine-javascript` are runtime dependencies (~5 MB installed, no wasm, no native
-    module); `@shikijs/langs` is a **devDependency** and `npm run build:textmate` (`scripts/prune-grammars.mjs`) writes only the
-    closure the engine's 40-odd languages reach — 56 grammars, 2.6 MB — into **`dist/textmate/`**, checked by `scripts/check-ui-build.mjs`.
-    Shipping all 722 grammars would have been 11 MB.
-  - The theme classifies rather than colours: its foregrounds are sentinels the server maps to class names (`comment`, `string`,
-    `keyword`, `number`, `ident`, `other`), and the viewer paints them from the CSS custom properties above — so **one token stream
-    serves light and dark** with no refetch when `prefers-color-scheme` flips, and the ramp lives only in `ui/src/app.css`.
+- Syntax classification comes off **the engine's own tree-sitter parse** — no highlighter dependency, no second grammar set.
+  - *As built (CG-43, replaced in CG-57).* The first cut ran Shiki with 56 pruned TextMate grammars in `dist/textmate/`. That is
+    gone: `@shikijs/*` is off the dependency list, `scripts/prune-grammars.mjs` and `npm run build:textmate` are deleted, and
+    `scripts/check-ui-build.mjs` now asserts the tree-sitter grammars in `dist/extraction/wasm/` instead. A `.ts` file is read by
+    exactly the grammar that decided what its symbols are, so the viewer and the graph can never disagree about it.
+  - Eight token classes on the wire: `comment`, `string`, `number`, `keyword`, `type`, `def`, `ident`, `other`. Rules, not scope
+    tables — a node whose type mentions `comment` is a comment; inside a string every leaf is string *except* below an
+    interpolation, where code resumes (so `${user.name()}` still links); an **anonymous** leaf is a keyword when its text is a bare
+    word and punctuation otherwise; a **named** leaf is an identifier, a type name, or — from the extractors' own definition
+    tables — the name a definition declares. `punct` is folded into `other`: they paint identically and splitting them would
+    roughly double the token count on a dense line.
+  - The classification is a class NAME, never a colour, and the viewer paints it from the CSS custom properties above — so **one
+    token stream serves light and dark** with no refetch when `prefers-color-scheme` flips, and the ramp lives only in
+    `ui/src/app.css`. `type` is a distinct class painted at plain ink: the colouring is near-monochrome and a type name is not one
+    of the four things it moves off plain ink.
   - Every code token is split into identifier runs before it goes on the wire, so the graph's call-site overlay claims a token the
-    highlighter produced rather than re-cutting a line — which is what keeps a link landing on the callee's own name whatever
+    classifier produced rather than re-cutting a line — which is what keeps a link landing on the callee's own name whatever
     boundaries a grammar chose, and keeps links working in the plain-text fallback.
-  - Measured on this machine (Shiki 4.4.3, JS regex engine, 3 000 lines cold): Python 35–47 ms, Go 43–57 ms, **TypeScript ~700 ms** —
-    the TS TextMate grammar is 5–7× the cost of any other and the oniguruma-wasm engine would run it in ~120 ms. Slices are therefore
-    cached by content hash + range, so a re-render (resize, theme flip, stepping back through the trail) is a map lookup (< 10 ms);
-    a symbol-sized slice (~280 lines of TS) is ~50 ms cold. Phase 1 only ever requests one symbol's range.
+  - Single-file components (`.svelte`, `.vue`, `.astro`) have no grammar of their own; their `<script>` blocks — where every
+    indexed symbol in those files lives — are classified as TypeScript or JavaScript, exactly the delegation the extractors
+    already do. The surrounding markup, and the config formats with file-level extraction only (YAML, XML, Twig, properties),
+    render plain with their identifiers still split out, so links land there too.
+  - Measured on this machine, 3 000 lines cold: **TypeScript 24–41 ms** (it was ~700 ms under Shiki, whose TS grammar cost 5–7×
+    every other one), Go ~30 ms, Python 25–29 ms, and Rust/Ruby/PHP/C#/Swift 14–27 ms. Slices are still cached by content hash +
+    range, so a re-render (resize, theme flip, stepping back through the trail) is a map lookup. Side-by-side parity screenshots
+    for the eight gate languages: `docs/design/cg57-highlighting-parity/`.
 - No native modules; no runtime dependency for the UI itself; the CLI serves **`dist/viewer/`** over `node:http`, loopback only.
   (Not `dist/ui/` — `src/ui/` is the engine's *terminal* ui and tsc already compiles it there; see `ui/README.md`.)
 

@@ -13,16 +13,17 @@
  * where tsc puts the TERMINAL ui, so a mis-pointed outDir silently deletes
  * modules the CLI requires at startup.
  *
- * The pruned TextMate grammars in dist/textmate/ are checked the same way and
- * for the same reason: without them every file the viewer shows falls back to
- * unhighlighted text, which looks like a styling bug rather than a missing
- * build step.
+ * The tree-sitter grammars in dist/extraction/wasm/ are checked the same way
+ * and for the same reason. They are copied by `npm run copy-assets`, they are
+ * what both indexing and the viewer's syntax classification parse with, and
+ * their absence is survivable at runtime — source is served unhighlighted —
+ * which is exactly why it has to fail here: nothing downstream would complain.
  *
  * Usage: node scripts/check-ui-build.mjs [--root <dir>]
  *   --root  directory holding dist/ (default: the repo root). The release
  *           bundler points this at its staging dir to verify the copy.
  */
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -95,36 +96,62 @@ for (const compiled of [join('bin', 'codegraph.js'), 'index.js', join('ui', 'shi
   }
 }
 
-// The pruned syntax grammars (scripts/prune-grammars.mjs). Their absence is
-// survivable at runtime — source is served unhighlighted — which is exactly why
-// it has to fail here: nothing downstream would ever complain.
-const textmateDir = join(root, 'dist', 'textmate');
-const manifestPath = join(textmateDir, 'manifest.json');
-if (!existsSync(manifestPath)) {
+// The vendored tree-sitter grammars (`npm run copy-assets`). The viewer reads
+// every file with the same grammar the engine indexed it with, so a missing
+// wasm is both an extraction gap and a silently unhighlighted screen.
+const wasmDir = join(root, 'dist', 'extraction', 'wasm');
+
+/**
+ * The grammars the syntax classification is gated on — the eight languages
+ * CG-57 measured parity against, plus the two the TS family needs. Every one is
+ * vendored (see VENDORED_WASM_LANGS), so all of them must be in this directory
+ * rather than resolved out of node_modules.
+ */
+const GATE_GRAMMARS = [
+  'tree-sitter-typescript.wasm',
+  'tree-sitter-tsx.wasm',
+  'tree-sitter-javascript.wasm',
+  'tree-sitter-go.wasm',
+  'tree-sitter-python.wasm',
+  'tree-sitter-rust.wasm',
+  'tree-sitter-swift.wasm',
+  'tree-sitter-c_sharp.wasm',
+  'tree-sitter-ruby.wasm',
+  'tree-sitter-php.wasm',
+];
+
+if (!existsSync(wasmDir)) {
   fail(
-    `missing ${manifestPath}`,
+    `missing ${wasmDir}`,
     staged
-      ? 'this bundle was assembled before the syntax grammars were added, or dist/textmate was not copied'
-      : 'run `npm run build:textmate` (it needs @shikijs/langs from devDependencies)'
+      ? 'dist/extraction/wasm was not copied into the bundle — re-run scripts/build-bundle.sh'
+      : 'run `npm run copy-assets` (it copies src/extraction/wasm/*.wasm into dist/)'
   );
 }
 
-const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-const languages = Object.keys(manifest.languages ?? {});
-if (languages.length === 0) fail('dist/textmate/manifest.json lists no languages');
+// Against the source tree, the source directory IS the list — nothing to drift.
+// Inside a staged bundle there is no src/, so the gate list carries it.
+const expectedGrammars = new Set(GATE_GRAMMARS);
+const srcWasmDir = join(root, 'src', 'extraction', 'wasm');
+if (!staged && existsSync(srcWasmDir)) {
+  for (const name of readdirSync(srcWasmDir)) {
+    if (name.endsWith('.wasm')) expectedGrammars.add(name);
+  }
+}
 
-const grammarFiles = new Set(Object.values(manifest.languages).flat());
-const missingGrammars = [...grammarFiles].filter(
-  (name) => !existsSync(join(textmateDir, `${name}.json`))
+const missingGrammars = [...expectedGrammars].filter(
+  (name) => !existsSync(join(wasmDir, name))
 );
 if (missingGrammars.length > 0) {
   fail(
-    `dist/textmate is missing ${missingGrammars.length} grammar file(s): ${missingGrammars.join(', ')}`,
-    'the prune step was interrupted or dist/textmate was copied incompletely'
+    `dist/extraction/wasm is missing ${missingGrammars.length} grammar(s): ${missingGrammars.join(', ')}`,
+    'the copy-assets step was interrupted or dist/extraction/wasm was copied incompletely'
   );
 }
 
+const grammarCount = readdirSync(wasmDir).filter((n) => n.endsWith('.wasm')).length;
+
 console.log(
   `[check-ui-build] dist/viewer ok (index.html + ${assets} referenced asset(s)); ` +
-    `dist/textmate ok (${languages.length} languages, ${grammarFiles.size} grammars); dist/ engine intact`
+    `dist/extraction/wasm ok (${grammarCount} grammars); dist/ engine intact`
 );

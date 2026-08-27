@@ -11,7 +11,7 @@ Distributed as `@colbymchenry/codegraph` on npm; same binary serves as installer
 ## Build, Test, Run
 
 ```bash
-npm run build           # tsc + copy schema.sql and *.wasm + prune TextMate grammars + build the viewer into dist/; chmods dist/bin/codegraph.js
+npm run build           # tsc + copy schema.sql and *.wasm + build the viewer into dist/; chmods dist/bin/codegraph.js
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -29,10 +29,12 @@ npx vitest run __tests__/extraction.test.ts -t "TypeScript"
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
 
-Two other build steps write into `dist/` and are subject to the same rule:
-`build:textmate` (`scripts/prune-grammars.mjs`) writes the viewer's syntax grammars to `dist/textmate/`, and
-`build:ui` builds the browser viewer into `dist/viewer/` (never `dist/ui/` — that's the terminal ui).
-`scripts/check-ui-build.mjs` asserts both trees after every build and inside every release archive.
+One other build step writes into `dist/` and is subject to the same rule: `build:ui` builds the
+browser viewer into `dist/viewer/` (never `dist/ui/` — that's the terminal ui).
+`scripts/check-ui-build.mjs` asserts both `dist/viewer/` and the copied grammars in
+`dist/extraction/wasm/` after every build and inside every release archive — the viewer's syntax
+highlighting reads a file with the same grammar the engine indexed it with, so a missing wasm is an
+unhighlighted screen as well as an extraction gap.
 
 Node engines: `>=20.0.0 <25.0.0`. There is a hard exit on Node 25.x and below 20 (see `src/bin/node-version-check.ts`).
 

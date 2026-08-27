@@ -1,87 +1,34 @@
 /**
- * Engine `Language` → TextMate grammar, and the closure of grammars that has
- * to ship for those to load.
+ * Which engine language a file's source is classified with (CG-57).
  *
- * The engine indexes 40-odd languages; Shiki carries 700-odd grammars. Shipping
- * all of them would put 11 MB of JSON in the bundle to serve 40, so the build
- * prunes them (`scripts/prune-grammars.mjs`) to exactly the closure this table
- * names — which is why the table lives in its own module: the build script
- * reads the compiled `dist/ui-server/highlight/languages.js` rather than keeping
- * a second copy of the mapping that could drift from the runtime's.
+ * There is no second grammar table any more. The viewer reads a file with the
+ * grammar the *engine* parsed it with, so this is a question about coverage
+ * rather than about mapping: a language the extractor has a tree-sitter grammar
+ * for classifies; one it does not renders plain, with its identifiers still
+ * split out so the graph's call-site links land exactly as they do everywhere
+ * else. Highlighting is the part that degrades, never the linking.
  *
- * A language with no entry (or with `null`) is not an error. It renders as
- * plain text with its identifiers still split out, so the graph's call-site
- * links land exactly as they do everywhere else — highlighting is the part that
- * degrades, never the linking.
+ * The three single-file-component formats are the exception worth naming. A
+ * `.svelte`, `.vue` or `.astro` file has no grammar of its own here — the
+ * extractors pull the `<script>` block out and hand it to TypeScript or
+ * JavaScript — and the classifier does exactly the same thing, so a component's
+ * code is read by the grammar its symbols came from while the surrounding
+ * markup stays plain.
  */
 
 import type { Language } from '../../types';
+import { hasTreeSitterGrammar } from '../../extraction/grammars';
 
 /**
- * The grammar each indexed language is read with.
+ * Formats whose source is classified through their embedded script blocks.
  *
- * Three of these are deliberate approximations, marked below: Shiki has no
- * ColdFusion grammar, and the three CFML dialects the engine distinguishes are
- * each a close relative of something it does have. An approximate keyword set
- * is a better answer than no colouring at all, and nothing downstream depends
- * on the grammar being exact — the links come from the graph.
+ * Kept beside `syntaxRegionsFor`, which decides where those blocks are — this
+ * list only has to agree about *which* formats have them.
  */
-export const LANGUAGE_GRAMMAR: Record<Language, string | null> = {
-  typescript: 'typescript',
-  javascript: 'javascript',
-  tsx: 'tsx',
-  jsx: 'jsx',
-  // ArkTS is TypeScript plus HarmonyOS decorators — the TS grammar reads it.
-  arkts: 'typescript',
-  python: 'python',
-  go: 'go',
-  rust: 'rust',
-  java: 'java',
-  c: 'c',
-  cpp: 'cpp',
-  csharp: 'csharp',
-  razor: 'razor',
-  php: 'php',
-  ruby: 'ruby',
-  swift: 'swift',
-  kotlin: 'kotlin',
-  dart: 'dart',
-  svelte: 'svelte',
-  vue: 'vue',
-  astro: 'astro',
-  liquid: 'liquid',
-  pascal: 'pascal',
-  scala: 'scala',
-  lua: 'lua',
-  luau: 'luau',
-  objc: 'objective-c',
-  r: 'r',
-  solidity: 'solidity',
-  nix: 'nix',
-  yaml: 'yaml',
-  twig: 'twig',
-  xml: 'xml',
-  properties: 'properties',
-  // Approximations — no CFML grammar exists. Tag soup reads as HTML, cfscript
-  // is a JavaScript-shaped dialect, and a <cfquery> body is SQL.
-  cfml: 'html',
-  cfscript: 'javascript',
-  cfquery: 'sql',
-  cobol: 'cobol',
-  vbnet: 'vb',
-  erlang: 'erlang',
-  terraform: 'terraform',
-  // Not a language, the absence of one: a file no extractor claimed.
-  unknown: null,
-};
-
-/** Every grammar the build must prune to, de-duplicated, in a stable order. */
-export const REQUIRED_GRAMMARS: readonly string[] = [
-  ...new Set(Object.values(LANGUAGE_GRAMMAR).filter((id): id is string => id !== null)),
-].sort();
+export const COMPONENT_LANGUAGES: readonly Language[] = ['svelte', 'vue', 'astro'];
 
 /**
- * The grammar for an indexed language, or null when it has none.
+ * The grammar a file of this language is read with, or null when it has none.
  *
  * Accepts the raw string off a `FileRecord` rather than a `Language`, because
  * an index written by an older engine can hold a language this build has since
@@ -89,5 +36,12 @@ export const REQUIRED_GRAMMARS: readonly string[] = [
  */
 export function grammarFor(language: string | undefined | null): string | null {
   if (!language) return null;
-  return LANGUAGE_GRAMMAR[language as Language] ?? null;
+  const lang = language as Language;
+  if (COMPONENT_LANGUAGES.includes(lang)) return 'typescript';
+  return hasTreeSitterGrammar(lang) ? lang : null;
+}
+
+/** Whether a file of this language classifies at all. For tests and diagnostics. */
+export function isHighlightable(language: string | undefined | null): boolean {
+  return grammarFor(language) !== null;
 }

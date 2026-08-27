@@ -671,6 +671,8 @@ describe('GET /api/source', () => {
       'string',
       'keyword',
       'number',
+      'type',
+      'def',
     ]);
     expect(body.highlight.lines).toHaveLength(body.lines.length);
     // Every line's tokens reproduce that line exactly — the code block renders

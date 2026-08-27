@@ -2,7 +2,8 @@
  * Turning the server's classified source into tokens the code block can draw.
  *
  * The classification itself happens on the server (`src/ui-server/highlight/`),
- * with real TextMate grammars via Shiki. What arrives is deliberately small:
+ * off the engine's own tree-sitter parse — the same grammar that decided what
+ * the file's symbols are. What arrives is deliberately small:
  * one array per line, each entry a `[classId, text]` pair, with the class names
  * carried alongside so the payload is self-describing. This module does two
  * things to it and nothing else — resolve the class ids to names, and compute
@@ -23,7 +24,18 @@
  * underline land on the callee's own name whatever boundaries a grammar chose.
  */
 
-export type TokenClass = 'other' | 'ident' | 'comment' | 'string' | 'keyword' | 'number';
+export type TokenClass =
+  | 'other'
+  | 'ident'
+  | 'comment'
+  | 'string'
+  | 'keyword'
+  | 'number'
+  /** A named type reference. Plain ink today — the class is here so a consumer
+   *  of this payload can style it without a second round of server work. */
+  | 'type'
+  /** The name a definition declares, from the extractor's own tables. */
+  | 'def';
 
 export interface Token {
   cls: TokenClass;
@@ -36,7 +48,7 @@ export interface Token {
 export type WireToken = [number, string];
 
 export interface WireHighlight {
-  engine: 'shiki' | 'plain';
+  engine: 'tree-sitter' | 'plain';
   grammar: string | null;
   classes: string[];
   lines: WireToken[][];
@@ -51,6 +63,8 @@ const CLASS_NAMES: ReadonlySet<string> = new Set<TokenClass>([
   'string',
   'keyword',
   'number',
+  'type',
+  'def',
 ]);
 
 /**
@@ -116,7 +130,15 @@ export function tokensByLine(
   return byLine;
 }
 
-/** The CSS class for a token, or null where the default ink is right. */
+/**
+ * The CSS class for a token, or null where the default ink is right.
+ *
+ * `type` deliberately returns null: the design's code colouring is
+ * near-monochrome and a type name is not one of the four things it moves off
+ * plain ink. It stays a distinct class on the wire because the classification
+ * is free once the tree has been walked, and re-deriving it in a consumer would
+ * not be.
+ */
 export function tokenClass(cls: TokenClass): string | null {
   switch (cls) {
     case 'comment':
@@ -127,6 +149,8 @@ export function tokenClass(cls: TokenClass): string | null {
       return 't-k';
     case 'number':
       return 't-n';
+    case 'def':
+      return 't-def';
     default:
       return null;
   }

@@ -163,7 +163,7 @@ export interface WireSource {
   truncated?: boolean;
   reason?: string;
   /**
-   * The same lines, classified by the server's TextMate grammars — one entry
+   * The same lines, classified by the server's tree-sitter parse — one entry
    * per line, each a list of `[classId, text]` pairs indexed into `classes`.
    * Absent whenever `lines` is, and `engine: 'plain'` whenever no grammar
    * covers the file. See `lib/highlight.ts`.

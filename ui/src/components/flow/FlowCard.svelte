@@ -8,7 +8,7 @@
   pinned here so the arrows land where the arithmetic said they would.
 
   The source window is the Symbol view's code block with the noise removed. It
-  keeps the two things that make the code readable: the server's TextMate
+  keeps the two things that make the code readable: the server's classified
   classification, and one accent link on the identifier the graph resolved. It
   drops gutter ports and multi-window folding, because a seven-line card has
   neither a gutter worth reading nor anything to fold.
@@ -213,7 +213,7 @@
   }
 
   /* Token classes — the same near-monochrome ramp the Symbol view paints
-     (design spec §2.2); the class names come from the server's theme. */
+     (design spec §2.2); the class names come from the server's classifier. */
   .t-c {
     color: var(--code-comment);
   }
@@ -225,6 +225,11 @@
   }
   .t-n {
     color: var(--ink-2);
+  }
+
+  /* A definition's own name, from the extractor's tables. */
+  .t-def {
+    font-weight: 600;
   }
 
   /* The only colour in the window: the call this card is opened at. */

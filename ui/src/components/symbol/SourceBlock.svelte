@@ -4,10 +4,11 @@
 
   Two things make this more than a <pre>:
 
-  * Syntax classification arrives already done, from `/api/source` — real
-    TextMate grammars, run server-side, indexed by file line. The whole slice
-    is tokenised in one pass there, so a window that starts 200 lines into a
-    body still knows it is inside a block comment; nothing is re-lexed here.
+  * Syntax classification arrives already done, from `/api/source` — taken off
+    the engine's own tree-sitter parse, server-side, indexed by file line. The
+    whole slice is classified in one pass there, so a window that starts 200
+    lines into a body still knows it is inside a block comment; nothing is
+    re-lexed here.
   * Each ref is matched to an actual token rather than to a column, because the
     recorded column points at the start of the calling expression — see
     `assignRefs`. The overlay CLAIMS a token the highlighter produced; it never

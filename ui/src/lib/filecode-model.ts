@@ -60,12 +60,13 @@ export const OVERSCAN_LINES = 24;
 /**
  * Source lines fetched in one page.
  *
- * Measured on this repo's own TypeScript with the shipped Shiki setup: a warm
- * grammar tokenises ~7 000 lines/second, so a page plus its lead-in is ~130 ms
- * of single-threaded server. Bigger pages mean fewer, longer stalls; smaller
- * ones mean the lead-in dominates. The scroll itself never waits on this —
- * ports, arcs and rail rows are already drawn from the graph, and the text
- * arrives behind them.
+ * Measured on this repo's own TypeScript with the shipped classifier: a loaded
+ * grammar classifies ~50 000 lines/second (CG-57 replaced the TextMate path,
+ * which managed ~4 000), so a page plus its lead-in is ~20 ms of
+ * single-threaded server. Bigger pages mean fewer, longer stalls; smaller ones
+ * mean the lead-in dominates. The scroll itself never waits on this — ports,
+ * arcs and rail rows are already drawn from the graph, and the text arrives
+ * behind them.
  */
 export const PAGE_LINES = 800;
 
@@ -73,7 +74,7 @@ export const PAGE_LINES = 800;
  * Lines fetched BEFORE a page and thrown away.
  *
  * A page that starts in the middle of a block comment, a template literal or a
- * JSX block does not know it: TextMate state is built by scanning from the top.
+ * JSX block does not know it: a parse starts from the top of what it is given.
  * Tokenising a run-up and discarding it is what keeps page 6 from rendering a
  * doc comment as code. The same trick the Flow strip's source windows use, at a
  * different scale — 150 lines covers every real comment block; a 3 000-line
