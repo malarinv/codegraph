@@ -1919,7 +1919,14 @@ ${BROWSER_ENV}=none to never open one.
       process.exit(1);
     }
 
-    const { startUiServer, openBrowser, ViewerMissingError } = await import('../ui-server');
+    const { startUiServer, openBrowser, createGraphApi, ViewerMissingError } = await import(
+      '../ui-server'
+    );
+
+    // The read-only JSON API the viewer reads its screens from. It opens the
+    // index lazily on the first request, so a slow first paint is the only cost
+    // of mounting it here rather than after the browser connects.
+    const api = createGraphApi({ projectRoot: projectPath });
 
     let handle: UiServerHandle;
     try {
@@ -1927,8 +1934,10 @@ ${BROWSER_ENV}=none to never open one.
         projectRoot: projectPath,
         port: requestedPort,
         portFallback: requestedPort === undefined,
+        api: api.handler,
       });
     } catch (err) {
+      api.close();
       // Both failure modes here (viewer assets missing, no port available) carry
       // their own remediation — print it plainly, never a stack trace.
       error(err instanceof ViewerMissingError || err instanceof Error ? err.message : String(err));
@@ -1954,6 +1963,9 @@ ${BROWSER_ENV}=none to never open one.
     // The http server keeps the event loop alive on its own; these just make
     // Ctrl-C hang up live sockets instead of waiting on browser keep-alives.
     const shutdown = (): void => {
+      // Release the SQLite handle before the socket: the process should never
+      // exit with a live connection to the user's index.
+      api.close();
       void handle.close().then(() => process.exit(0));
     };
     process.once('SIGINT', shutdown);

@@ -2,9 +2,10 @@
  * The `codegraph ui` server.
  *
  * A loopback-only, read-only `node:http` server that hands the browser the
- * built viewer (`dist/viewer/`) and — once the JSON API lands on the `api` seam
- * below — a read-only view of one indexed project. No framework, no new
- * dependency: it answers GET, serves files, and refuses everything else.
+ * built viewer (`dist/viewer/`) and, through the JSON API mounted on the `api`
+ * seam below (`./api`), a read-only view of one indexed project. No framework,
+ * no new dependency: it answers GET, serves files, and refuses everything
+ * else.
  *
  * The interesting part is not the routing, it is the boundary in `security.ts`.
  * Read that first.
@@ -43,6 +44,8 @@ export {
 } from './security';
 export { browserOpenCommand, openBrowser } from './open-browser';
 export { contentTypeFor, cacheControlFor } from './static';
+export { createGraphApi, GraphSession, ApiError } from './api';
+export type { GraphApi, GraphApiOptions } from './api';
 
 
 /**
@@ -251,8 +254,16 @@ async function handleRequest(
 
   // Checked on the RAW url, before WHATWG parsing folds `..` segments away.
   const rawPath = (req.url ?? '/').split(/[?#]/)[0] ?? '/';
+  // The `/api/` namespace answers JSON for EVERY outcome, refusals included:
+  // the viewer parses these responses, and a text/plain body here would surface
+  // as a parse error instead of the refusal it actually is.
+  const jsonNamespace = rawPath === '/api' || rawPath.startsWith('/api/');
   if (!isSafeRequestPath(rawPath)) {
-    sendText(res, 404, 'Not found', method);
+    if (jsonNamespace) {
+      sendJson(res, 404, { error: 'Not found', code: 'not-found' }, method);
+    } else {
+      sendText(res, 404, 'Not found', method);
+    }
     return;
   }
 

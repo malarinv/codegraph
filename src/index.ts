@@ -23,6 +23,7 @@ import {
   TaskContext,
   BuildContextOptions,
   FindRelevantContextOptions,
+  UnresolvedReference,
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
 import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
@@ -1321,6 +1322,59 @@ export class CodeGraph {
    */
   getNode(id: string): Node | null {
     return this.queries.getNodeById(id);
+  }
+
+  /**
+   * Get many nodes by id in ONE round-trip (LRU-cache aware).
+   *
+   * The batch form of {@link getNode}. Anything resolving a list of edges to
+   * their endpoints — a caller list, a callee rail, an impact set — must use
+   * this rather than a `getNode` per edge: a symbol with 500 callers is 500
+   * queries otherwise. Ids that name nothing are simply absent from the map.
+   */
+  getNodesByIds(ids: readonly string[]): Map<string, Node> {
+    return this.queries.getNodesByIds(ids);
+  }
+
+  /**
+   * Outgoing edges for many source nodes at once — the batch form of
+   * {@link getOutgoingEdges}. See {@link QueryBuilder.getOutgoingEdgesFrom}.
+   */
+  getOutgoingEdgesFrom(nodeIds: readonly string[], kinds?: Edge['kind'][]): Edge[] {
+    return this.queries.getOutgoingEdgesFrom(nodeIds, kinds);
+  }
+
+  /**
+   * Fan-in (incoming edge count) for many nodes at once — the "hub" signal,
+   * without a query per node. See {@link QueryBuilder.countIncomingEdges}.
+   */
+  getFanIn(ids: readonly string[]): Map<string, number> {
+    return this.queries.countIncomingEdges(ids);
+  }
+
+  /**
+   * Incoming edges for many target nodes at once — the mirror of
+   * {@link getOutgoingEdgesFrom}. See {@link QueryBuilder.getIncomingEdgesTo}.
+   */
+  getIncomingEdgesTo(nodeIds: readonly string[], kinds?: Edge['kind'][]): Edge[] {
+    return this.queries.getIncomingEdgesTo(nodeIds, kinds);
+  }
+
+  /**
+   * Fan-out (outgoing edge count) for many nodes at once — the mirror of
+   * {@link getFanIn}. See {@link QueryBuilder.countOutgoingEdges}.
+   */
+  getFanOut(ids: readonly string[]): Map<string, number> {
+    return this.queries.countOutgoingEdges(ids);
+  }
+
+  /**
+   * References from a symbol that never resolved to an indexed node — the
+   * calls and type mentions that leave the index. Lets a reader account for
+   * the call sites that have no callee row instead of implying there are none.
+   */
+  getUnresolvedReferencesFrom(nodeId: string): UnresolvedReference[] {
+    return this.queries.getUnresolvedReferencesFrom(nodeId);
   }
 
   /**

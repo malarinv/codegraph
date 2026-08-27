@@ -245,6 +245,7 @@ export class QueryBuilder {
     deleteEdgesByTarget?: SqliteStatement;
     getEdgesBySource?: SqliteStatement;
     getEdgesByTarget?: SqliteStatement;
+    getUnresolvedFromNode?: SqliteStatement;
     insertFile?: SqliteStatement;
     updateFile?: SqliteStatement;
     deleteFile?: SqliteStatement;
@@ -1860,6 +1861,133 @@ export class QueryBuilder {
     }
     const rows = this.stmts.getEdgesByTarget.all(targetId) as EdgeRow[];
     return rows.map(rowToEdge);
+  }
+
+  /**
+   * Outgoing edges for MANY source nodes in one query.
+   *
+   * The batch form of {@link getOutgoingEdges}. Building a nested outline needs
+   * the `contains` edges of every container in a file at once; doing that one
+   * source at a time is a query per symbol on files that have hundreds.
+   */
+  getOutgoingEdgesFrom(sourceIds: readonly string[], kinds?: EdgeKind[]): Edge[] {
+    if (sourceIds.length === 0) return [];
+    const unique = [...new Set(sourceIds)];
+    const out: Edge[] = [];
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      let sql = `SELECT * FROM edges WHERE source IN (${placeholders})`;
+      const params: string[] = [...chunk];
+      if (kinds && kinds.length > 0) {
+        sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+        params.push(...kinds);
+      }
+      const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
+      for (const row of rows) out.push(rowToEdge(row));
+    }
+    return out;
+  }
+
+  /**
+   * Fan-in (total incoming edge count) for MANY nodes in one query.
+   *
+   * The per-node alternative — `getIncomingEdges(id).length` — is an indexed
+   * lookup each, but a symbol screen rendering a couple of hundred callees
+   * would issue a couple of hundred of them. Ids with no incoming edges are
+   * absent from the map rather than present as 0, so callers can tell "no
+   * edges" from "not asked about".
+   */
+  countIncomingEdges(ids: readonly string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (ids.length === 0) return out;
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT target, COUNT(*) AS count FROM edges WHERE target IN (${placeholders}) GROUP BY target`
+        )
+        .all(...chunk) as Array<{ target: string; count: number }>;
+      for (const row of rows) out.set(row.target, row.count);
+    }
+    return out;
+  }
+
+  /**
+   * Incoming edges for MANY target nodes in one query — the mirror of
+   * {@link getOutgoingEdgesFrom}. Needed wherever a whole file's inbound edges
+   * are wanted at once ("which files import anything in this one?").
+   */
+  getIncomingEdgesTo(targetIds: readonly string[], kinds?: EdgeKind[]): Edge[] {
+    if (targetIds.length === 0) return [];
+    const unique = [...new Set(targetIds)];
+    const out: Edge[] = [];
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      let sql = `SELECT * FROM edges WHERE target IN (${placeholders})`;
+      const params: string[] = [...chunk];
+      if (kinds && kinds.length > 0) {
+        sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+        params.push(...kinds);
+      }
+      const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
+      for (const row of rows) out.push(rowToEdge(row));
+    }
+    return out;
+  }
+
+  /**
+   * Fan-out (total outgoing edge count) for MANY nodes in one query — the
+   * mirror of {@link countIncomingEdges}. Ids with no outgoing edges are absent
+   * from the map rather than present as 0.
+   */
+  countOutgoingEdges(ids: readonly string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (ids.length === 0) return out;
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT source, COUNT(*) AS count FROM edges WHERE source IN (${placeholders}) GROUP BY source`
+        )
+        .all(...chunk) as Array<{ source: string; count: number }>;
+      for (const row of rows) out.set(row.source, row.count);
+    }
+    return out;
+  }
+
+  /**
+   * References recorded against a symbol that never resolved to a node — the
+   * calls and type mentions that leave the index (a third-party package, a
+   * runtime builtin, a language construct extraction doesn't model).
+   *
+   * Read-only. It exists so a reader can say "N calls into symbols outside the
+   * index" instead of silently showing a callee list shorter than the body's
+   * call sites, which reads as "nothing else happens here".
+   */
+  getUnresolvedReferencesFrom(fromNodeId: string): UnresolvedReference[] {
+    if (!this.stmts.getUnresolvedFromNode) {
+      this.stmts.getUnresolvedFromNode = this.db.prepare(
+        'SELECT * FROM unresolved_refs WHERE from_node_id = ?'
+      );
+    }
+    const rows = this.stmts.getUnresolvedFromNode.all(fromNodeId) as UnresolvedRefRow[];
+    return rows.map((row) => ({
+      fromNodeId: row.from_node_id,
+      referenceName: row.reference_name,
+      referenceKind: row.reference_kind as EdgeKind,
+      line: row.line,
+      column: row.col,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      filePath: row.file_path,
+      language: row.language as Language,
+      rowId: row.id,
+    }));
   }
 
   /**
