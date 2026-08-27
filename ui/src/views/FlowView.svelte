@@ -18,6 +18,7 @@
   import '@xyflow/svelte/dist/style.css';
   import FlowCard from '../components/flow/FlowCard.svelte';
   import FlowLink from '../components/flow/FlowLink.svelte';
+  import FlowEndCap from '../components/flow/FlowEndCap.svelte';
   import { fetchFlow, type WireFlow, type WireFlowPayload } from '../lib/api';
   import { live } from '../lib/live.svelte';
   import { navigate, symbolHref } from '../lib/router.svelte';
@@ -55,7 +56,7 @@
    * there for anyone who wants the shape rather than the code.
    */
   const START_VIEWPORT = { x: 0, y: 0, zoom: 1 };
-  const nodeTypes = { flow: FlowCard };
+  const nodeTypes = { flow: FlowCard, cap: FlowEndCap };
   const edgeTypes = { flow: FlowLink };
 
   /** The hops the trail form asks for, as `<dir><id>` — the wire's own spelling. */
@@ -107,24 +108,41 @@
 
   const nodes = $derived.by<Node[]>(() => {
     if (layout === null) return [];
-    return layout.cards.map((card) => ({
-      id: card.id,
-      type: 'flow',
-      position: { x: card.x, y: card.y },
+    const caps: Node[] = layout.endCaps.map((cap) => ({
+      id: cap.id,
+      type: 'cap',
+      position: { x: cap.x, y: cap.y },
       draggable: false,
       selectable: false,
       connectable: false,
       data: {
-        // The accent border marks the picked path, and only means something
-        // when there is more than one on screen. A single flow whose every
-        // card is accented has said nothing.
-        card,
-        current: showAll && card.step >= 0,
-        dimmed: showAll && card.step < 0,
-        onOpen: openCard,
-        onFollow: followCard,
+        cap,
+        dimmed: showAll && picked !== null && !cap.flows.includes(picked),
+        onOpen: openNode,
       },
     }));
+    // Caps first, so a card that overlaps one paints on top of it.
+    return [
+      ...caps,
+      ...layout.cards.map((card) => ({
+        id: card.id,
+        type: 'flow',
+        position: { x: card.x, y: card.y },
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        data: {
+          // The accent border marks the picked path, and only means something
+          // when there is more than one on screen. A single flow whose every
+          // card is accented has said nothing.
+          card,
+          current: showAll && card.step >= 0,
+          dimmed: showAll && card.step < 0,
+          onOpen: openCard,
+          onFollow: followCard,
+        },
+      })),
+    ];
   });
 
   const edges = $derived.by<Edge[]>(() => {
@@ -172,6 +190,19 @@
     );
   }
 
+  /**
+   * A row on the end cap: a candidate runtime target, or a continuation the
+   * search refused to follow.
+   *
+   * It opens as a fresh start rather than as another hop, because neither is a
+   * call the graph recorded — pushing one onto the trail would draw a step
+   * nobody took. That is the whole reason the cap exists.
+   */
+  function openNode(nodeId: string): void {
+    trail.clear();
+    navigate(symbolHref(nodeId));
+  }
+
   /** The accent link inside a card: step to the symbol it names. */
   function followCard(card: FlowCardLayout): void {
     const target = card.hop.callRef?.targetId;
@@ -183,6 +214,9 @@
   function note(p: WireFlowPayload): string {
     if (p.query.kind === 'trail') {
       return 'Your trail, read as a flow: each card is opened at the line that carried you to the next one.';
+    }
+    if (p.flows.some((f) => f.partial)) {
+      return 'No static path connects them. The card is where the looking stopped — a call whose target is chosen at runtime — and the cap names the form, the key and who could be on the other side.';
     }
     if (p.query.kind === 'directed') {
       return 'Every card is a call the graph recorded. A dashed link is a hop no one can see in the source — a callback, an interface, a re-render — and it names where it was wired.';
@@ -205,7 +239,9 @@
         }}
       >
         {#each flows as flow (flow.id)}
-          <option value={flow.id}>{flow.label} · {flow.hops.length} hops</option>
+          <option value={flow.id}
+            >{flow.label}{flow.hops.length > 1 ? ` · ${flow.hops.length} hops` : ''}</option
+          >
         {/each}
         {#if flows.length > 1}
           <option value={ALL}>All {flows.length} paths</option>
@@ -265,8 +301,11 @@
     {/if}
   </div>
 
-  {#if payload && (payload.ambiguous.length > 0 || payload.unresolved.length > 0)}
+  {#if payload && (payload.reason !== null || payload.ambiguous.length > 0 || payload.unresolved.length > 0) && layout !== null}
     <footer class="fnote">
+      {#if payload.reason !== null}
+        <p>{payload.reason}</p>
+      {/if}
       {#each payload.ambiguous as amb (amb.token)}
         <p>
           <span class="mono">{amb.token}</span> names {amb.others.length + 1} definitions.

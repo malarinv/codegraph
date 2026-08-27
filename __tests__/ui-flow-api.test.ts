@@ -30,6 +30,8 @@ import CodeGraph from '../src/index';
 import { createGraphApi, startUiServer, type GraphApi, type UiServerHandle } from '../src/ui-server';
 import { flowEdgeLabel, parseFlowQuery } from '../src/ui-server/api/flow';
 import { resolveNamedSymbolFlow } from '../src/graph/named-symbol-flow';
+import { ToolHandler } from '../src/mcp/tools';
+import { continuationsFrom } from '../src/graph/dynamic-boundary-report';
 import type { Edge } from '../src/types';
 
 let server: UiServerHandle;
@@ -149,6 +151,46 @@ export function describeRow(id: string): string {
     `export function describeRow(id: string): string {
   return id;
 }
+`
+  );
+
+  // A registry whose call target is a string key (CG-51): one site whose key is
+  // a literal — so a candidate shortlist is possible — and one whose key is a
+  // runtime value, where claiming a candidate would be a guess.
+  write(
+    projectRoot,
+    'src/router/table.ts',
+    `type Handler = (payload: string) => string;
+
+const routerTable: Record<string, Handler> = {};
+
+export function register(key: string, fn: Handler): void {
+  routerTable[key] = fn;
+}
+
+export function routeSave(payload: string): string {
+  return routerTable['save'](payload);
+}
+
+export function routeAny(name: string, payload: string): string {
+  return routerTable[name](payload);
+}
+
+export function beginWork(name: string, payload: string): string {
+  return routeAny(name, payload);
+}
+`
+  );
+  write(
+    projectRoot,
+    'src/router/handlers.ts',
+    `import { register } from './table';
+
+export function onSave(payload: string): string {
+  return payload;
+}
+
+register('save', onSave);
 `
   );
 
@@ -340,6 +382,130 @@ describe('GET /api/flow — a directed question', () => {
     expect(ambiguity).toBeDefined();
     expect(ambiguity.chosen.file).toBe('src/db/describe.ts');
     expect(ambiguity.others.map((o: any) => o.file)).toContain('__tests__/rows.test.ts');
+  });
+});
+
+describe('GET /api/flow — where the graph stops', () => {
+  it('caps a keyed dispatch with its form, its key and a candidate target', async () => {
+    const payload = await getFlow('?from=routeSave&to=onSave');
+    // No static edge crosses `routerTable['save']`, so this is not a path — it
+    // is the one card where the looking stopped, plus the cap.
+    expect(payload.reason).toMatch(/No chain of calls reaches onSave/);
+    const flow = payload.flows[0];
+    expect(flow.partial).toBe(true);
+    expect(names(flow)).toEqual(['routeSave']);
+
+    const boundary = flow.boundary;
+    expect(boundary.node.name).toBe('routeSave');
+    const site = boundary.sites[0];
+    expect(site.form).toBe('computed-call');
+    expect(site.label).toBe('computed member call');
+    expect(site.key).toBe('save');
+    expect(site.line).toBeGreaterThan(boundary.node.line);
+    expect(site.candidates.map((c: any) => c.display)).toContain('onSave');
+    // The reader named it, so the cap says so rather than presenting it as new.
+    expect(site.candidates.find((c: any) => c.display === 'onSave').named).toBe(true);
+    expect(boundary.missed.map((m: any) => m.name)).toContain('onSave');
+  });
+
+  it('opens the card at the dispatch line, with real source around it', async () => {
+    const payload = await getFlow('?from=routeSave&to=onSave');
+    const flow = payload.flows[0];
+    const site = flow.boundary.sites[0];
+    const source = flow.hops[0].source;
+    expect(source.drift).toBe(false);
+    expect(source.from).toBeLessThanOrEqual(site.line);
+    expect(source.to).toBeGreaterThanOrEqual(site.line);
+    expect(source.lines.join('\n')).toContain("routerTable['save']");
+  });
+
+  it('claims no candidates when the key is a runtime value', async () => {
+    const payload = await getFlow('?from=routeAny&to=onSave');
+    const site = payload.flows[0].boundary.sites[0];
+    expect(site.form).toBe('computed-call');
+    expect(site.key).toBeNull();
+    expect(site.candidates).toEqual([]);
+    expect(site.candidateNote).toBeNull();
+  });
+
+  it('caps a chain that connects but never reaches everything it was asked about', async () => {
+    const payload = await getFlow('?symbols=beginWork,routeAny,onSave');
+    const flow = payload.flows[0];
+    expect(flow.partial).toBe(false);
+    expect(names(flow)).toEqual(['beginWork', 'routeAny']);
+    // The cap hangs off the dead end, not off the symbol that was named last.
+    expect(flow.boundary.node.name).toBe('routeAny');
+    expect(flow.boundary.sites[0].form).toBe('computed-call');
+    expect(flow.boundary.missed.map((m: any) => m.name)).toEqual(['onSave']);
+    // The last card opens at the dispatch line the cap beside it describes.
+    const last = flow.hops[flow.hops.length - 1].source;
+    const stop = flow.boundary.sites[0].line;
+    expect(last.from).toBeLessThanOrEqual(stop);
+    expect(last.to).toBeGreaterThanOrEqual(stop);
+  });
+
+  it('never caps a flow that reaches what it was asked for', async () => {
+    const payload = await getFlow('?from=bootstrap&to=toRow');
+    expect(payload.flows[0].boundary).toBeNull();
+    expect(payload.flows[0].partial).toBe(false);
+  });
+
+  it('stays silent when nothing connects and no dispatch site explains it', async () => {
+    // `bootstrap` and `orphanHandler` are both ordinary code. Inventing a
+    // stopping point here would be a claim, not a finding.
+    const payload = await getFlow('?from=bootstrap&to=orphanHandler');
+    expect(payload.flows).toEqual([]);
+  });
+
+  it('counts the calls the path did not need and lists them', async () => {
+    const payload = await getFlow('?symbols=beginWork,routeAny,onSave');
+    const { further, uncertain } = payload.flows[0].boundary;
+    // The count and the list are the same fact — the rule every payload keeps.
+    expect(further.shown).toBe(further.items.length);
+    expect(further.total).toBeGreaterThanOrEqual(further.shown);
+    expect(uncertain.shown).toBe(uncertain.items.length);
+  });
+});
+
+describe('the end cap and codegraph_explore agree', () => {
+  it('names the same site, the same key and the same candidate', async () => {
+    const payload = await getFlow('?from=routeSave&to=onSave');
+    const site = payload.flows[0].boundary.sites[0];
+
+    const cg = CodeGraph.openSync(projectRoot);
+    try {
+      const res = await new ToolHandler(cg).execute('codegraph_explore', {
+        query: 'routeSave onSave',
+      });
+      const text = res.content[0].text as string;
+      // Both renderings come from `findDynamicBoundaries`; if they ever drift
+      // apart, a reader with the strip and the MCP answer side by side has no
+      // way to tell which one is lying.
+      expect(text).toContain('**Dynamic boundaries');
+      expect(text).toContain(site.label);
+      expect(text).toContain(`src/router/table.ts:${site.line}`);
+      expect(text).toContain(`candidates for key \`${site.key}\``);
+      for (const candidate of site.candidates) expect(text).toContain(candidate.display);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('splits a symbol\'s outgoing calls into the sure and the unfollowed', () => {
+    const cg = CodeGraph.openSync(projectRoot);
+    try {
+      const node = cg.getNodesByName('handleRequest')[0]!;
+      const all = continuationsFrom(cg, node);
+      expect(all.resolved.map((c) => c.node.name)).toContain('loadRow');
+      expect(all.uncertain.every((c) => (c.confidence ?? 1) < 0.6)).toBe(true);
+      // Excluding what is already on the path is what keeps the cap from
+      // listing the hop the reader just walked as an unexplored exit.
+      const target = all.resolved[0]!.node.id;
+      const rest = continuationsFrom(cg, node, new Set([target]));
+      expect(rest.resolved.map((c) => c.node.id)).not.toContain(target);
+    } finally {
+      cg.close();
+    }
   });
 });
 

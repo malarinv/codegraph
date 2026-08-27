@@ -73,7 +73,7 @@
       const claimed = assignRefs(lineTokens, refs.get(n) ?? []);
       return {
         n,
-        call: n === hop.callRef?.line,
+        call: n === hop.callRef?.line || n === card.stopLine,
         parts: lineTokens.map((token, index): Part => {
           const ref = claimed.get(index) ?? null;
           return { text: token.text, cls: ref ? null : tokenClass(token.cls), ref };

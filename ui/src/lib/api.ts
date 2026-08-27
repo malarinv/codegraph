@@ -459,11 +459,50 @@ export interface WireFlowHop {
   source: WireFlowSource | null;
 }
 
+/** One plausible runtime target of a keyed dispatch — a clickable cap row. */
+export interface WireBoundaryCandidate {
+  node: WireNodeRef;
+  display: string;
+  named: boolean;
+}
+
+/** A dynamic-dispatch site: the form, the key when it is visible, the targets. */
+export interface WireBoundarySite {
+  form: string;
+  label: string;
+  snippet: string;
+  line: number;
+  key: string | null;
+  keyIsType: boolean;
+  moreSites: number;
+  candidates: WireBoundaryCandidate[];
+  candidateNote: string | null;
+}
+
+export interface WireFlowContinuation {
+  node: WireNodeRef;
+  line: number | null;
+  confidence: number | null;
+}
+
+/** Where the graph stops — the strip's end cap (design spec §3.5). */
+export interface WireFlowBoundary {
+  node: WireNodeRef;
+  sites: WireBoundarySite[];
+  uncertain: WireList<WireFlowContinuation>;
+  further: WireList<WireFlowContinuation>;
+  missed: WireNodeRef[];
+}
+
 export interface WireFlow {
   id: string;
   /** "execute → rowToFileRecord", for the header's flow picker. */
   label: string;
   hops: WireFlowHop[];
+  /** Null on a flow that reaches everything it was asked about. */
+  boundary: WireFlowBoundary | null;
+  /** One card at the dispatch site, not a path: the answer ran out here. */
+  partial: boolean;
 }
 
 export interface WireFlowAmbiguity {

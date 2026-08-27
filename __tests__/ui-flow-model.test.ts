@@ -28,8 +28,19 @@ import {
   NO_SOURCE_HEIGHT,
   PADDING,
   ROW_GAP,
+  capId,
+  endCapHeight,
+  endCapText,
+  END_CAP_DASH,
+  END_CAP_WIDTH,
 } from '../ui/src/lib/flow-model';
-import type { WireFlow, WireFlowEdge, WireFlowHop } from '../ui/src/lib/api';
+import type {
+  WireFlow,
+  WireFlowBoundary,
+  WireFlowEdge,
+  WireFlowHop,
+  WireNodeRef,
+} from '../ui/src/lib/api';
 
 /* ------------------------------------------------------------- builders -- */
 
@@ -74,11 +85,54 @@ function hop(name: string, opts: { lines?: number; edge?: WireFlowEdge | null } 
   };
 }
 
-function flow(id: string, names: string[]): WireFlow {
+function flow(
+  id: string,
+  names: string[],
+  extra: { boundary?: WireFlowBoundary | null; partial?: boolean } = {}
+): WireFlow {
   return {
     id,
     label: `${names[0]} → ${names[names.length - 1]}`,
     hops: names.map((name, i) => hop(name, { edge: i === 0 ? null : edge() })),
+    boundary: extra.boundary ?? null,
+    partial: extra.partial === true,
+  };
+}
+
+function ref(name: string): WireNodeRef {
+  return {
+    id: `method:${name}`,
+    kind: 'method',
+    name,
+    qualifiedName: name,
+    file: `src/${name}.ts`,
+    line: 10,
+    endLine: 40,
+    language: 'typescript',
+    test: false,
+  };
+}
+
+function boundary(over: Partial<WireFlowBoundary> = {}): WireFlowBoundary {
+  return {
+    node: ref('routeAny'),
+    sites: [
+      {
+        form: 'computed-call',
+        label: 'computed member call',
+        snippet: "return table[name](payload);",
+        line: 61,
+        key: 'save',
+        keyIsType: false,
+        moreSites: 0,
+        candidates: [{ node: ref('onSave'), display: 'onSave', named: true }],
+        candidateNote: null,
+      },
+    ],
+    uncertain: { total: 0, shown: 0, truncated: false, items: [] },
+    further: { total: 0, shown: 0, truncated: false, items: [] },
+    missed: [ref('onSave')],
+    ...over,
   };
 }
 
@@ -200,6 +254,7 @@ describe('buildFlowLayout — one path', () => {
   it('answers an empty picture for no flows at all', () => {
     expect(buildFlowLayout([], null)).toEqual({
       cards: [],
+      endCaps: [],
       links: [],
       width: 0,
       height: 0,
@@ -248,6 +303,147 @@ describe('buildFlowLayout — two paths that merge', () => {
     expect(at('b').step).toBe(-1);
     // …and the picked path is the one drawn along the top of its columns.
     expect(at('c').y).toBeLessThan(at('b').y);
+  });
+});
+
+describe('endCapText', () => {
+  it('names the form, keeps the key and counts the candidates', () => {
+    const text = endCapText(boundary());
+    expect(text.intro).toContain('routeAny');
+    expect(text.sites[0].headline).toBe('computed member call at line 61');
+    expect(text.sites[0].key).toBe('save');
+    expect(text.sites[0].candidateHeading).toBe('1 candidate target \u203a');
+    expect(text.quiet).toBeNull();
+    expect(text.missed).toContain('onSave');
+  });
+
+  it('says the key is a runtime value rather than leaving the line blank', () => {
+    const b = boundary();
+    b.sites[0]!.key = null;
+    b.sites[0]!.candidates = [];
+    const text = endCapText(b);
+    expect(text.sites[0].key).toBeNull();
+    expect(text.sites[0].notes).toContain('the key is a runtime value');
+    expect(text.sites[0].candidateHeading).toBeNull();
+  });
+
+  it('admits when the detector found nothing rather than implying a cause', () => {
+    const text = endCapText(boundary({ sites: [] }));
+    expect(text.quiet).toMatch(/No dynamic-dispatch site/);
+    expect(text.sites).toEqual([]);
+  });
+
+  it('leads with the unfollowed name-only matches and their confidence', () => {
+    const text = endCapText(
+      boundary({
+        uncertain: {
+          total: 3,
+          shown: 2,
+          truncated: true,
+          items: [
+            { node: ref('save'), line: 61, confidence: 0.4 },
+            { node: ref('store'), line: 62, confidence: 0.35 },
+          ],
+        },
+      })
+    );
+    // The count is the TRUE total, not the length of the visible list.
+    expect(text.uncertainHeading).toBe('3 name-only matches not followed (confidence < 0.6)');
+    expect(text.uncertain).toHaveLength(2);
+  });
+
+  it('counts further resolved calls in the plural the number actually needs', () => {
+    const one = endCapText(
+      boundary({ further: { total: 1, shown: 1, truncated: false, items: [] } })
+    );
+    expect(one.further).toContain('1 further resolved call ');
+    const many = endCapText(
+      boundary({ further: { total: 4, shown: 0, truncated: true, items: [] } })
+    );
+    expect(many.further).toContain('4 further resolved calls ');
+  });
+});
+
+describe('endCapHeight', () => {
+  it('grows with what the cap has to say', () => {
+    const bare = endCapHeight(boundary({ sites: [], missed: [] }));
+    const full = endCapHeight(
+      boundary({
+        uncertain: {
+          total: 2,
+          shown: 2,
+          truncated: false,
+          items: [
+            { node: ref('save'), line: 61, confidence: 0.4 },
+            { node: ref('store'), line: 62, confidence: 0.3 },
+          ],
+        },
+        further: { total: 5, shown: 0, truncated: true, items: [] },
+      })
+    );
+    expect(full).toBeGreaterThan(bare);
+  });
+
+  it('is a whole number, because it is a pixel', () => {
+    expect(Number.isInteger(endCapHeight(boundary()))).toBe(true);
+  });
+});
+
+describe('buildFlowLayout — the end cap', () => {
+  it('places the cap one column past the symbol the path stopped at', () => {
+    const f = flow('f1', ['alpha', 'routeAny'], { boundary: boundary() });
+    const layout = buildFlowLayout([f], 'f1');
+    expect(layout.endCaps).toHaveLength(1);
+    const cap = layout.endCaps[0]!;
+    expect(cap.id).toBe(capId('method:routeAny'));
+    expect(cap.anchorId).toBe('method:routeAny');
+    expect(cap.column).toBe(1 + 1);
+    expect(cap.width).toBe(END_CAP_WIDTH);
+    expect(layout.columns).toBe(3);
+    // The card the cap hangs off is tinted at the dispatch line.
+    expect(layout.cards.find((c) => c.id === 'method:routeAny')!.stopLine).toBe(61);
+    expect(layout.cards.find((c) => c.id === 'method:alpha')!.stopLine).toBeNull();
+  });
+
+  it('joins it with a dotted link that carries no arrow and no edge', () => {
+    const layout = buildFlowLayout([flow('f1', ['alpha', 'routeAny'], { boundary: boundary() })], 'f1');
+    const link = layout.links.find((l) => l.cap);
+    expect(link).toBeDefined();
+    expect(link!.edge).toBeNull();
+    expect(link!.dash).toBe(END_CAP_DASH);
+    expect(link!.label).toBe('end of static path');
+    expect(link!.labelLines.join(' ')).toBe('end of static path');
+    expect(link!.lineLabel).toBeNull();
+  });
+
+  it('draws no cap for a flow that reached what it was asked for', () => {
+    const layout = buildFlowLayout([flow('f1', ['alpha', 'beta'])], 'f1');
+    expect(layout.endCaps).toEqual([]);
+    expect(layout.links.every((l) => !l.cap)).toBe(true);
+  });
+
+  it('draws ONE cap when two paths run out at the same symbol', () => {
+    const a = flow('a', ['alpha', 'routeAny'], { boundary: boundary() });
+    const b = flow('b', ['gamma', 'routeAny'], { boundary: boundary() });
+    const layout = buildFlowLayout([a, b], 'a');
+    expect(layout.endCaps).toHaveLength(1);
+    expect(layout.endCaps[0]!.flows.sort()).toEqual(['a', 'b']);
+  });
+
+  it('leaves room for a cap wider or narrower than a card', () => {
+    const layout = buildFlowLayout([flow('f1', ['alpha', 'routeAny'], { boundary: boundary() })], 'f1');
+    const cap = layout.endCaps[0]!;
+    // The canvas is wide enough to hold the cap, not just the cards.
+    expect(layout.width).toBe(cap.x + cap.width + PADDING);
+    // And the cap starts one gap past the card it hangs off.
+    const anchor = layout.cards.find((c) => c.id === 'method:routeAny')!;
+    expect(cap.x).toBe(anchor.x + CARD_WIDTH + LINK_WIDTH);
+  });
+
+  it('ignores a boundary whose symbol is not on screen', () => {
+    const orphan = boundary({ node: ref('nowhere') });
+    const layout = buildFlowLayout([flow('f1', ['alpha', 'beta'], { boundary: orphan })], 'f1');
+    expect(layout.endCaps).toEqual([]);
   });
 });
 

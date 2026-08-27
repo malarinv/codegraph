@@ -11,6 +11,10 @@
   Straight, not curved: two cards on the same row sit at the same height, and a
   bezier between them would be a decorative wobble. The path bends only when a
   branch puts them on different rows.
+
+  The link into an end cap is the exception with no edge behind it: `2 4` dots,
+  no arrowhead, labelled "end of static path". An arrow would point at a
+  continuation, and the whole point of the cap is that there isn't one.
 -->
 <script lang="ts">
   import { BaseEdge, type EdgeProps } from '@xyflow/svelte';
@@ -39,7 +43,9 @@
 </script>
 
 <BaseEdge {path} class={`flink${d.dimmed ? ' dimmed' : ''}`} style={dashStyle} />
-<polygon class={`fhead${d.dimmed ? ' dimmed' : ''}`} points={head} />
+{#if !d.link.cap}
+  <polygon class={`fhead${d.dimmed ? ' dimmed' : ''}`} points={head} />
+{/if}
 <g class={`flabel${d.dimmed ? ' dimmed' : ''}`}>
   <title>{d.link.label}{d.link.lineLabel ? ` (${d.link.lineLabel})` : ''}</title>
   {#each above as line, i (i)}

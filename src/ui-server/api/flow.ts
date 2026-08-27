@@ -40,11 +40,25 @@ import {
   normalizeToken,
   DIRECTED_MAX_HOPS,
 } from '../../graph/named-symbol-flow';
+import {
+  continuationsFrom,
+  findDynamicBoundaries,
+  type BoundaryContinuation,
+  type NodeBoundary,
+} from '../../graph/dynamic-boundary-report';
 import { highlightLines, type HighlightResult } from '../highlight';
 import { badRequest, intParam } from './respond';
 import { findIndexedFile, hasDriftedOnDisk, splitLines, toRequestPath } from './source';
 import { resolveProjectFile } from '../security';
-import { toNodeRef, toWireEdge, UNCERTAIN_BELOW, type WireEdge, type WireNodeRef } from './wire';
+import {
+  toNodeRef,
+  toWireEdge,
+  wireList,
+  UNCERTAIN_BELOW,
+  type WireEdge,
+  type WireList,
+  type WireNodeRef,
+} from './wire';
 import * as fs from 'fs';
 
 /** Lines shown either side of the call site on a card (design spec §3.5). */
@@ -127,12 +141,80 @@ export interface WireFlowHop {
   source: WireFlowSource | null;
 }
 
+/** One plausible runtime target of a keyed dispatch — a clickable cap row. */
+export interface WireBoundaryCandidate {
+  node: WireNodeRef;
+  /** How to name it: usually the qualified name, or `Class.handlerMethod`. */
+  display: string;
+  /** The question already named this symbol — "you were right, here's the wiring". */
+  named: boolean;
+}
+
+/** A dynamic-dispatch site: the form, the key when it is visible, the targets. */
+export interface WireBoundarySite {
+  /** Stable form id, e.g. `computed-call`. */
+  form: string;
+  /** What to call it on screen: "computed member call", "getattr dispatch". */
+  label: string;
+  /** The source line of the site, trimmed. */
+  snippet: string;
+  line: number;
+  /** The statically visible key (`handlers['save']` → `save`), or null. */
+  key: string | null;
+  /** The key is a TYPE name, so the target is `<Type>Handler` by convention. */
+  keyIsType: boolean;
+  /** Further sites of the same form and key in this body. */
+  moreSites: number;
+  candidates: WireBoundaryCandidate[];
+  /** Why there is no shortlist, when a key was visible but too generic. */
+  candidateNote: string | null;
+}
+
+/** A call out of the stopping symbol, and how sure the resolver was. */
+export interface WireFlowContinuation {
+  node: WireNodeRef;
+  line: number | null;
+  confidence: number | null;
+}
+
+/**
+ * Where the graph stops (design spec §3.5).
+ *
+ * Attached to a flow that does not reach everything the question named. It is
+ * the same verdict `codegraph_explore` announces in prose — both render
+ * `findDynamicBoundaries` — so the strip's end cap and the MCP answer can never
+ * disagree about where a path ends or what could continue it.
+ */
+export interface WireFlowBoundary {
+  /** The last symbol the static path reached. The cap hangs off this card. */
+  node: WireNodeRef;
+  /** Dispatch sites in that symbol's body. Empty when none was detected. */
+  sites: WireBoundarySite[];
+  /** Name-only matches under 0.6 the search did NOT follow. */
+  uncertain: WireList<WireFlowContinuation>;
+  /** Calls the resolver was sure of that this path does not need. */
+  further: WireList<WireFlowContinuation>;
+  /** Symbols the question named that this path never reaches. */
+  missed: WireNodeRef[];
+}
+
 export interface WireFlow {
   /** Stable within a payload: the hop ids joined. Used as the picker's value. */
   id: string;
   /** "execute → rowToFileRecord", for the header's flow picker. */
   label: string;
   hops: WireFlowHop[];
+  /**
+   * The end cap, when this path stops short of the question. Null on a flow
+   * that reaches everything it was asked about — a connected answer has no
+   * boundary to announce, and saying otherwise would be noise.
+   */
+  boundary: WireFlowBoundary | null;
+  /**
+   * This strip is not an answer to the question, it is where the answer ran
+   * out: one card at the dispatch site rather than a path.
+   */
+  partial: boolean;
 }
 
 /** An endpoint that named more than one definition, and which one was taken. */
@@ -371,13 +453,19 @@ interface RawHop {
   node: Node;
   edge: Edge | null;
   upward: boolean;
+  /**
+   * Open the card here instead of at the call site or the definition. Set on a
+   * boundary-only strip, whose single card exists to show the dispatch line.
+   */
+  anchor?: number;
 }
 
 async function toWireFlow(
   cg: CodeGraph,
   projectRoot: string,
   cache: Map<string, FileCache>,
-  raw: readonly RawHop[]
+  raw: readonly RawHop[],
+  extra: { boundary?: WireFlowBoundary | null; partial?: boolean } = {}
 ): Promise<WireFlow> {
   const hops: WireFlowHop[] = [];
   for (let i = 0; i < raw.length; i++) {
@@ -415,7 +503,7 @@ async function toWireFlow(
         projectRoot,
         cache,
         step.node,
-        callRef?.line ?? step.node.startLine
+        step.anchor ?? callRef?.line ?? step.node.startLine
       ),
     });
   }
@@ -423,8 +511,75 @@ async function toWireFlow(
   const last = raw[raw.length - 1]?.node.name ?? '?';
   return {
     id: raw.map((h) => h.node.id).join('>'),
-    label: `${first} → ${last}`,
+    label: extra.partial ? `${first} → stops here` : `${first} → ${last}`,
     hops,
+    boundary: extra.boundary ?? null,
+    partial: extra.partial === true,
+  };
+}
+
+// =============================================================================
+// Where the graph stops
+// =============================================================================
+
+/** Continuations listed in an end cap before it just counts the rest. */
+const MAX_CONTINUATIONS = 6;
+
+/** Symbols named and never reached, listed in an end cap. */
+const MAX_MISSED = 4;
+
+/** Dispatch sites reported per strip. One cap is a card, not a report. */
+const MAX_SITES_PER_FLOW = 3;
+
+function toContinuation(c: BoundaryContinuation): WireFlowContinuation {
+  return { node: toNodeRef(c.node), line: c.line, confidence: c.confidence };
+}
+
+/**
+ * Build the end cap for a path that stopped short.
+ *
+ * `reports` comes from the shared detector, so the form, the key and the
+ * candidate targets are the ones `codegraph_explore` would print. Everything
+ * else on the cap is graph state around the stopping symbol: the calls it makes
+ * that this path did not need, and the name-only matches under 0.6 that the
+ * search refused to follow. That last list is the honest half — an unfollowed
+ * guess left invisible reads as "there is nothing here".
+ */
+function buildBoundary(
+  cg: CodeGraph,
+  stop: Node,
+  reports: readonly NodeBoundary[],
+  missed: readonly Node[],
+  onPath: ReadonlySet<string>
+): WireFlowBoundary {
+  const sites: WireBoundarySite[] = [];
+  for (const report of reports) {
+    for (const site of report.sites) {
+      if (sites.length >= MAX_SITES_PER_FLOW) break;
+      sites.push({
+        form: site.form,
+        label: site.label,
+        snippet: site.snippet,
+        line: site.line,
+        key: site.key ?? null,
+        keyIsType: site.keyIsType === true,
+        moreSites: site.moreSites ?? 0,
+        candidates: site.candidates.map((c) => ({
+          node: toNodeRef(c.node),
+          display: c.display,
+          named: c.named,
+        })),
+        candidateNote: site.candidateNote,
+      });
+    }
+  }
+  const { resolved, uncertain } = continuationsFrom(cg, stop, onPath);
+  return {
+    node: toNodeRef(stop),
+    sites,
+    uncertain: wireList(uncertain.slice(0, MAX_CONTINUATIONS).map(toContinuation), uncertain.length),
+    further: wireList(resolved.slice(0, MAX_CONTINUATIONS).map(toContinuation), resolved.length),
+    missed: missed.slice(0, MAX_MISSED).map(toNodeRef),
   };
 }
 
@@ -543,14 +698,73 @@ export async function buildFlow(
   const chosen = new Set(flow.chains.flatMap((c) => c.steps.map((s) => s.node.id)));
   const flows: WireFlow[] = [];
   for (const chain of flow.chains) {
+    const onPath = new Set(chain.steps.map((s) => s.node.id));
+    // A path that reaches everything the question named is connected, and a
+    // connected answer gets no cap — this is the gate the whole feature turns
+    // on. In directed mode a chain ends at `to` by construction, so it is
+    // always connected and this is always empty.
+    const missed = uncoveredNamed(flow, onPath);
+    let boundary: WireFlowBoundary | null = null;
+    if (missed.length > 0) {
+      const stop = (chain.steps[chain.steps.length - 1] as { node: Node }).node;
+      // Scan order is explore's: the dead end first (that IS where the partial
+      // flow stopped), then the symbols it never reached.
+      const reports = findDynamicBoundaries(cg, [stop, ...missed], {
+        named: flow.named,
+        maxSites: MAX_SITES_PER_FLOW,
+      });
+      boundary = buildBoundary(cg, stop, reports, missed, onPath);
+    }
+    // The last card opens at the dispatch line rather than at its definition,
+    // so the window shows the site the cap beside it is describing. Without
+    // this a long body puts them hundreds of lines apart and the cap reads as a
+    // claim about code the reader cannot see.
+    const stopLine = boundary?.sites[0]?.line;
     flows.push(
       await toWireFlow(
         cg,
         projectRoot,
         cache,
-        chain.steps.map((s) => ({ node: s.node, edge: s.edge, upward: false }))
+        chain.steps.map((s, i) => ({
+          node: s.node,
+          edge: s.edge,
+          upward: false,
+          ...(stopLine !== undefined && i === chain.steps.length - 1 ? { anchor: stopLine } : {}),
+        })),
+        { boundary }
       )
     );
+  }
+
+  // No path at all. If a dispatch site explains why, the strip is that site:
+  // one card opened at the line where the static path ends, and the cap. Saying
+  // "not connected" while the answer sits three lines into the body would be
+  // the same silence this whole feature exists to break. With nothing detected
+  // we do NOT invent a stopping point — the search covered a whole region, and
+  // pinning "the graph stops here" on the seed would be a claim, not a finding.
+  if (flows.length === 0 && flow.named.size > 0) {
+    const seeds = boundarySeeds(flow, directed ? parsed.from : null, directed ? parsed.to : null);
+    const reports = findDynamicBoundaries(cg, seeds, {
+      named: flow.named,
+      maxSites: MAX_SITES_PER_FLOW,
+    });
+    const first = reports[0];
+    if (first && first.sites[0]) {
+      const stop = first.node;
+      const missed = uncoveredNamed(flow, new Set([stop.id]));
+      flows.push(
+        await toWireFlow(
+          cg,
+          projectRoot,
+          cache,
+          [{ node: stop, edge: null, upward: false, anchor: first.sites[0].line }],
+          {
+            boundary: buildBoundary(cg, stop, reports, missed, new Set([stop.id])),
+            partial: true,
+          }
+        )
+      );
+    }
   }
 
   return {
@@ -564,9 +778,62 @@ export async function buildFlow(
     flows,
     ambiguous: ambiguitiesOf(flow.tokenNodes, flow.named, chosen, flow.tokens),
     unresolved,
-    reason: flows.length > 0 ? null : noFlowReason(parsed, flow.tokens.length, unresolved),
+    // A boundary strip is not a path, so the reason still stands: it says what
+    // was not found, and the cap says where the looking stopped.
+    reason: flow.chains.length > 0 ? null : noFlowReason(parsed, flow.tokens.length, unresolved),
     timing: { elapsedMs: Date.now() - started },
   };
+}
+
+/**
+ * The named symbols this path never reaches, deduped by name.
+ *
+ * Per TOKEN, not per node: a token whose overloads are all off the path is
+ * genuinely unreached, but a token with one overload on it is answered — which
+ * is exactly how `codegraph_explore` decides whether to announce a boundary.
+ * The reader's own vocabulary (`uniqueNamedNodeIds`) sorts first, because a
+ * symbol only they named is the one they are actually asking about.
+ */
+function uncoveredNamed(
+  flow: ReturnType<typeof resolveNamedSymbolFlow>,
+  onPath: ReadonlySet<string>
+): Node[] {
+  const out: Node[] = [];
+  const seenName = new Set<string>();
+  for (const ids of flow.tokenNodes.values()) {
+    if (ids.length === 0 || ids.some((id) => onPath.has(id))) continue;
+    for (const id of ids) {
+      const node = flow.named.get(id);
+      if (!node || seenName.has(node.name)) continue;
+      seenName.add(node.name);
+      out.push(node);
+    }
+  }
+  return out.sort(
+    (a, b) =>
+      (flow.uniqueNamedNodeIds.has(b.id) ? 1 : 0) - (flow.uniqueNamedNodeIds.has(a.id) ? 1 : 0)
+  );
+}
+
+/**
+ * Bodies to scan when nothing connected, in the order worth scanning them.
+ *
+ * The outward walk starts at `from`, so a dispatch in `from`'s body is the one
+ * that stopped it; `to`'s body is scanned after, because a flow can equally
+ * break on the far side (the handler is reached by a bus nobody calls
+ * directly). A `?symbols=` question has no direction and scans what it named.
+ */
+function boundarySeeds(
+  flow: ReturnType<typeof resolveNamedSymbolFlow>,
+  from: string | null,
+  to: string | null
+): Node[] {
+  if (from === null || to === null) return [...flow.named.values()];
+  const pick = (token: string): Node[] =>
+    (flow.tokenNodes.get(normalizeToken(token)) ?? [])
+      .map((id) => flow.named.get(id))
+      .filter((n): n is Node => !!n);
+  return [...pick(from), ...pick(to)];
 }
 
 /**

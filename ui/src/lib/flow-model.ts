@@ -23,7 +23,14 @@
  * Tested in `__tests__/ui-flow-model.test.ts`.
  */
 
-import type { WireFlow, WireFlowEdge, WireFlowHop } from './api';
+import type {
+  WireBoundaryCandidate,
+  WireFlow,
+  WireFlowBoundary,
+  WireFlowContinuation,
+  WireFlowEdge,
+  WireFlowHop,
+} from './api';
 
 /* ------------------------------------------------------------ dimensions -- */
 
@@ -67,6 +74,143 @@ export function cardHeight(hop: WireFlowHop): number {
   return HEADER_HEIGHT + body;
 }
 
+/* --------------------------------------------------------------- end cap -- */
+
+/** End-cap width (design spec §3.5). */
+export const END_CAP_WIDTH = 240;
+/** Padding inside the cap, all four sides. */
+export const END_CAP_PADDING = 12;
+/** 12px text at 1.45 — the cap's own line box. */
+export const END_CAP_LINE = 17.4;
+/** One mono row: a candidate target, an uncertain continuation. */
+export const END_CAP_ROW = 18;
+/** Space between two blocks inside the cap. */
+export const END_CAP_GAP = 8;
+
+/**
+ * Characters of 12px Archivo that fit across the cap's 216px of content.
+ *
+ * The cap's height has to be known before it renders, for the same reason a
+ * card's does — the layout packs columns with it. So the text is built here
+ * (see {@link endCapText}), measured with this constant, and the component
+ * renders exactly what was measured. Deliberately a little pessimistic: a cap
+ * estimated too tall leaves white space, a cap estimated too short would put
+ * its last row under the next one.
+ */
+const END_CAP_CHARS = 32;
+
+function wrappedLines(text: string): number {
+  return Math.max(1, Math.ceil(text.length / END_CAP_CHARS));
+}
+
+/** One dispatch site as the cap words it. */
+export interface EndCapSite {
+  /** "computed member call at line 61". */
+  headline: string;
+  /** The statically visible key, set in mono. Null when it is a runtime value. */
+  key: string | null;
+  /** "key is a runtime value", or the "+N more such sites" tail. */
+  notes: string[];
+  candidates: WireBoundaryCandidate[];
+  /** "N candidate targets", the heading over the rows. Null when there are none. */
+  candidateHeading: string | null;
+  /** Why there is no shortlist, when a key was visible but too generic. */
+  candidateNote: string | null;
+}
+
+/**
+ * Everything the end cap says, as strings.
+ *
+ * Built here rather than in the component so the layout can measure the cap
+ * before it exists — and so the wording is testable without a browser.
+ */
+export interface EndCapText {
+  /** The sentence after the bold "Where the graph stops." lead. */
+  intro: string;
+  sites: EndCapSite[];
+  /** "No dynamic-dispatch site …", when the detector found nothing. */
+  quiet: string | null;
+  uncertainHeading: string | null;
+  uncertain: WireFlowContinuation[];
+  further: string | null;
+  missed: string | null;
+}
+
+const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
+
+export function endCapText(boundary: WireFlowBoundary): EndCapText {
+  const sites: EndCapSite[] = boundary.sites.map((site) => {
+    const notes: string[] = [];
+    if (site.key === null) notes.push('the key is a runtime value');
+    if (site.moreSites > 0) {
+      notes.push(`+${site.moreSites} more such ${plural(site.moreSites, 'site', 'sites')} here`);
+    }
+    return {
+      headline: `${site.label} at line ${site.line}`,
+      key: site.key,
+      notes,
+      candidates: site.candidates,
+      candidateHeading:
+        site.candidates.length > 0
+          ? `${site.candidates.length} candidate ${plural(site.candidates.length, 'target', 'targets')} \u203a`
+          : null,
+      candidateNote: site.candidateNote,
+    };
+  });
+
+  const missedNames = boundary.missed.map((m) => m.name);
+  return {
+    intro:
+      boundary.sites.length > 0
+        ? `${boundary.node.name} chooses its next call at runtime.`
+        : `${boundary.node.name} is the last symbol on this path.`,
+    sites,
+    quiet:
+      boundary.sites.length > 0
+        ? null
+        : 'No dynamic-dispatch site was detected in its body, so nothing here explains the break.',
+    uncertainHeading:
+      boundary.uncertain.total > 0
+        ? `${boundary.uncertain.total} name-only ${plural(boundary.uncertain.total, 'match', 'matches')} not followed (confidence < 0.6)`
+        : null,
+    uncertain: boundary.uncertain.items,
+    further:
+      boundary.further.total > 0
+        ? `It makes ${boundary.further.total} further resolved ${plural(boundary.further.total, 'call', 'calls')} this path does not need.`
+        : null,
+    missed:
+      missedNames.length > 0
+        ? `Never reaches ${missedNames.join(', ')}${boundary.missed.length < missedNames.length ? '…' : '.'}`
+        : null,
+  };
+}
+
+/** Exact rendered height of an end cap, which its CSS then pins as a minimum. */
+export function endCapHeight(boundary: WireFlowBoundary): number {
+  const text = endCapText(boundary);
+  let h = END_CAP_PADDING * 2;
+  h += wrappedLines(`Where the graph stops. ${text.intro}`) * END_CAP_LINE;
+  for (const site of text.sites) {
+    h += END_CAP_GAP;
+    h += wrappedLines(site.headline) * END_CAP_LINE;
+    if (site.key !== null) h += END_CAP_ROW;
+    for (const note of site.notes) h += wrappedLines(note) * END_CAP_LINE;
+    if (site.candidateHeading !== null) {
+      h += END_CAP_LINE + site.candidates.length * END_CAP_ROW;
+    } else if (site.candidateNote !== null) {
+      h += wrappedLines(site.candidateNote) * END_CAP_LINE;
+    }
+  }
+  if (text.quiet !== null) h += END_CAP_GAP + wrappedLines(text.quiet) * END_CAP_LINE;
+  if (text.uncertainHeading !== null) {
+    h += END_CAP_GAP + wrappedLines(text.uncertainHeading) * END_CAP_LINE;
+    h += text.uncertain.length * END_CAP_ROW;
+  }
+  if (text.further !== null) h += END_CAP_GAP + wrappedLines(text.further) * END_CAP_LINE;
+  if (text.missed !== null) h += END_CAP_GAP + wrappedLines(text.missed) * END_CAP_LINE;
+  return Math.round(h);
+}
+
 /* ----------------------------------------------------------------- model -- */
 
 export interface FlowCardLayout {
@@ -82,13 +226,22 @@ export interface FlowCardLayout {
   flows: string[];
   /** Position in the ACTIVE flow, or -1 when it is not on it. */
   step: number;
+  /**
+   * The dispatch line an end cap hangs off, when one does.
+   *
+   * The card is tinted there for the same reason a hop is tinted at its call
+   * site: it is the line the next thing on screen is about. A boundary card has
+   * no resolved call to link, so the tint is all the connection there is.
+   */
+  stopLine: number | null;
 }
 
 export interface FlowLinkLayout {
   id: string;
   source: string;
   target: string;
-  edge: WireFlowEdge;
+  /** Null on the dotted link into an end cap — no edge records a non-call. */
+  edge: WireFlowEdge | null;
   /** Flows this link belongs to. */
   flows: string[];
   /** The full label, for the connector's tooltip. */
@@ -104,10 +257,29 @@ export interface FlowLinkLayout {
   lineLabel: string | null;
   /** SVG dasharray, or null for a solid line. */
   dash: string | null;
+  /** This is the dotted link into an end cap, not a recorded edge. */
+  cap: boolean;
+}
+
+/** An end cap, placed one column past the symbol whose path stopped. */
+export interface FlowEndCapLayout {
+  /** `cap:<anchor node id>`. */
+  id: string;
+  /** The card the dotted link comes out of. */
+  anchorId: string;
+  boundary: WireFlowBoundary;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  column: number;
+  /** Flows that stop here — what dims when one is picked. */
+  flows: string[];
 }
 
 export interface FlowLayout {
   cards: FlowCardLayout[];
+  endCaps: FlowEndCapLayout[];
   links: FlowLinkLayout[];
   width: number;
   height: number;
@@ -123,6 +295,14 @@ export function dashFor(edge: WireFlowEdge): string | null {
   if (edge.uncertain) return '2 3';
   return null;
 }
+
+/** The dotted link into an end cap (design spec §3.5). */
+export const END_CAP_DASH = '2 4';
+
+/** The layout id of the cap hanging off `anchorId`, and the way back. */
+export const capId = (anchorId: string): string => `cap:${anchorId}`;
+export const isCapId = (id: string): boolean => id.startsWith('cap:');
+export const anchorOf = (id: string): string => (isCapId(id) ? id.slice(4) : id);
 
 /** Longest a connector label line may be before it is cut. */
 export const LABEL_MAX_CHARS = 26;
@@ -209,7 +389,7 @@ export function buildFlowLayout(flows: readonly WireFlow[], activeId: string | n
   }
 
   if (cards.size === 0) {
-    return { cards: [], links: [], width: 0, height: 0, columns: 0, gaps: [] };
+    return { cards: [], endCaps: [], links: [], width: 0, height: 0, columns: 0, gaps: [] };
   }
 
   // ---- column = longest distance from a start -----------------------------
@@ -241,20 +421,69 @@ export function buildFlowLayout(flows: readonly WireFlow[], activeId: string | n
     column.set(id, best);
   }
 
+  // ---- the end caps ------------------------------------------------------
+  // One cap per stopping symbol, not per flow: two paths that run out at the
+  // same place ran out for the same reason, and two caps side by side saying so
+  // would read as two different findings.
+  const caps = new Map<string, { boundary: WireFlowBoundary; flows: string[] }>();
+  for (const flow of flows) {
+    const boundary = flow.boundary;
+    if (!boundary || !cards.has(boundary.node.id)) continue;
+    const hit = caps.get(boundary.node.id);
+    if (hit) {
+      if (!hit.flows.includes(flow.id)) hit.flows.push(flow.id);
+    } else {
+      caps.set(boundary.node.id, { boundary, flows: [flow.id] });
+    }
+  }
+
   // ---- pack each column, active flow first --------------------------------
+  interface Member {
+    id: string;
+    width: number;
+    height: number;
+    /** Cards before caps, then first-seen order. */
+    rank: number;
+    onActive: boolean;
+  }
+  const members = new Map<string, Member>();
+  for (const [id, card] of cards) {
+    members.set(id, {
+      id,
+      width: CARD_WIDTH,
+      height: cardHeight(card.hop),
+      rank: card.order,
+      onActive: activeSteps.has(id),
+    });
+  }
+  const capColumn = new Map<string, number>();
+  let capRank = cards.size;
+  for (const [anchorId, cap] of caps) {
+    const id = capId(anchorId);
+    capColumn.set(id, (column.get(anchorId) ?? 0) + 1);
+    members.set(id, {
+      id,
+      width: END_CAP_WIDTH,
+      height: endCapHeight(cap.boundary),
+      rank: capRank++,
+      onActive: activeSteps.has(anchorId),
+    });
+  }
+  const columnOf = (id: string): number => capColumn.get(id) ?? column.get(id) ?? 0;
+
   const byColumn = new Map<number, string[]>();
-  for (const id of cards.keys()) {
-    const c = column.get(id) ?? 0;
+  for (const id of members.keys()) {
+    const c = columnOf(id);
     const list = byColumn.get(c);
     if (list) list.push(id);
     else byColumn.set(c, [id]);
   }
   for (const list of byColumn.values()) {
     list.sort((a, b) => {
-      const onA = activeSteps.has(a) ? 0 : 1;
-      const onB = activeSteps.has(b) ? 0 : 1;
+      const onA = (members.get(a) as Member).onActive ? 0 : 1;
+      const onB = (members.get(b) as Member).onActive ? 0 : 1;
       if (onA !== onB) return onA - onB;
-      return (cards.get(a)?.order ?? 0) - (cards.get(b)?.order ?? 0);
+      return (members.get(a) as Member).rank - (members.get(b) as Member).rank;
     });
   }
 
@@ -262,7 +491,8 @@ export function buildFlowLayout(flows: readonly WireFlow[], activeId: string | n
 
   // Each gap is wide enough for the widest label that crosses it. Labels are
   // built here rather than in the render pass because the geometry depends on
-  // them — see LABEL_CHAR_WIDTH.
+  // them — see LABEL_CHAR_WIDTH. A cap's dotted link keeps the spec's 86px: its
+  // label is fixed and stacks into two short lines.
   const labelled = [...links.entries()].map(([key, link]) => ({
     key,
     link,
@@ -276,13 +506,17 @@ export function buildFlowLayout(flows: readonly WireFlow[], activeId: string | n
     const widest = Math.max(0, ...lines.map((l) => l.length), lineLabel?.length ?? 0);
     gaps[from] = Math.max(gaps[from] as number, Math.ceil(widest * LABEL_CHAR_WIDTH) + LABEL_PAD);
   }
+
+  // A column is as wide as its widest member, so a cap sharing a column with a
+  // card does not push the card's neighbours out of line.
+  const columnWidth = Array.from({ length: columns }, () => 0);
+  for (const [c, list] of byColumn) {
+    columnWidth[c] = Math.max(...list.map((id) => (members.get(id) as Member).width));
+  }
   const columnX: number[] = [PADDING];
   for (let c = 1; c < columns; c++) {
-    columnX[c] = (columnX[c - 1] as number) + CARD_WIDTH + (gaps[c - 1] as number);
+    columnX[c] = (columnX[c - 1] as number) + (columnWidth[c - 1] as number) + (gaps[c - 1] as number);
   }
-
-  const heights = new Map<string, number>();
-  for (const [id, card] of cards) heights.set(id, cardHeight(card.hop));
 
   // Rows are centred on the tallest column, so a one-card column sits opposite
   // the middle of a two-card one instead of hugging the top of the canvas.
@@ -290,46 +524,82 @@ export function buildFlowLayout(flows: readonly WireFlow[], activeId: string | n
   for (const [c, list] of byColumn) {
     columnHeights.set(
       c,
-      list.reduce((sum, id) => sum + (heights.get(id) ?? 0), 0) + ROW_GAP * (list.length - 1)
+      list.reduce((sum, id) => sum + (members.get(id) as Member).height, 0) +
+        ROW_GAP * (list.length - 1)
     );
   }
   const tallest = Math.max(...columnHeights.values());
 
   const laidOut = new Map<string, FlowCardLayout>();
+  const endCaps: FlowEndCapLayout[] = [];
   for (const [c, list] of byColumn) {
     let y = PADDING + (tallest - (columnHeights.get(c) ?? 0)) / 2;
     for (const id of list) {
-      const card = cards.get(id) as { hop: WireFlowHop; flows: string[]; order: number };
-      const height = heights.get(id) ?? 0;
-      laidOut.set(id, {
-        id,
-        hop: card.hop,
-        x: columnX[c] as number,
-        y,
-        width: CARD_WIDTH,
-        height,
-        column: c,
-        flows: card.flows,
-        step: activeSteps.get(id) ?? -1,
-      });
-      y += height + ROW_GAP;
+      const member = members.get(id) as Member;
+      const cap = caps.get(anchorOf(id));
+      if (cap && isCapId(id)) {
+        endCaps.push({
+          id,
+          anchorId: anchorOf(id),
+          boundary: cap.boundary,
+          x: columnX[c] as number,
+          y,
+          width: member.width,
+          height: member.height,
+          column: c,
+          flows: cap.flows,
+        });
+      } else {
+        const card = cards.get(id) as { hop: WireFlowHop; flows: string[]; order: number };
+        laidOut.set(id, {
+          id,
+          hop: card.hop,
+          x: columnX[c] as number,
+          y,
+          width: member.width,
+          height: member.height,
+          column: c,
+          flows: card.flows,
+          step: activeSteps.get(id) ?? -1,
+          stopLine: caps.get(id)?.boundary.sites[0]?.line ?? null,
+        });
+      }
+      y += member.height + ROW_GAP;
     }
+  }
+
+  const linkLayouts: FlowLinkLayout[] = labelled.map(({ link, lines, lineLabel }) => ({
+    id: `${link.source}->${link.target}`,
+    source: link.source,
+    target: link.target,
+    edge: link.edge,
+    flows: link.flows,
+    label: link.edge.label,
+    labelLines: lines,
+    lineLabel,
+    dash: dashFor(link.edge),
+    cap: false,
+  }));
+  for (const cap of endCaps) {
+    linkLayouts.push({
+      id: `${cap.anchorId}->${cap.id}`,
+      source: cap.anchorId,
+      target: cap.id,
+      edge: null,
+      flows: cap.flows,
+      label: 'end of static path',
+      labelLines: ['end of', 'static path'],
+      lineLabel: null,
+      dash: END_CAP_DASH,
+      cap: true,
+    });
   }
 
   return {
     cards: [...laidOut.values()].sort((a, b) => a.column - b.column || a.y - b.y),
-    links: labelled.map(({ link, lines, lineLabel }) => ({
-      id: `${link.source}->${link.target}`,
-      source: link.source,
-      target: link.target,
-      edge: link.edge,
-      flows: link.flows,
-      label: link.edge.label,
-      labelLines: lines,
-      lineLabel,
-      dash: dashFor(link.edge),
-    })),
-    width: (columnX[columns - 1] as number) + CARD_WIDTH + PADDING,
+    endCaps: endCaps.sort((a, b) => a.column - b.column || a.y - b.y),
+    links: linkLayouts,
+    width: (columnX[columns - 1] as number) + (columnWidth[columns - 1] as number) + PADDING,
     height: PADDING * 2 + tallest,
     columns,
     gaps,

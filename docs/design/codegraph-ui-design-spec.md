@@ -190,6 +190,19 @@ heuristic dasharray `5 3`. End cap: **240px**, dashed `--rule-soft` border, 12px
 (form, key, line) + uncertain continuations. In the real build the strip is a Svelte Flow canvas laid out left→right with the
 same card/link visuals.
 
+**End cap, as built (phase 2, CG-51).** Shown only when a flow does not reach everything the question named —
+a connected answer has no boundary to announce. 240px, 1px dashed `--rule-soft`, padding 12px, 12px/1.45 `--ink-2`,
+joined to the card it hangs off by an 86px `2 4` dotted link labelled "end of static path" with **no arrowhead**
+(an arrow would point at a continuation). Content: "**Where the graph stops.**" then, per dispatch site, the form and
+its line ("computed member call at line 61"), the static key in 11.5px mono when one is visible, "the key is a runtime
+value" when not, "N candidate targets ›" over clickable mono rows (`display` + `basename:line`, an already-named symbol
+first), then the name-only continuations under 0.6 as mono rows with their confidence and a dotted `--ink-4` underline,
+then the count of further resolved calls and the symbols never reached. Its height is arithmetic like a card's
+(`endCapText` builds the strings, `endCapHeight` measures them, the component renders exactly those), and the card it
+hangs off opens at the dispatch line and tints it `--accent-soft`. One cap per stopping symbol, not per flow.
+The verdict comes from `src/graph/dynamic-boundary-report.ts` — the detector `codegraph_explore` announces boundaries
+with — so the strip and the MCP answer cannot disagree.
+
 ### 3.6 Map (`#/map`)
 Grid: canvas `minmax(600px,1fr)` | side panel **320px** (`--rule-soft` left border, 14px 16px padding).
 Nodes: rect `width = max(110, label.length × 7.3 + 28)`, **height 40**, `--paper` fill, 1px `--ink` stroke (2px + `--press` fill

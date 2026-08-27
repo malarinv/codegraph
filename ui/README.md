@@ -43,7 +43,7 @@ src/
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
   lib/kinds.ts            kind glyph letters
   lib/map-model.ts        the Map's deterministic layered layout (pure)
-  lib/flow-model.ts       the Flow strip's card/link geometry — a DAG (pure)
+  lib/flow-model.ts       the Flow strip's card/link geometry + the end cap — a DAG (pure)
   lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
   lib/live.svelte.ts      /api/events: two counters every screen refreshes from
   lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
@@ -67,6 +67,28 @@ announce the project to a font CDN.
 | `#/flow?from=&to=` | flow strip — the call path between two symbols |
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
 | `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |
+
+## Where the graph stops
+
+A flow that does not reach everything it was asked about carries a
+`boundary` on the wire, and `buildFlowLayout` turns it into an extra 240px node
+one column past the symbol the path stopped at, joined by a dotted `2 4` link
+labelled "end of static path" that deliberately has **no arrowhead** — an arrow
+would point at a continuation, and the absence of one is the finding.
+
+Two rules hold it together:
+
+- **The cap's height is arithmetic, like a card's.** `endCapText()` builds every
+  sentence the cap shows and `endCapHeight()` measures them; the component then
+  renders exactly what was measured. Change the wording in one and the other
+  moves with it — they are the same function read twice.
+- **One cap per stopping symbol, not per flow.** Two paths that run out at the
+  same place ran out for the same reason, and two caps side by side would read
+  as two different findings.
+
+The verdict itself is not computed here or in the server: it is
+`findDynamicBoundaries` in `src/graph/dynamic-boundary-report.ts`, the same
+detector `codegraph_explore` announces boundaries with.
 
 ## Live updates
 

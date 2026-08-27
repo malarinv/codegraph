@@ -71,6 +71,16 @@ Each card is opened at the line that makes the next call, not at the top of the 
 - **When a name means several definitions**, the strip says so under the picture and names the one this path runs through — and offers the other paths in the picker at the top. Choosing "All paths" draws them as one diagram, branching where they differ and rejoining where they agree.
 - **"Not connected" is an answer**, not a failure: a flow that runs through a dispatch no static edge records genuinely has no path, and the screen says that rather than inventing one.
 
+### Where the graph stops
+
+A path that does not reach what you asked about ends in a dashed block headed **"Where the graph stops."** It is the honest end of the search rather than an error, and it carries what the resolver actually knows:
+
+- **The dispatch form** that ended the path — a computed member call, a `getattr`, a reflective invoke, a `#selector`, a typed message bus — and the line it sits on. The card beside it is opened at that line, so the source the block is describing is on screen.
+- **The key, when the source writes one down.** `handlers['save']` gives `save`, and the block shortlists the symbols that could be on the other side of it — `onSave`, `handleSave`, `SaveHandler` — marking any you already named. When the key is a runtime value it says so instead of shortlisting anything.
+- **What was not followed.** Name-only matches under 0.6 confidence are listed with their confidence, and the other calls the symbol makes are counted. A refused guess left invisible would read as "there is nothing here", which is the one thing it does not mean.
+
+Nothing on the block is invented: no edge is guessed, and none is written to your graph. A flow that reaches what it was asked for never shows one. It is the same finding `codegraph_explore` announces to an agent when a flow breaks, drawn from the same detector, so the screen and the agent's answer cannot disagree.
+
 The **"Read as flow"** button on the trail turns a walk you did by hand into the same strip. It is the same path finder `codegraph_explore` leads its answers with, so the picture and what your agent tells you cannot disagree.
 
 ## The map

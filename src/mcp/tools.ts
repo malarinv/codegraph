@@ -40,7 +40,7 @@ import {
 } from 'fs';
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
-import { scanDynamicDispatch } from './dynamic-boundaries';
+import { findDynamicBoundaries, type BoundarySite } from '../graph/dynamic-boundary-report';
 import {
   lastQualifierPart,
   matchesSymbol,
@@ -2743,37 +2743,22 @@ export class ToolHandler {
    * connected flow never reaches this method.
    */
   private buildDynamicBoundaries(cg: CodeGraph, scanList: Node[], named: Map<string, Node>): string {
-    const MAX_NOTES = 4;       // boundary bullets per explore
-    const MAX_SCAN = 8;        // bodies scanned
-    const MAX_TOTAL_CHARS = 200_000;
-    let projectRoot: string;
-    try { projectRoot = cg.getProjectRoot(); } catch { return ''; }
+    const MAX_NOTES = 4; // boundary bullets per explore
+    // The verdict is not derived here — `findDynamicBoundaries` produces it and
+    // the viewer's end cap renders the same object, so the two can never
+    // disagree about where a flow stops. What is left here is the prose.
+    const reports = findDynamicBoundaries(cg, scanList, { named, maxSites: MAX_NOTES });
     const notes: string[] = [];
-    const seenNode = new Set<string>();
-    const seenSite = new Set<string>();
-    let scanned = 0, charsScanned = 0;
-    for (const node of scanList) {
-      if (notes.length >= MAX_NOTES || scanned >= MAX_SCAN || charsScanned > MAX_TOTAL_CHARS) break;
-      if (seenNode.has(node.id) || !node.startLine || !node.endLine) continue;
-      seenNode.add(node.id);
-      const absPath = validatePathWithinRoot(projectRoot, node.filePath);
-      if (!absPath || !existsSync(absPath)) continue;
-      let content: string;
-      try { content = readFileSync(absPath, 'utf-8'); } catch { continue; }
-      const body = content.split('\n').slice(node.startLine - 1, node.endLine).join('\n');
-      scanned++;
-      charsScanned += body.length;
-      for (const m of scanDynamicDispatch(body, node.language || '', node.startLine)) {
+    for (const report of reports) {
+      if (notes.length >= MAX_NOTES) break;
+      for (const site of report.sites) {
         if (notes.length >= MAX_NOTES) break;
-        const siteKey = `${node.filePath}:${m.line}:${m.form}`;
-        if (seenSite.has(siteKey)) continue;
-        seenSite.add(siteKey);
-        const more = m.moreSites ? ` (+${m.moreSites} more such site${m.moreSites > 1 ? 's' : ''} in this body)` : '';
-        notes.push(`- \`${node.name}\` (${node.filePath}:${m.line}) — ${m.label}: \`${m.snippet}\`${more}`);
-        if (m.key) {
-          const cand = this.boundaryCandidates(cg, m.key, !!m.keyIsType, named, node.id);
-          if (cand) notes.push(`  ${cand}`);
-        }
+        const more = site.moreSites
+          ? ` (+${site.moreSites} more such site${site.moreSites > 1 ? 's' : ''} in this body)`
+          : '';
+        notes.push(`- \`${report.node.name}\` (${report.node.filePath}:${site.line}) — ${site.label}: \`${site.snippet}\`${more}`);
+        const cand = this.boundaryCandidates(site);
+        if (cand) notes.push(`  ${cand}`);
       }
     }
     if (notes.length === 0) return '';
@@ -2875,70 +2860,20 @@ export class ToolHandler {
   }
 
   /**
-   * Shortlist candidate runtime targets for a dispatch key surfaced by
-   * {@link buildDynamicBoundaries}. Exact conventional names first (`save` →
-   * `onSave`/`handleSave`; `CreateCmd` → `CreateCmdHandler`), then FTS, with a
-   * normalized-containment post-filter (FTS camel-splitting is fuzzier than a
-   * candidate list should be). Symbols the agent already named sort first and
-   * are marked — that's the "you were right, here's the wiring" case.
+   * Render the candidate shortlist for a dispatch site as one line.
+   *
+   * The shortlist itself is `shortlistBoundaryCandidates` in
+   * `../graph/dynamic-boundary-report` — shared with the viewer's end cap, so
+   * "candidates for key `save`" names the same symbols in both places. Symbols
+   * the agent already named are marked: that is the "you were right, here's the
+   * wiring" case.
    */
-  private boundaryCandidates(cg: CodeGraph, key: string, keyIsType: boolean, named: Map<string, Node>, selfId: string): string {
-    const CALLABLE = new Set(['method', 'function', 'component', 'constructor', 'class']);
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const keyNorm = norm(key);
-    if (keyNorm.length < 3) return '';
-    const cands = new Map<string, Node>();
-    const consider = (n: Node | undefined | null) => {
-      if (!n || n.id === selfId || !CALLABLE.has(n.kind) || cands.has(n.id)) return;
-      const nameNorm = norm(n.name || '');
-      if (nameNorm.length < 3) return;
-      if (!nameNorm.includes(keyNorm) && !keyNorm.includes(nameNorm)) return;
-      cands.set(n.id, n);
-    };
-    const cap = key.charAt(0).toUpperCase() + key.slice(1);
-    const probes = keyIsType
-      ? [`${key}Handler`, key]
-      : [key, `on${cap}`, `handle${cap}`, `${key}Handler`, `handle_${key}`];
-    for (const p of probes) {
-      try { for (const n of cg.getNodesByName(p)) consider(n); } catch { /* exact probe miss is fine */ }
-    }
-    let raw = 0;
-    try {
-      const results = cg.searchNodes(key, { limit: 12 });
-      raw = results.length;
-      for (const r of results) consider(r.node);
-    } catch { /* FTS syntax edge — exact probes already ran */ }
-    if (cands.size === 0) {
-      return raw >= 12 && key.length < 5 ? `key \`${key}\` is too generic to shortlist (${raw}+ matches)` : '';
-    }
-    // A constructor candidate duplicates its class: extractors emit ctors as
-    // METHOD nodes named like the class (C#/Java `Foo::Foo`) — keep the class.
-    const all = [...cands.values()];
-    const classKey = new Set(all.filter((n) => n.kind === 'class').map((n) => `${n.name}|${n.filePath}`));
-    const namedNames = new Set([...named.values()].map((n) => n.name));
-    const isNamed = (n: Node) => named.has(n.id) || namedNames.has(n.name); // the flow's named set holds callables only — transfer the mark to the class
-    const list = all
-      .filter((n) => !(n.kind !== 'class' && classKey.has(`${n.name}|${n.filePath}`)))
-      .sort((a, b) => (isNamed(b) ? 1 : 0) - (isNamed(a) ? 1 : 0))
-      .slice(0, 4)
-      .map((n) => {
-        // Typed-bus convention: the runtime target is the candidate class's
-        // Handle/Execute/Consume method — name the exact node, not just the class.
-        let display = n.qualifiedName || n.name;
-        let at = `${n.filePath}:${n.startLine}`;
-        if (keyIsType && n.kind === 'class') {
-          try {
-            const HANDLER_METHODS = /^(handle|handleAsync|execute|executeAsync|consume|consumeAsync|run|__invoke)$/i;
-            const method = cg.getOutgoingEdges(n.id)
-              .filter((e) => e.kind === 'contains')
-              .map((e) => { try { return cg.getNode(e.target); } catch { return null; } })
-              .find((c): c is Node => !!c && c.kind === 'method' && HANDLER_METHODS.test(c.name));
-            if (method) { display = `${n.name}.${method.name}`; at = `${method.filePath}:${method.startLine}`; }
-          } catch { /* class without resolvable members — show the class itself */ }
-        }
-        return `\`${display}\` (${at})${isNamed(n) ? ' ← you named this' : ''}`;
-      });
-    return `candidates for key \`${key}\`: ${list.join(', ')}`;
+  private boundaryCandidates(site: BoundarySite): string {
+    if (site.candidates.length === 0) return site.candidateNote ?? '';
+    const list = site.candidates.map((c) =>
+      `\`${c.display}\` (${c.node.filePath}:${c.node.startLine})${c.named ? ' ← you named this' : ''}`
+    );
+    return `candidates for key \`${site.key}\`: ${list.join(', ')}`;
   }
 
   /**
