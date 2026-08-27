@@ -73,6 +73,14 @@
   let stageMinHeight = $state(0);
   let connectors = $state<Connector[]>([]);
   let overlay = $state({ width: 0, height: 0 });
+  /**
+   * The rail has been measured at least once for the symbol on screen.
+   *
+   * Until it has, a row has no place to be: drawing it at `top: 0` would stack
+   * every row at the head of the rail for a frame, and drawing it at the
+   * PREVIOUS symbol's coordinates would be worse. It stays hidden instead.
+   */
+  let placed = $state(false);
 
   /* ---------------------------------------------------------------- data -- */
 
@@ -90,6 +98,7 @@
     source = null;
     railFocus.reset();
     hot.set(null);
+    placed = false;
     void project.ensure();
 
     let node: WireSymbolPayload;
@@ -322,6 +331,7 @@
     });
     connectors = next;
     overlay = { width: inner.scrollWidth, height: Math.max(inner.offsetHeight, stageMinHeight) };
+    placed = true;
   }
 
   let scheduled = false;
@@ -460,6 +470,7 @@
             {tops}
             {foldTop}
             {noteTop}
+            {placed}
             focalFile={payload.node.file}
             originId={originRight}
             emptyReason={emptyCalleeReason}

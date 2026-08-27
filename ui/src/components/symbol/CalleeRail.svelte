@@ -22,6 +22,8 @@
     tops: number[];
     foldTop: number;
     noteTop: number;
+    /** False until the view has measured the rail — see SymbolView. */
+    placed: boolean;
     /** The focal symbol's file — a callee in it reads "same file", not a path. */
     focalFile: string;
     /** The symbol this one was reached from, when it is a callee. */
@@ -31,7 +33,7 @@
     onstepDown: (node: WireNodeRef) => void;
   }
 
-  let { model, tops, foldTop, noteTop, focalFile, originId, emptyReason, onstepDown }: Props =
+  let { model, tops, foldTop, noteTop, placed, focalFile, originId, emptyReason, onstepDown }: Props =
     $props();
 
   function rowTitle(row: CalleeRow): string {
@@ -51,6 +53,7 @@
     class:origin={node.id === originId}
     class:hot={hot.is(node.id)}
     class:sel={railFocus.at('right', i)}
+    class:unplaced={!placed}
     style:top={`${tops[i] ?? 0}px`}
     data-target={node.id}
     role="button"
@@ -84,7 +87,7 @@
 {/each}
 
 {#if model.uncertain.length > 0}
-  <details class="rfold" data-rail-fold style:top={`${foldTop}px`}>
+  <details class="rfold" class:unplaced={!placed} data-rail-fold style:top={`${foldTop}px`}>
     <summary>
       Uncertain <span class="dim"
         >· {model.uncertain.length} name-only match{model.uncertain.length === 1 ? '' : 'es'},
@@ -128,7 +131,7 @@
 {#if model.rows.length === 0 && model.uncertain.length === 0}
   <div class="rnote" style:top="60px">{emptyReason}</div>
 {:else if model.outsideCalls > 0 || model.outsideTypeRefs > 0 || model.hiddenGroups > 0}
-  <div class="rnote" style:top={`${noteTop}px`}>
+  <div class="rnote" class:unplaced={!placed} style:top={`${noteTop}px`}>
     {#if model.outsideCalls > 0}
       +{plural(model.outsideCalls, 'more call')} into symbols outside the index{#if model.outsideTypeRefs > 0}{' '}·
         {plural(model.outsideTypeRefs, 'type reference')}{/if}.
@@ -165,6 +168,11 @@
     color: var(--ink-3);
     font-weight: 400;
     font-size: 11.5px;
+  }
+
+  /* Positioned by measurement, so it must not paint before it is measured. */
+  .unplaced {
+    visibility: hidden;
   }
 
   .rrow {
