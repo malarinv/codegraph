@@ -5,6 +5,7 @@
   import SearchPalette from './SearchPalette.svelte';
   import type { PaletteItem } from '../lib/search-model';
   import { walkTo } from '../lib/walk';
+  import { live } from '../lib/live.svelte';
 
   interface Props {
     /** Indexed project name, e.g. "codegraph/". Null until stats load. */
@@ -111,6 +112,31 @@
   }
 
   let searchBox: HTMLDivElement | null = $state(null);
+
+  /**
+   * Why this page has stopped updating itself, when it has.
+   *
+   * The whole point of the live channel is that the screen keeps up with the
+   * project; a screen that has silently stopped keeping up is worse than one
+   * that never claimed to. So both ways it can end say so, in the one place
+   * that is on every view.
+   */
+  let liveNote = $derived.by(() => {
+    if (live.degraded !== null) {
+      return {
+        text: 'Live updates off',
+        title: `${live.degraded} This page no longer refreshes itself — reload it after a sync.`,
+      };
+    }
+    if (live.stopped) {
+      return {
+        text: 'Not live',
+        title:
+          'Lost the connection to codegraph ui and stopped retrying. Focus this tab to try again, or reload the page.',
+      };
+    }
+    return null;
+  });
 </script>
 
 <svelte:window {onpointerdown} />
@@ -152,6 +178,7 @@
   </div>
 
   <div class="project" title="Indexed project">
+    {#if liveNote}<span class="offline" title={liveNote.title}>{liveNote.text}</span>{/if}
     {#if project}<span class="mono">{project}</span>{/if}
     {#if stats}<span class="dim">{stats}</span>{/if}
   </div>
@@ -246,9 +273,20 @@
     white-space: nowrap;
   }
 
-  /* Below ~1000px the stats are the first thing worth losing. */
+  .offline {
+    padding: 2px 6px;
+    margin-right: 8px;
+    border: 1px solid var(--rule-soft);
+    background: var(--paper-2);
+    color: var(--ink-3);
+    font-size: 11.5px;
+  }
+
+  /* Below ~1000px the stats are the first thing worth losing — but not the
+     note that the page has stopped updating itself. */
   @media (max-width: 1000px) {
-    .project {
+    .project .mono,
+    .project .dim {
       display: none;
     }
   }

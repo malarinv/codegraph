@@ -21,6 +21,7 @@
   import FileRail from '../components/file/FileRail.svelte';
   import FileModeTabs from '../components/file/FileModeTabs.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
+  import DriftBanner from '../components/DriftBanner.svelte';
   import { ApiFailure, fetchFile, type WireFilePayload, type WireNodeRef } from '../lib/api';
   import {
     basename,
@@ -29,6 +30,7 @@
     fileMetaLine,
   } from '../lib/file-model';
   import { fileHref, navigate } from '../lib/router.svelte';
+  import { liveRefresh } from '../lib/live.svelte';
   import { plural } from '../lib/symbol-model';
   import { walkTo } from '../lib/walk';
 
@@ -55,19 +57,41 @@
     return () => controller.abort();
   });
 
-  async function load(file: string, signal: AbortSignal): Promise<void> {
-    loading = true;
-    failure = null;
-    payload = null;
-    pane = 'outline';
-    index = -1;
-    // Leaving and coming back to the same `?hl=` URL must land again; the
-    // guard below only exists to stop a re-render re-selecting.
-    landed = null;
+  /** Aborts a live-triggered reload when the screen moves on without it. */
+  let liveController: AbortController | null = null;
+
+  // The index moved, or this file changed on disk (the drift banner). Refetch
+  // in place — the outline is where the reader's eye is.
+  liveRefresh(
+    () => payload?.file.path ?? path,
+    () => {
+      const wanted = path;
+      liveController?.abort();
+      liveController = new AbortController();
+      void load(wanted, liveController.signal, true);
+    }
+  );
+
+  /**
+   * @param quiet a live refresh rather than a navigation: keep the outline on
+   *   screen (and the reader's selection in it) until the new payload lands.
+   */
+  async function load(file: string, signal: AbortSignal, quiet = false): Promise<void> {
+    if (!quiet) {
+      loading = true;
+      failure = null;
+      payload = null;
+      pane = 'outline';
+      index = -1;
+      // Leaving and coming back to the same `?hl=` URL must land again; the
+      // guard below only exists to stop a re-render re-selecting.
+      landed = null;
+    }
     try {
       const next = await fetchFile(file, signal);
       if (signal.aborted) return;
       payload = next;
+      failure = null;
     } catch (cause) {
       if (signal.aborted) return;
       failure =
@@ -280,10 +304,13 @@
       </div>
 
       {#if payload.drift}
-        <div class="drift">
-          This file changed on disk after the last index sync, so the line numbers below
-          are the ones it had when it was indexed. Run <code>codegraph sync</code> to bring
-          them up to date.
+        <div class="banner">
+          <DriftBanner file={payload.file.path}>
+            indexed line ranges may be shifted, so the outline below is the shape the file had
+            when it was indexed —
+            <a href={fileHref(payload.file.path, { source: true })}>read its current source</a>.
+            The next sync picks it up.
+          </DriftBanner>
         </div>
       {/if}
 
@@ -403,18 +430,8 @@
     text-underline-offset: 3px;
   }
 
-  .drift {
+  .banner {
     margin-top: 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--amber);
-    background: var(--amber-soft);
-    color: var(--amber);
-    font-size: 12.5px;
-    line-height: 1.5;
-  }
-
-  .drift code {
-    font: 12px var(--mono);
   }
 
   @media (max-width: 1100px) {

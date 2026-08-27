@@ -73,6 +73,27 @@ export const trail = {
     ];
   },
 
+  /**
+   * The same symbol, under a new id.
+   *
+   * A node's id contains its start LINE (`generateNodeId`), so any edit above a
+   * symbol gives it a different id at the next sync — while it is the same
+   * symbol, in the same place in the reader's path. Swapping it in place keeps
+   * the trail a path; pushing the new id would draw a hop that describes no
+   * call, and dropping the trail would lose the walk that got here.
+   */
+  rename(oldId: string, next: { id: string; name?: string | null; kind?: string | null }): void {
+    const at = hops.findIndex((h) => h.id === oldId);
+    if (at < 0) return;
+    remember(next.id, next);
+    const hop = hops[at] as TrailHop;
+    hops = [
+      ...hops.slice(0, at),
+      { ...hop, id: next.id, name: next.name ?? hop.name, kind: next.kind ?? hop.kind },
+      ...hops.slice(at + 1),
+    ];
+  },
+
   /** Drop every hop after `index`, making it the current one. */
   truncateTo(index: number): void {
     if (index < 0 || index >= hops.length) return;

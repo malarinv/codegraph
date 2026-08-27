@@ -46,4 +46,13 @@ export const project = {
     return `${n(stats.graph.nodes)} symbols · ${n(stats.graph.edges)} edges · ${n(stats.graph.files)} files indexed`;
   },
   ensure: load,
+  /**
+   * Re-read `/api/stats` because the index moved (the live channel's `index`
+   * event). Distinct from `ensure`, which memoises the first request forever —
+   * memoising this one would mean the top bar's counts never move again.
+   */
+  reload(): Promise<void> {
+    inflight = null;
+    return load();
+  },
 };

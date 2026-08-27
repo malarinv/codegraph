@@ -1155,6 +1155,43 @@ export class CodeGraph {
   }
 
   /**
+   * How far the last sync got and how many files it left behind — the cheapest
+   * marker of "has this index moved". One query; safe to call on every
+   * filesystem event a live viewer sees.
+   */
+  getIndexRevision(): { lastIndexedAt: number | null; fileCount: number } {
+    return this.queries.getIndexRevision();
+  }
+
+  /**
+   * Files re-indexed strictly after `since`, newest first — what a sync just
+   * picked up. `total` is the real count, `paths` is capped at `limit`.
+   */
+  getFilesIndexedSince(since: number, limit: number): { paths: string[]; total: number } {
+    return this.queries.getFilesIndexedSince(since, limit);
+  }
+
+  /**
+   * Forget everything held in memory about rows another process may have
+   * changed.
+   *
+   * The query layer keeps an LRU of nodes by id, invalidated by writes made
+   * through THIS instance — which is exactly right for a process that owns the
+   * index, and wrong for one that is only reading a database somebody else is
+   * writing. A long-lived reader (the `codegraph ui` server, a daemon holding a
+   * graph open across an agent's edits) will otherwise answer `getNode(id)`
+   * with a row a sync deleted minutes ago, while every SQL-backed query beside
+   * it reports the truth — a disagreement that reads as a bug in whichever
+   * screen shows both.
+   *
+   * Cheap (clearing a bounded Map) and safe to call whenever the database file
+   * looks like it moved.
+   */
+  dropReadCaches(): void {
+    this.queries.clearCache();
+  }
+
+  /**
    * Completeness of the last full index run. `'complete'` is the only good
    * state. `'indexing'` after the fact means a run was killed mid-index (OOM,
    * SIGKILL, liveness watchdog) and the on-disk index is truncated;

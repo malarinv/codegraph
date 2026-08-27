@@ -31,7 +31,17 @@ The viewer never presents a guess as a fact:
 - Edges CodeGraph resolved by name alone, below its confidence threshold, fold into an "uncertain" line rather than sitting among the resolved ones. Nothing is silently dropped — the count is always there.
 - A symbol that no test reaches within three caller hops wears a badge saying exactly that.
 - Calls into symbols that aren't in the index are counted and marked, not omitted.
-- A file that changed on disk since it was indexed shows a banner instead of source that may no longer line up.
+- A file that changed on disk since it was indexed wears a banner and switches to the file's **current** source, with everything the graph anchors to a line number — the gutter markers, the call arcs, the right-hand list — switched off. The bytes on disk are right by construction; the line numbers the index recorded are the part that stopped being true.
+
+## It keeps up with your project
+
+The viewer follows the project while it is open, and it does it by watching, never by asking on a timer.
+
+- **Save a file and the banner appears** — about a third of a second later, before any sync has run. That is the honest state: the file on disk and the index have parted company, and the screen says so rather than showing you a body sliced at the wrong lines.
+- **When something re-indexes** — your agent's background sync, `codegraph sync`, a git hook — whatever is on screen refetches itself and a small "Index updated · reloaded" note appears at the bottom. The symbol, the file, the map and the flow are all answers about the graph as a whole, so all of them re-read it.
+- **A symbol that moved is followed, not lost.** Adding two lines above a function changes its identity in the graph; the viewer finds it again in its file and carries your trail across, rather than telling you the thing you were reading no longer exists.
+
+If the viewer ever loses touch with the server, it retries a handful of times with a growing delay and then stops and says **"Not live"** in the top bar — it never falls back to polling. Focus the tab to reconnect.
 
 ## Getting around
 

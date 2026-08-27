@@ -30,6 +30,7 @@
   import FileCodeRail from '../components/file/FileCodeRail.svelte';
   import FileModeTabs from '../components/file/FileModeTabs.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
+  import DriftBanner from '../components/DriftBanner.svelte';
   import {
     ApiFailure,
     fetchFileCode,
@@ -61,6 +62,7 @@
     type FileArc,
     type FileCallRow,
   } from '../lib/filecode-model';
+  import { liveRefresh } from '../lib/live.svelte';
   import { plural, synthesizedBy, type Connector, type LineRef } from '../lib/symbol-model';
   import { walkTo } from '../lib/walk';
 
@@ -98,25 +100,49 @@
     return () => controller.abort();
   });
 
-  async function load(file: string, signal: AbortSignal): Promise<void> {
-    loading = true;
-    failure = null;
-    payload = null;
+  /** Aborts a live-triggered reload when the screen moves on without it. */
+  let liveController: AbortController | null = null;
+
+  // The index moved, or this file changed on disk. Both change what is drawn in
+  // the margins AND what the source says, so both drop every cached page — but
+  // the scroll position stays, because the reader has not moved.
+  liveRefresh(
+    () => payload?.file.path ?? path,
+    () => {
+      const wanted = path;
+      liveController?.abort();
+      liveController = new AbortController();
+      void load(wanted, liveController.signal, true);
+    }
+  );
+
+  /**
+   * @param quiet a live refresh rather than a navigation: the pages are still
+   *   thrown away (the file changed — that is the whole point) but the scroll
+   *   position, the landing and the header stay put.
+   */
+  async function load(file: string, signal: AbortSignal, quiet = false): Promise<void> {
+    if (!quiet) {
+      loading = true;
+      failure = null;
+      payload = null;
+      landed = null;
+      hoverLine = null;
+      hoverFocus = null;
+      highlight = null;
+      if (stageEl) stageEl.scrollTop = 0;
+    }
     tokens = new Map();
     loadedPages = new Set();
     inflightPages = new Set();
     pageError = null;
     pageController?.abort();
     pageController = new AbortController();
-    landed = null;
-    hoverLine = null;
-    hoverFocus = null;
-    highlight = null;
-    if (stageEl) stageEl.scrollTop = 0;
     try {
       const next = await fetchFileCode(file, signal);
       if (signal.aborted) return;
       payload = next;
+      failure = null;
     } catch (cause) {
       if (signal.aborted) return;
       failure =
@@ -143,7 +169,17 @@
     const page = pageFor(index, file.totalLines);
     const signal = pageController?.signal;
     try {
-      const slice = await fetchSource(file.path, page.requestFrom, page.to, signal);
+      // A drifted file is paged as its CURRENT bytes: the numbering the pages
+      // use is the file's own, and every graph-derived marking over it is off
+      // (see `driftMode` below). Showing nothing would be honest and useless —
+      // the source itself is still exactly readable.
+      const slice = await fetchSource(
+        file.path,
+        page.requestFrom,
+        page.to,
+        signal,
+        payload?.drift ? 'current' : undefined
+      );
       // A different file (or a reload) landed while this was in flight.
       if (signal?.aborted || payload?.file.path !== file.path) return;
       if (!slice.lines) {
@@ -166,18 +202,35 @@
 
   /* -------------------------------------------------------------- models -- */
 
+  /**
+   * The file has changed on disk since it was indexed.
+   *
+   * Everything in this screen's margins — the arcs, the gutter ports, the rail
+   * rows, the outline's line numbers — is a line number the graph recorded, and
+   * the file no longer has those lines. So in this mode the margins go away and
+   * the source stays: current bytes are correct by construction, and a call arc
+   * drawn between two lines that have moved is the one thing here that could be
+   * confidently wrong. Parity with `codegraph_node`, which serves a drifted
+   * file whole and current rather than slicing it (issue #1474).
+   */
+  let driftMode = $derived(payload?.drift === true);
+
   let totalLines = $derived(payload?.file.totalLines ?? 0);
-  let refs = $derived(payload ? buildFileRefs(payload) : new Map<number, LineRef[]>());
-  let rows = $derived(payload ? buildFileCallRows(payload) : []);
-  let arcs = $derived(payload ? buildFileArcs(payload, rows) : []);
+  let refs = $derived(
+    payload && !driftMode ? buildFileRefs(payload) : new Map<number, LineRef[]>()
+  );
+  let rows = $derived(payload && !driftMode ? buildFileCallRows(payload) : []);
+  let arcs = $derived(payload && !driftMode ? buildFileArcs(payload, rows) : []);
   let crowded = $derived(arcs.length > ARC_CROWD_LIMIT);
 
   let outlineRows = $derived<OutlineEntryRow[]>(
-    (payload?.outline.items ?? []).map((entry) => ({
-      entry,
-      indent: Math.min(entry.depth, 3),
-      dimmed: QUIET_KINDS.has(entry.kind),
-    }))
+    driftMode
+      ? []
+      : (payload?.outline.items ?? []).map((entry) => ({
+          entry,
+          indent: Math.min(entry.depth, 3),
+          dimmed: QUIET_KINDS.has(entry.kind),
+        }))
   );
 
   const QUIET_KINDS = new Set(['property', 'field', 'enum_member', 'variable', 'constant']);
@@ -185,6 +238,7 @@
   /** Lines a definition starts on → its name, so the name is bold in the body. */
   let defNames = $derived.by(() => {
     const map = new Map<number, string>();
+    if (driftMode) return map;
     for (const entry of payload?.outline.items ?? []) {
       if (!map.has(entry.line)) map.set(entry.line, entry.name);
     }
@@ -242,7 +296,7 @@
   // rather than inside the block so a fast scroll past a page does not leave a
   // request for it half-applied to a screen that has moved on.
   $effect(() => {
-    if (!payload || payload.drift) return;
+    if (!payload) return;
     const wanted = pagesForRange(visible.first, visible.last, totalLines);
     untrack(() => {
       for (const index of wanted) void loadPage(index);
@@ -417,7 +471,7 @@
           <FileModeTabs path={payload.file.path} {line} source={true} />
         </div>
 
-        <div class="toolbar">
+        <div class="toolbar" class:hidden={driftMode}>
           <span class="arcnote">
             {arcSummary(payload.intraFileCalls)}{#if crowded}{' '}<span class="dim"
                 >— showing the ones the symbol under the pointer takes part in</span
@@ -436,22 +490,25 @@
         </div>
 
         {#if payload.drift}
-          <div class="drift">
-            {payload.reason ??
-              'This file changed on disk after the last index sync.'} The source is not shown, because
-            the line numbers the graph holds no longer match it. Run <code>codegraph sync</code> to bring
-            them up to date.
+          <div class="banner">
+            <DriftBanner file={payload.file.path}>
+              indexed line ranges may be shifted; showing the file's current source, with the
+              call arcs, ports and rail switched off — they are drawn from lines this file no
+              longer has. The next sync picks it up.
+            </DriftBanner>
           </div>
         {:else if payload.file.totalLines === null}
-          <div class="drift">
-            {payload.reason ?? 'This file could not be read from disk.'}
+          <div class="banner">
+            <DriftBanner file={payload.file.path}>
+              {payload.reason ?? 'it could not be read from disk.'}
+            </DriftBanner>
           </div>
         {:else if pageError}
-          <div class="drift">{pageError}</div>
+          <div class="note">{pageError}</div>
         {/if}
       </header>
 
-      {#if !payload.drift && payload.file.totalLines !== null}
+      {#if payload.file.totalLines !== null}
         <div
           class="stage"
           bind:this={stageEl}
@@ -462,7 +519,9 @@
         >
           <div class="stage-inner" style:height={`${docHeight}px`}>
             <div class="arccol">
-              <CodeArcs arcs={windowArcs} height={docHeight} {hoverLine} onfollow={followArc} />
+              {#if !driftMode}
+                <CodeArcs arcs={windowArcs} height={docHeight} {hoverLine} onfollow={followArc} />
+              {/if}
             </div>
 
             <div class="codecol" bind:this={codeEl}>
@@ -481,13 +540,15 @@
             </div>
 
             <aside class="rail" bind:this={railEl} aria-label="Calls">
-              <FileCodeRail
-                rows={windowRows}
-                focalFile={payload.file.path}
-                {focusId}
-                onopen={openNode}
-                onhover={onhoverRow}
-              />
+              {#if !driftMode}
+                <FileCodeRail
+                  rows={windowRows}
+                  focalFile={payload.file.path}
+                  {focusId}
+                  onopen={openNode}
+                  onhover={onhoverRow}
+                />
+              {/if}
             </aside>
 
             <Connectors {connectors} width={columns.width} height={docHeight} />
@@ -592,18 +653,19 @@
     white-space: nowrap;
   }
 
-  .drift {
+  .banner {
     margin-top: 10px;
-    padding: 8px 12px;
-    border: 1px solid var(--amber);
-    background: var(--amber-soft);
-    color: var(--amber);
+  }
+
+  .note {
+    margin-top: 10px;
+    color: var(--ink-3);
     font-size: 12.5px;
     line-height: 1.5;
   }
 
-  .drift code {
-    font: 12px var(--mono);
+  .toolbar.hidden {
+    display: none;
   }
 
   .stage {

@@ -10,13 +10,22 @@
  * `?file=../../.ssh/id_rsa` is a credential leak over a port the user opened to
  * read their own code.
  *
- * **A file that changed on disk since it was indexed is never sliced.** The
- * viewer asks for line ranges the *index* recorded; if the file moved on since,
- * those ranges can point at a different symbol's body, which would be served
- * under the requested name and look perfectly plausible. So the bytes are
- * hashed and compared against `files.content_hash`, and on a mismatch the slice
- * is omitted with `drift: true` — the same call `codegraph_node` makes when it
- * says "changed on disk after the last index sync".
+ * **A file that changed on disk since it was indexed is never sliced under the
+ * index's numbering.** The viewer asks for line ranges the *index* recorded; if
+ * the file moved on since, those ranges can point at a different symbol's body,
+ * which would be served under the requested name and look perfectly plausible.
+ * So the bytes are hashed and compared against `files.content_hash`, and on a
+ * mismatch the slice is omitted with `drift: true` — the same call
+ * `codegraph_node` makes when it says "changed on disk after the last index
+ * sync".
+ *
+ * A caller that has ALREADY decided the index's numbering is off — a viewer
+ * about to draw a drift banner — asks with `ondrift=current` and gets the
+ * file's CURRENT lines instead of nothing. That is the other half of
+ * `codegraph_node`'s behaviour (issue #1474): a drifted file is served whole
+ * and current rather than omitted, because current bytes are correct by
+ * construction. `showing` says which of the two came back, on every response,
+ * so nothing has to infer it from the presence of `lines`.
  *
  * Only files that are IN the index are served. That is a tighter boundary than
  * the MCP tools take, and it costs the viewer nothing (it only ever renders
@@ -230,8 +239,19 @@ export function readFileShape(
 export interface SourceResult {
   file: string;
   language: string;
-  /** The file on disk differs from what was indexed — no slice is served. */
+  /** The file on disk differs from what was indexed. */
   drift: boolean;
+  /**
+   * Which numbering the returned lines belong to.
+   *
+   * `'indexed'` — the file matches the index, so the two are the same thing.
+   * `'current'` — the file drifted and the caller asked for it anyway
+   * (`ondrift=current`): these are the bytes on disk right now, and NOTHING the
+   * graph holds about this file (symbol ranges, call-site lines, ports) lines
+   * up with them.
+   * `'none'` — the file drifted and no slice is served.
+   */
+  showing: 'indexed' | 'current' | 'none';
   contentHash: string;
   indexedAt: number;
   generated: boolean;
@@ -253,6 +273,32 @@ export interface SourceResult {
   highlight?: HighlightResult;
 }
 
+/**
+ * What to do when the file on disk no longer matches the index.
+ *
+ * `omit` (the default) is the safe answer for a caller that has not decided
+ * anything yet. `current` is for one that has: it is about to say, in the
+ * pixels, that these are the file's CURRENT lines and that nothing the graph
+ * holds about them applies.
+ */
+export type OnDrift = 'omit' | 'current';
+
+/** Said once, so the two places that answer with current bytes cannot diverge. */
+const DRIFT_CURRENT_REASON =
+  'This file changed on disk after the last index sync. These are its current ' +
+  'lines; the indexed line ranges — symbol bodies, call sites, ports — no longer ' +
+  'match them. The next sync picks it up.';
+
+export function parseOnDrift(query: URLSearchParams): OnDrift {
+  const raw = query.get('ondrift');
+  if (raw === null || raw === '' || raw === 'omit') return 'omit';
+  if (raw === 'current') return 'current';
+  throw badRequest(
+    `Parameter "ondrift" must be "omit" or "current" (got "${raw}").`,
+    'Omit it to leave a drifted file unsliced; "current" serves the bytes on disk instead.'
+  );
+}
+
 export async function buildSource(
   cg: CodeGraph,
   projectRoot: string,
@@ -267,11 +313,13 @@ export async function buildSource(
   if (to !== 0 && to < from) {
     throw badRequest(`Parameter "to" (${to}) must not be before "from" (${from}).`);
   }
+  const onDrift = parseOnDrift(query);
 
   const base: SourceResult = {
     file: storedPath.replace(/\\/g, '/'),
     language: record.language,
     drift: false,
+    showing: 'indexed',
     contentHash: record.contentHash,
     indexedAt: record.indexedAt,
     generated: record.generated === true,
@@ -283,8 +331,14 @@ export async function buildSource(
     stats = fs.statSync(absolute);
   } catch {
     // Indexed but gone. That IS drift, and the strongest kind: nothing on disk
-    // corresponds to the ranges the graph holds.
-    return { ...base, drift: true, reason: 'The file is in the index but no longer on disk.' };
+    // corresponds to the ranges the graph holds — and `ondrift=current` has
+    // nothing to fall back to either.
+    return {
+      ...base,
+      drift: true,
+      showing: 'none',
+      reason: 'The file is in the index but no longer on disk.',
+    };
   }
   if (stats.size > MAX_SOURCE_BYTES) {
     throw badRequest(
@@ -306,10 +360,12 @@ export async function buildSource(
   // string). A touch or a checkout that rewrote the same bytes must not count
   // as drift, which is exactly what hashing content rather than mtime buys.
   const hash = createHash('sha256').update(content).digest('hex');
-  if (hash !== record.contentHash) {
+  const drift = hash !== record.contentHash;
+  if (drift && onDrift === 'omit') {
     return {
       ...base,
       drift: true,
+      showing: 'none',
       reason:
         'This file changed on disk after the last index sync, so the indexed line ' +
         'ranges no longer reliably match. Source is omitted rather than risk showing ' +
@@ -322,10 +378,28 @@ export async function buildSource(
   // surfacing rather than answering with the last line as if that were meant.
   // `to` past the end is different — "line 30 to the end, whatever that is" is
   // an ordinary way to ask, so it clamps.
+  //
+  // The exception is a drifted file the caller asked for anyway: it has already
+  // been told the numbering does not hold, and a save that SHORTENED the file
+  // between the length it was given and this read is an ordinary race, not a
+  // bug. Those get an empty slice.
   if (from > all.length) {
-    throw badRequest(
-      `Parameter "from" (${from}) is past the end of ${base.file}, which has ${all.length} lines.`
-    );
+    if (!drift) {
+      throw badRequest(
+        `Parameter "from" (${from}) is past the end of ${base.file}, which has ${all.length} lines.`
+      );
+    }
+    return {
+      ...base,
+      drift: true,
+      showing: 'current',
+      totalLines: all.length,
+      from,
+      to: from - 1,
+      lines: [],
+      truncated: false,
+      reason: DRIFT_CURRENT_REASON,
+    };
   }
   const start = from;
   const requestedEnd = to === 0 ? all.length : Math.min(to, all.length);
@@ -334,17 +408,26 @@ export async function buildSource(
 
   return {
     ...base,
+    drift,
+    // The bytes are always the ones on disk. What changes with drift is what
+    // they can be *used* for: under `current` the caller must not map anything
+    // the index holds onto these numbers.
+    showing: drift ? 'current' : 'indexed',
+    ...(drift ? { reason: DRIFT_CURRENT_REASON } : {}),
     totalLines: all.length,
     from: start,
     to: end,
     lines: slice,
     truncated: end < requestedEnd,
-    // Keyed on the content hash, so the cache is invalidated by the file
-    // changing rather than by a clock, and two viewers looking at the same
-    // symbol share one tokenisation.
+    // Keyed on the hash of the bytes ACTUALLY BEING SERVED, so the cache is
+    // invalidated by the file changing rather than by a clock, and two viewers
+    // looking at the same symbol share one tokenisation. It must be the disk
+    // hash rather than the record's: on a drifted file those differ, and keying
+    // current lines under the indexed hash would serve the previous edit's
+    // colours over this one's text.
     highlight: await highlightLines(slice, {
       language: record.language,
-      cacheKey: `${record.contentHash}:${start}:${end}`,
+      cacheKey: `${hash}:${start}:${end}`,
     }),
   };
 }

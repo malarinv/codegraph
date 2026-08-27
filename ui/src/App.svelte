@@ -9,14 +9,37 @@
   import MapView from './views/MapView.svelte';
   import FlowView from './views/FlowView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
+  import Toast from './components/Toast.svelte';
   import { router, navigate, back, mapHref, flowHref } from './lib/router.svelte';
   import { trail, resolveTrailNames } from './lib/trail.svelte';
   import { project } from './lib/project.svelte';
+  import { live } from './lib/live.svelte';
+  import { toast } from './lib/toast.svelte';
 
   // One `/api/stats` for the whole app: the top bar's counts and the Symbol
   // view's blast-radius denominator come out of the same payload.
   $effect(() => {
     void project.ensure();
+  });
+
+  // The live channel: one connection for the page, opened once. Every screen
+  // reads its counters; nothing polls.
+  $effect(() => {
+    live.start();
+  });
+
+  // The index moving is the one thing worth a note — the screen under it has
+  // already refetched by the time this shows. `/api/stats` is re-read for the
+  // same reason: the top bar's counts came from the graph that just changed.
+  let seenIndexTick = live.indexTick;
+  $effect(() => {
+    const tick = live.indexTick;
+    untrack(() => {
+      if (tick === seenIndexTick) return;
+      seenIndexTick = tick;
+      void project.reload();
+      toast.show('Index updated · reloaded');
+    });
   });
 
   let topbar: TopBar | null = $state(null);
@@ -115,6 +138,7 @@
     <HomeView project={project.name} />
   {/if}
 </main>
+<Toast />
 
 <style>
   /* The shell grid lives on #app (index.html's mount host) in app.css —

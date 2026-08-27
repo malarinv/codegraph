@@ -226,6 +226,30 @@ worker entry, a script — ranked by calls × the number of other files they rea
 depended-on symbols. Each section says what it is derived from, never that a file IS the entry
 point.
 
+### 3.8 Drift banner and live refresh (CG-53)
+Drift banner: full-width block above the code, `--paper-2` fill, 1px `--rule-soft` border, padding `8px 12px`, 12.5px `--ink-2`, leading
+"⚠" glyph in `--ink-3`. **Never amber** — amber is the untested badge's colour and nothing else's — and never a modal.
+Toast: `--ink` fill, `--paper` text, 12.5px, `8px 14px`, bottom-centre, 2.6 s, one at a time.
+
+**As built.** The endpoint is **`/api/events`**, not `/events`: everything under `/api/` answers JSON for every outcome and is
+excluded from the SPA fallback, so a stream mounted outside that namespace would have come back as the app shell on a typo and as
+`text/plain` on a refusal. It carries four event types — `hello` (the index revision the client is synchronised against, and which of
+the two watchers came up), `changed` (source files on disk, before any sync), `index` (the graph moved, naming what the sync
+re-indexed) and `degraded` — plus a `: ping` comment frame every 25 s. The server WATCHES and never syncs: the project tree through
+the engine's own `FileWatcher` with a notify-only `syncFn`, the index through one non-recursive `fs.watch` on the data directory
+settled at 400 ms (capped at 3 s). Both start with the first subscriber and stop with the last.
+
+Three banner variants, because what follows the dash is what the screen actually did:
+- **Symbol view** — "indexed line ranges may be shifted; showing the file's current source. The next sync picks it up." The whole
+  CURRENT file replaces the body (parity with `codegraph_node` on a drifted file, issue #1474) and every line-anchored marking goes
+  with the old numbering: gutter ports, call-site links, the definition-name weight, the `?hl=` highlight, and the callee rail's
+  anchoring — its rows stack in source order and draw no connector. Above 400 lines the banner links to the whole-file view instead.
+- **Whole file (`?src=1`)** — the same, plus "with the call arcs, ports and rail switched off". The source still pages in; only the
+  margins go.
+- **File outline** — "the outline below is the shape the file had when it was indexed", with a link to the current source.
+
+Measured: banner 360 ms after a save; toast 440 ms after `codegraph sync` returns; 0 requests in 4 idle seconds.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a
@@ -252,7 +276,7 @@ point.
 ## 5. Copy rules
 Sentence case; controls say what happens ("Read as flow", "Clear"); counts always visible next to folds; honesty phrases fixed:
 "No test reaches this within 3 caller hops", "Reached by tests · N files within 3 hops", "Uncertain · N name-only matches, confidence < 0.6",
-"outside the index", "Where the graph stops", "changed on disk after the last index sync".
+"outside the index", "Where the graph stops", "changed on disk after the last index sync", "Index updated · reloaded", "Not live".
 
 ---
 

@@ -36,6 +36,16 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   In the left margin is an arc for every call that stays inside the file, drawn from the calling line to the line the callee is defined on. Nothing is laid out by an algorithm — the author already put the symbols in order, so source order does the work, and this is the one place a file's internal call structure is legible at a glance. Hover a line to light the arcs the function under your cursor takes part in, and click an arc to jump to the other end. On a file with more than forty of them the picture narrows to the symbol you're reading instead of drawing a wash of overlapping sweeps, with the total in the header. A rail on the far left lists the file's symbols and follows you as you scroll, when the window is wide enough for it.
 
+- **The viewer keeps up with your project while it's open.** Save a file and `codegraph ui` says so within about a third of a second: a banner on the file's screen explaining that the index hasn't caught up yet, and the file's **current** source in place of a body sliced at line numbers it no longer has — the call arcs, gutter markers and call list go away with the old numbering rather than pointing at the wrong lines. It's the same answer `codegraph_node` gives your agent about a file that changed after its last sync.
+
+  When anything re-indexes the project — your agent's background sync, `codegraph sync`, a git hook — whatever is on screen re-reads the graph and a small "Index updated · reloaded" note appears. A symbol that moved because you added a line above it is followed to its new place, with your trail intact, instead of turning into a dead link.
+
+  Nothing polls: the viewer watches for these two things and is told about them. If it loses touch with the server it retries a few times with a growing delay, then stops and says "Not live" in the top bar rather than hammering a port that isn't answering.
+
+### Fixes
+
+- Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.
+
 
 ## [1.6.0] - 2026-08-26
 

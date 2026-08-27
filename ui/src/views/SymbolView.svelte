@@ -22,7 +22,17 @@
   import MembersOutline from '../components/symbol/MembersOutline.svelte';
   import SourceBlock from '../components/symbol/SourceBlock.svelte';
   import SymbolHeader from '../components/symbol/SymbolHeader.svelte';
-  import { ApiFailure, fetchSource, fetchSymbol, type WireNodeRef, type WireSource, type WireSymbolPayload } from '../lib/api';
+  import DriftBanner from '../components/DriftBanner.svelte';
+  import {
+    ApiFailure,
+    fetchFile,
+    fetchSource,
+    fetchSymbol,
+    type WireNodeDetail,
+    type WireNodeRef,
+    type WireSource,
+    type WireSymbolPayload,
+  } from '../lib/api';
   import { tokensByLine, type Token } from '../lib/highlight';
   import { hot, railFocus } from '../lib/focus.svelte';
   import { project } from '../lib/project.svelte';
@@ -38,7 +48,9 @@
     type Connector,
     type LineRef,
   } from '../lib/symbol-model';
-  import { trail } from '../lib/trail.svelte';
+  import { encodeTrail, trail } from '../lib/trail.svelte';
+  import { liveRefresh } from '../lib/live.svelte';
+  import { fileHref, navigate, symbolHref } from '../lib/router.svelte';
   import { arrivedFrom, walkTo } from '../lib/walk';
 
   interface Props {
@@ -55,6 +67,21 @@
   const ROW_GAP = 6;
   /** Fallback for the sticky rail header before it has been measured. */
   const RAIL_HEADER_FALLBACK = 38;
+
+  /**
+   * How much of a DRIFTED file this screen will show in place of the body.
+   *
+   * When the file has moved on, the symbol's indexed range names nothing, so
+   * the only correct source to show is the whole current file — the same call
+   * `codegraph_node` makes (issue #1474), for the same reason: current bytes
+   * are right by construction, a slice of them is a guess. Past this length
+   * that stops being a symbol view and becomes a file view badly done, so the
+   * banner points at the real one instead.
+   */
+  const DRIFT_INLINE_MAX_LINES = 400;
+
+  /** One shared empty map, so the drift path does not allocate per render. */
+  const EMPTY_REFS: Map<number, LineRef[]> = new Map();
 
   /* --------------------------------------------------------------- state -- */
 
@@ -92,14 +119,35 @@
     return () => controller.abort();
   });
 
-  async function load(nodeId: string, signal: AbortSignal): Promise<void> {
-    loading = true;
-    failure = null;
-    payload = null;
-    source = null;
-    railFocus.reset();
-    hot.set(null);
-    placed = false;
+  /** Aborts a live-triggered reload when the screen moves on without it. */
+  let liveController: AbortController | null = null;
+
+  // The graph moved, or the file on screen changed on disk. Either way what is
+  // drawn is out of date; refetch it in place rather than blanking the screen.
+  liveRefresh(
+    () => payload?.node.file ?? null,
+    () => {
+      const wanted = id;
+      liveController?.abort();
+      liveController = new AbortController();
+      void load(wanted, liveController.signal, true);
+    }
+  );
+
+  /**
+   * @param quiet a live refresh rather than a navigation: keep what is on
+   *   screen until the new payload lands, so a sync does not blink the view.
+   */
+  async function load(nodeId: string, signal: AbortSignal, quiet = false): Promise<void> {
+    if (!quiet) {
+      loading = true;
+      failure = null;
+      payload = null;
+      source = null;
+      railFocus.reset();
+      hot.set(null);
+      placed = false;
+    }
     void project.ensure();
 
     let node: WireSymbolPayload;
@@ -107,25 +155,73 @@
       node = await fetchSymbol(nodeId, signal);
     } catch (cause) {
       if (signal.aborted) return;
+      // A node's id contains its start line, so a sync that moved this symbol
+      // down two lines answers 404 for an id that was valid a second ago. On a
+      // live refresh — and only there, because only there do we still hold the
+      // symbol's name — find it again in its file rather than telling the
+      // reader their screen no longer exists.
+      if (quiet && asFailure(cause).code === 'not-found' && payload !== null) {
+        const moved = await refind(payload.node, signal);
+        if (signal.aborted) return;
+        if (moved !== null) {
+          trail.rename(nodeId, moved);
+          navigate(symbolHref(moved.id, { trail: encodeTrail(trail.hops) }), { replace: true });
+          return;
+        }
+      }
       failure = asFailure(cause);
       loading = false;
       return;
     }
     if (signal.aborted) return;
     payload = node;
+    failure = null;
     loading = false;
     trail.resolve(nodeId, { name: node.node.name, kind: node.node.kind });
 
     // The body is only fetched when it will be drawn: a 2,000-line file node
     // shows its outline, and asking for 2,000 lines to throw them away is the
     // difference between a screen that settles at once and one that does not.
-    if (!showsBody(node.node.kind, node.node.lines) || node.drift) return;
+    if (!showsBody(node.node.kind, node.node.lines)) {
+      source = null;
+      return;
+    }
     try {
-      const slice = await fetchSource(node.node.file, node.node.line, node.node.endLine, signal);
+      // A drifted file is asked for WHOLE and CURRENT — its indexed range is
+      // the one thing about it that is certainly wrong — and the answer comes
+      // back flagged `showing: 'current'`, which is what switches every
+      // line-anchored marking below off.
+      const slice = node.drift
+        ? await fetchSource(node.node.file, 1, 0, signal, 'current')
+        : await fetchSource(node.node.file, node.node.line, node.node.endLine, signal);
       if (!signal.aborted) source = slice;
     } catch {
       // No slice: the header, the rails and the blast strip are all still
       // true, so the screen loses the body and says so rather than erroring.
+      if (!signal.aborted) source = null;
+    }
+  }
+
+  /**
+   * The same symbol after a sync renumbered its file.
+   *
+   * The file's outline is the exact answer — every symbol in that file with its
+   * new id — so this is one request and no ranking. Same name and kind is the
+   * match; when a file holds several (overloads), the one that moved least is
+   * the one the reader was on.
+   */
+  async function refind(previous: WireNodeDetail, signal: AbortSignal): Promise<WireNodeRef | null> {
+    try {
+      const file = await fetchFile(previous.file, signal);
+      const candidates = file.outline.items.filter(
+        (entry) => entry.name === previous.name && entry.kind === previous.kind
+      );
+      if (candidates.length === 0) return null;
+      return candidates.reduce((best, entry) =>
+        Math.abs(entry.line - previous.line) < Math.abs(best.line - previous.line) ? entry : best
+      );
+    } catch {
+      return null;
     }
   }
 
@@ -143,8 +239,29 @@
 
   let wantsBody = $derived(payload ? showsBody(payload.node.kind, payload.node.lines) : false);
 
+  /**
+   * The body on screen is the file's CURRENT source, not this symbol's.
+   *
+   * Everything the graph knows is anchored to line numbers the file no longer
+   * has, so in this mode the ports, the call-site links, the definition-name
+   * weight and the `?line=` highlight are all switched off together. Leaving
+   * any one of them on would put a marking from the previous version of the
+   * file over a line of the new one — a lie that looks exactly like the truth.
+   */
+  let showingCurrent = $derived(source?.showing === 'current');
+
+  /** A drifted file too long to stand in for the body; the banner links out. */
+  let driftTooLong = $derived(
+    payload?.drift === true &&
+      (source === null || (source.totalLines ?? 0) > DRIFT_INLINE_MAX_LINES)
+  );
+
   let codeBlock = $derived.by(() => {
     if (!payload || !source?.lines) return null;
+    if (showingCurrent) {
+      if (driftTooLong) return null;
+      return buildCodeBlock(source.from ?? 1, source.lines, []);
+    }
     const from = source.from ?? payload.node.line;
     return buildCodeBlock(from, source.lines, graphCallLines(payload));
   });
@@ -290,7 +407,16 @@
     const headerHeight =
       rail.querySelector<HTMLElement>('[data-rail-header]')?.offsetHeight ?? RAIL_HEADER_FALLBACK;
 
+    // A drifted file's body is the CURRENT source under CURRENT numbering, and
+    // the rail's anchors are the numbers the index recorded. A line that
+    // happens to exist in both is a coincidence, not a call site — so in that
+    // mode nothing is anchored: the rows stack in source order and no
+    // connector is drawn. The rail is still true about WHAT this symbol calls;
+    // it has stopped being true about WHERE, and says so by not pointing.
+    const anchored = !showingCurrent;
+
     const lineCentre = (n: number): number | null => {
+      if (!anchored) return null;
       const el = center.querySelector<HTMLElement>(`[data-line="${n}"]`);
       return el ? el.offsetTop + el.offsetHeight / 2 : null;
     };
@@ -437,21 +563,33 @@
           <SymbolHeader {payload} onopen={open} />
 
           {#if payload.drift}
-            <div class="drift">
-              {payload.node.file} changed on disk after the last index sync — the body is not shown, because
-              the line ranges the graph holds no longer match the file. Run <code>codegraph sync</code>
-              to bring it up to date.
+            <div class="banner">
+              <DriftBanner file={payload.node.file}>
+                {#if driftTooLong}
+                  indexed line ranges may be shifted, and the file is too long to stand in for
+                  this symbol's body here —
+                  <a href={fileHref(payload.node.file, { source: true })}>open its current source</a>.
+                  The next sync picks it up.
+                {:else}
+                  indexed line ranges may be shifted; showing the file's current source. The next
+                  sync picks it up.
+                {/if}
+              </DriftBanner>
             </div>
-          {:else if codeBlock}
+          {/if}
+
+          {#if codeBlock}
             <SourceBlock
               block={codeBlock}
               tokens={codeTokens}
-              {refs}
-              defLine={payload.node.line}
-              defName={payload.node.name}
-              highlight={line}
+              refs={showingCurrent ? EMPTY_REFS : refs}
+              defLine={showingCurrent ? -1 : payload.node.line}
+              defName={showingCurrent ? '' : payload.node.name}
+              highlight={showingCurrent ? null : line}
               onfollow={followRef}
             />
+          {:else if payload.drift}
+            <!-- The banner above is the whole answer for this file. -->
           {:else if !wantsBody}
             <!-- The outline below IS the body for a container this size. -->
           {:else if source}
@@ -538,19 +676,8 @@
     border-left: 1px solid var(--rule-faint);
   }
 
-  .drift {
-    margin-top: 16px;
-    padding: 10px 12px;
-    border: 1px solid var(--amber);
-    background: var(--amber-soft);
-    color: var(--amber);
-    font-size: 12.5px;
-    line-height: 1.5;
-  }
-
-  .drift code {
-    font-family: var(--mono);
-    font-size: 12px;
+  .banner {
+    margin: 16px 0 4px;
   }
 
   .note {

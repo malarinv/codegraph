@@ -94,11 +94,6 @@
       hub · {plural(payload.counts.callers, 'caller')}
     </span>
   {/if}
-  {#if payload.drift}
-    <span class="badge warn" title="The line ranges below come from the last index sync">
-      <span class="sw"></span>changed on disk after the last index sync
-    </span>
-  {/if}
   <span class="badge" class:warn={testBadge.warn} title={testBadge.title}>
     <span class="sw"></span>{testBadge.text}
   </span>

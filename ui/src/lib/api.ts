@@ -145,13 +145,20 @@ export interface WireSource {
   file: string;
   language: string;
   drift: boolean;
+  /**
+   * Which numbering `lines` belong to. `'indexed'` — the file matches the
+   * index. `'current'` — it drifted and we asked for the bytes anyway
+   * (`ondrift: 'current'`), so nothing the graph holds about this file lines up
+   * with them. `'none'` — it drifted and no slice came back.
+   */
+  showing: 'indexed' | 'current' | 'none';
   contentHash: string;
   indexedAt: number;
   generated: boolean;
   totalLines: number | null;
   from?: number;
   to?: number;
-  /** Absent when `drift` — a mis-sliced body is worse than no body. */
+  /** Absent when the file drifted and `ondrift` was left at its default. */
   lines?: string[];
   truncated?: boolean;
   reason?: string;
@@ -590,13 +597,29 @@ export function fetchFileCode(
   return getJson<WireFileCodePayload>(`api/filecode/${encoded}`, signal);
 }
 
+/**
+ * A slice of an indexed file.
+ *
+ * `ondrift` decides what happens when the file has changed since it was
+ * indexed. The default omits the slice — an indexed range over rewritten bytes
+ * can show a different symbol's code under the right name. `'current'` asks for
+ * the file's current lines instead, which is only correct for a caller that is
+ * also going to SAY so: the response comes back `showing: 'current'`, and every
+ * line-anchored thing the graph knows (ports, arcs, call sites, rail rows) has
+ * to be switched off over it.
+ */
 export function fetchSource(
   file: string,
   from: number,
   to: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  ondrift?: 'current'
 ): Promise<WireSource> {
-  const params = new URLSearchParams({ file, from: String(from), to: String(to) });
+  const params = new URLSearchParams({ file, from: String(from) });
+  // `to` is 1-based on the wire and absent means "to the end of the file" —
+  // sending 0 for that would be out of range, not a synonym.
+  if (to > 0) params.set('to', String(to));
+  if (ondrift) params.set('ondrift', ondrift);
   return getJson<WireSource>(`api/source?${params}`, signal);
 }
 

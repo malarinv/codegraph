@@ -19,6 +19,7 @@
   import FlowCard from '../components/flow/FlowCard.svelte';
   import FlowLink from '../components/flow/FlowLink.svelte';
   import { fetchFlow, type WireFlow, type WireFlowPayload } from '../lib/api';
+  import { live } from '../lib/live.svelte';
   import { navigate, symbolHref } from '../lib/router.svelte';
   import { trail, encodeTrail, type TrailHop } from '../lib/trail.svelte';
   import { decodeTrail } from '../lib/trail-codec';
@@ -72,14 +73,19 @@
       error = null;
       return;
     }
+    // Re-run when the index moves: a path is a walk over edges that a sync can
+    // add, remove or re-route, and a strip drawn from the previous graph would
+    // disagree with `codegraph_explore` about the same question.
+    void live.indexTick;
     const controller = new AbortController();
     loading = true;
     error = null;
+    const keep = picked;
     fetchFlow(spec, controller.signal)
       .then((next) => {
         payload = next;
-        picked = next.flows[0]?.id ?? null;
-        showAll = false;
+        // A refresh keeps the reader's chosen path when it survived the sync.
+        picked = next.flows.some((f) => f.id === keep) ? keep : (next.flows[0]?.id ?? null);
         loading = false;
       })
       .catch((err: unknown) => {

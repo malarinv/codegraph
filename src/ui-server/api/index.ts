@@ -3,8 +3,10 @@
  *
  * Eleven endpoints, one per screen, each answering in a single round-trip — the
  * same principle as `codegraph_explore`: return enough that the caller does not
- * have to ask a follow-up question. Everything here is a *reader* of the
- * existing schema; nothing indexes, resolves, or writes.
+ * have to ask a follow-up question — plus one that does not answer at all and
+ * stays open instead (`/api/events`), so a screen learns that its answer went
+ * stale rather than waiting to be asked again. Everything here is a *reader* of
+ * the existing schema; nothing indexes, resolves, or writes.
  *
  * ```
  * GET /api/stats                     what this index is and how much to trust it
@@ -18,6 +20,7 @@
  * GET /api/entrypoints               where to start reading: routes, roots, hubs
  * GET /api/map?root=&depth=          the module map: modules, links, cycles
  * GET /api/flow?from=&to=            the flow strip: one card per hop
+ * GET /api/events                    the live channel (SSE): drift and refresh
  * ```
  *
  * It mounts on the `api` seam of `startUiServer`, which means it sits *behind*
@@ -43,6 +46,7 @@ import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
 import { buildFlow } from './flow';
+import { EventHub } from './events';
 
 export { GraphSession } from './session';
 export { ApiError } from './respond';
@@ -63,6 +67,15 @@ export type {
   WireFileCall,
   WireFileOutsideRef,
 } from './filecode';
+export { EventHub, MAX_EVENT_FILES, HEARTBEAT_MS } from './events';
+export type {
+  WireEvent,
+  WireEventHello,
+  WireEventChanged,
+  WireEventIndex,
+  WireEventDegraded,
+  WireIndexRevision,
+} from './events';
 export type {
   WireMapPayload,
   WireMapModule,
@@ -118,6 +131,11 @@ const API_INDEX = {
       params: ['from', 'to', 'symbols', 'hop', 'limit'],
     },
     {
+      path: '/api/events',
+      description:
+        'Live channel (server-sent events): source files that changed on disk, and the index moving.',
+    },
+    {
       path: '/api/entrypoints',
       description: 'Where to start reading: routes, files that run something, and hubs.',
       params: ['limit'],
@@ -127,10 +145,13 @@ const API_INDEX = {
 
 export function createGraphApi(options: GraphApiOptions): GraphApi {
   const session = new GraphSession(options.projectRoot);
+  // Watches nothing until a browser subscribes, and stops again when the last
+  // one goes away — mounting the API costs no watch descriptors.
+  const events = new EventHub(options.projectRoot, session);
 
   // Async because `/api/source` highlights: everything else answers straight
   // out of SQLite and resolves on the same tick.
-  const handler: UiApiHandler = async (_req, res, ctx) => {
+  const handler: UiApiHandler = async (req, res, ctx) => {
     const route = normalize(ctx.pathname);
     try {
       switch (route) {
@@ -152,6 +173,10 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, await buildSource(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/flow':
           return ok(res, await buildFlow(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
+        case '/api/events':
+          // Streams instead of answering: it writes its own headers and keeps
+          // the socket open, so it never goes through `ok()`.
+          return events.subscribe(req, res, ctx.method);
         default:
           return dispatchPathRoutes(route, res, ctx, session);
       }
@@ -166,7 +191,15 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
     }
   };
 
-  return { handler, close: () => session.close() };
+  return {
+    handler,
+    close: () => {
+      // Streams first: a client still attached would hold the socket open
+      // against the server's own close.
+      events.close();
+      session.close();
+    },
+  };
 }
 
 /**

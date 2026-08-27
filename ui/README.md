@@ -45,7 +45,9 @@ src/
   lib/map-model.ts        the Map's deterministic layered layout (pure)
   lib/flow-model.ts       the Flow strip's card/link geometry — a DAG (pure)
   lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
-  components/             TopBar, TrailBar, KindGlyph, map/, flow/, symbol/, file/
+  lib/live.svelte.ts      /api/events: two counters every screen refreshes from
+  lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
+  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, map/, flow/, symbol/, file/
   views/                  one component per route
 ```
 
@@ -65,6 +67,29 @@ announce the project to a font CDN.
 | `#/flow?from=&to=` | flow strip — the call path between two symbols |
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
 | `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |
+
+## Live updates
+
+The viewer never polls. `lib/live.svelte.ts` holds one `EventSource` on
+`/api/events` for the life of the page and exposes two counters:
+
+- **`indexTick`** — the graph moved (somebody synced). Every screen refetches:
+  a rail is an answer about the whole graph, and a symbol gains a caller when
+  some *other* file is edited, so filtering by the focused file would leave the
+  rails quietly wrong. One request per sync.
+- **`diskTick`** — source files changed on disk and the index has not caught up.
+  Only the screen showing one of those files reacts, and what it does is draw a
+  drift banner.
+
+`liveRefresh(file, refresh)` is the three lines of bookkeeping that turns a
+counter into a single call; the Map and the Flow strip instead read
+`live.indexTick` straight inside the effect that already fetches them.
+
+Reconnection is ours, not `EventSource`'s: each failure closes the stream and
+schedules ONE retry on a backoff that ends after eight attempts (~90 s), at
+which point the top bar says "Not live" and nothing more is requested until the
+tab is focused again. A `degraded` event — the server's watcher gave up — is
+shown the same way and never answered with a poll.
 
 Node ids and file paths are encoded per slash-separated segment, so
 `#/file/src/mcp/tools.ts` stays readable and still round-trips a segment

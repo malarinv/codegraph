@@ -19,6 +19,7 @@
   import ModuleEdge from '../components/map/ModuleEdge.svelte';
   import MapSidePanel from '../components/map/MapSidePanel.svelte';
   import { fetchMap, type WireMapPayload } from '../lib/api';
+  import { live } from '../lib/live.svelte';
   import { mapHref, navigate } from '../lib/router.svelte';
   import {
     buildMapLayout,
@@ -62,6 +63,11 @@
   $effect(() => {
     const wantRoot = root;
     const wantDepth = depth;
+    // Read so the effect re-runs when the index moves: the map IS the graph,
+    // and the layering changes with it. The canvas stays on screen while the
+    // new aggregation lands (the server answers a cached one in milliseconds
+    // when nothing actually changed).
+    void live.indexTick;
     const controller = new AbortController();
     loading = true;
     error = null;

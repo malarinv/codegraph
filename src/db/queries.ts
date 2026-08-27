@@ -2621,6 +2621,42 @@ export class QueryBuilder {
   }
 
   /**
+   * The index's revision marker: how far the last sync got, and how many files
+   * it left behind — one query, both numbers.
+   *
+   * This is the cheapest honest answer to "has the index moved since I last
+   * looked". `MAX(indexed_at)` alone is not enough: a sync that only DELETES
+   * files (a branch checkout that removed a directory) advances nothing, and
+   * the graph the viewer is showing has still changed underneath it. The row
+   * count catches exactly that case.
+   */
+  getIndexRevision(): { lastIndexedAt: number | null; fileCount: number } {
+    const row = this.db
+      .prepare('SELECT MAX(indexed_at) AS last, COUNT(*) AS files FROM files')
+      .get() as { last: number | null; files: number } | undefined;
+    return { lastIndexedAt: row?.last ?? null, fileCount: row?.files ?? 0 };
+  }
+
+  /**
+   * Files re-indexed strictly after `since` (ms since epoch), newest first.
+   *
+   * `total` is the real count; `paths` is capped at `limit`. Used by the
+   * viewer's live channel to name what a sync just picked up. A file the same
+   * sync DELETED cannot appear here — it has no row left — which is why the
+   * caller compares {@link getIndexRevision} as well rather than treating an
+   * empty list as "nothing happened".
+   */
+  getFilesIndexedSince(since: number, limit: number): { paths: string[]; total: number } {
+    const count = this.db
+      .prepare('SELECT COUNT(*) AS n FROM files WHERE indexed_at > ?')
+      .get(since) as { n: number } | undefined;
+    const rows = this.db
+      .prepare('SELECT path FROM files WHERE indexed_at > ? ORDER BY indexed_at DESC, path LIMIT ?')
+      .all(since, Math.max(0, limit)) as Array<{ path: string }>;
+    return { paths: rows.map((r) => r.path), total: count?.n ?? rows.length };
+  }
+
+  /**
    * Get files that need re-indexing (hash changed)
    */
   getStaleFiles(currentHashes: Map<string, string>): FileRecord[] {

@@ -15,6 +15,15 @@
  *   inode and happily serve a graph that no longer exists on disk. So the file
  *   identity is re-checked on acquisition — one `stat` — and a swapped file
  *   reopens the connection.
+ * - **A sync by ANOTHER process must not be served from memory.** The same
+ *   `stat` also notices the database growing, and when it has, the read caches
+ *   go (`dropReadCaches`). The query layer holds an LRU of nodes by id which
+ *   only a write through *this* instance invalidates, so without it
+ *   `/api/node/<id>` keeps answering with a symbol an agent's sync deleted
+ *   while `/api/search` — which never caches — correctly says it is gone. That
+ *   is not a stale screen, it is two screens contradicting each other; and
+ *   because a node's id contains its start line, ANY edit above a symbol
+ *   renames it, so this is the common case rather than the corner one.
  */
 
 import * as fs from 'fs';
@@ -23,16 +32,44 @@ import { getDatabasePath } from '../../db';
 import { isInitialized } from '../../directory';
 import { ApiError } from './respond';
 
-/** Identity of the database file, so a swap underneath us is detectable. */
+/**
+ * Identity of the database file, so a swap underneath us is detectable — plus
+ * the marks that say it was WRITTEN to without being replaced.
+ *
+ * The WAL is measured as well as the database: in WAL mode a commit lands in
+ * `codegraph.db-wal` and may not touch `codegraph.db` until a checkpoint, so a
+ * whole sync can go by with the main file's size and mtime unchanged.
+ */
 interface FileIdentity {
   ino: number;
   birthtimeMs: number;
+  size: number;
+  mtimeMs: number;
+  walSize: number;
+  walMtimeMs: number;
 }
 
 function identify(dbPath: string): FileIdentity | null {
   try {
     const st = fs.statSync(dbPath);
-    return { ino: st.ino, birthtimeMs: st.birthtimeMs };
+    let walSize = 0;
+    let walMtimeMs = 0;
+    try {
+      const wal = fs.statSync(`${dbPath}-wal`);
+      walSize = wal.size;
+      walMtimeMs = wal.mtimeMs;
+    } catch {
+      // No WAL sidecar: either not in WAL mode, or fully checkpointed. Both are
+      // "nothing pending", which is what zeroes mean here.
+    }
+    return {
+      ino: st.ino,
+      birthtimeMs: st.birthtimeMs,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      walSize,
+      walMtimeMs,
+    };
   } catch {
     return null;
   }
@@ -43,6 +80,17 @@ function sameFile(a: FileIdentity | null, b: FileIdentity | null): boolean {
   // `ino` is 0 on a few Windows filesystems; birthtime alone still catches a
   // recreate there, and a false "changed" only costs one reopen.
   return a.ino === b.ino && a.birthtimeMs === b.birthtimeMs;
+}
+
+/** Same file, but written to since we last looked. */
+function sameContent(a: FileIdentity | null, b: FileIdentity | null): boolean {
+  if (a === null || b === null) return false;
+  return (
+    a.size === b.size &&
+    a.mtimeMs === b.mtimeMs &&
+    a.walSize === b.walSize &&
+    a.walMtimeMs === b.walMtimeMs
+  );
 }
 
 /**
@@ -87,7 +135,17 @@ export class GraphSession {
     const current = identify(this.dbPath);
 
     if (this.cg !== null) {
-      if (sameFile(this.identity, current)) return this.cg;
+      if (sameFile(this.identity, current)) {
+        // Same file, but somebody wrote to it. SQLite itself is fine — a WAL
+        // reader sees the new commits — but our in-memory node cache is not,
+        // so it goes. One `stat` already paid for; clearing a bounded Map is
+        // the whole cost.
+        if (!sameContent(this.identity, current)) {
+          this.identity = current;
+          this.cg.dropReadCaches();
+        }
+        return this.cg;
+      }
       // The database was replaced (a re-index) or removed. Drop the stale
       // handle; falling through re-opens against whatever is there now.
       this.closeQuietly();
