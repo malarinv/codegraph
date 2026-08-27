@@ -235,9 +235,31 @@ its name column already carries the path, and printing it twice reads as an erro
 
 At rest — an empty box, or the empty screen — the panel shows **entry points** from
 `/api/entrypoints`: routes (URL → handler), files that run something at module level (a CLI, a
-worker entry, a script — ranked by calls × the number of other files they reach), and the most
-depended-on symbols. Each section says what it is derived from, never that a file IS the entry
-point.
+worker entry, a script — ranked by calls × the number of other files they reach), tests (ranked by
+how many other files each reaches), and the most depended-on symbols. Each section says what it is
+derived from, never that a file IS the entry point.
+
+**Entry points as a screen (CG-54, `#/entry`).** The same payload at full length, drawn with the
+caller rail's file-group + row shapes (`.filegroup` padding `10px 14px 4px`, path 11px mono
+`--ink-3` with the count in `--ink-2`; rows grid `16px | 1fr`, name 12.5px mono, meta 11px
+`--ink-3`), section headings 600 15px sentence-case with the count — and the detected framework —
+as 11.5px `--ink-3` meta beside them. Sections: **Routes** (verb ahead of the URL in the same
+mono at weight 500, handler + `file:line` in the meta, grouped by the file the URL is REGISTERED
+in), **Top-level files with calls**, **Tests**, **Most depended on**. A section whose list was cut
+prints "Showing N of \[at least] M"; "at least" is the honest reading wherever the server's count
+is a floor.
+
+A row that names a callable symbol carries a `Flow ›` chip (11px mono, `--rule-soft` border) that
+arms a flow from it; the panel then shows an `--accent-soft` bar with the name, an input, and
+`Draw the flow`, while every other armed-eligible row's chip becomes `→ here`. File and test rows
+carry no chip — `/api/flow` searches by NAME, and a file has none the path finder can look up.
+A project with fewer than three resolvable routes gets **no Routes heading at all**, not an empty
+one.
+
+In the search palette, entry points that mention the query appear **last**, under their own
+`Entry points` heading (12px `--ink-3`, like every other group): they are context on rows the
+search above may already have found, and a route row here names its HANDLER, which a `/api/search`
+hit on the same URL cannot. Rows whose target is already in the results are dropped.
 
 ### 3.8 Drift banner and live refresh (CG-53)
 Drift banner: full-width block above the code, `--paper-2` fill, 1px `--rule-soft` border, padding `8px 12px`, 12.5px `--ink-2`, leading

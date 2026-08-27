@@ -13,8 +13,9 @@
  * link reproduces the walk rather than starting a fresh one at the same symbol.
  */
 
-import { navigate, symbolHref } from './router.svelte';
+import { fileHref, navigate, symbolHref } from './router.svelte';
 import { encodeTrail, trail, type HopDirection } from './trail.svelte';
+import type { EntryTarget } from './entry-model';
 
 export interface WalkTarget {
   id: string;
@@ -51,4 +52,22 @@ export function arrivedFrom(): { id: string; rail: 'left' | 'right' } | null {
   if (current.dir === 'down') return { id: previous.id, rail: 'left' };
   if (current.dir === 'up') return { id: previous.id, rail: 'right' };
   return null;
+}
+
+/**
+ * Open whatever an entry-point row points at.
+ *
+ * A file goes to the File view rather than to the file node's Symbol view —
+ * the outline is on both, but only the File view carries the import rails —
+ * and it does NOT join the trail: a trail is a path through calls, and "I
+ * opened a file" is not a call. A symbol is a `start` hop, like any other jump
+ * that nothing on screen was stepped through to reach.
+ */
+export function openEntryTarget(target: EntryTarget): void {
+  if (!target) return;
+  if (target.type === 'file') {
+    navigate(fileHref(target.path));
+    return;
+  }
+  walkTo({ id: target.id, name: target.name, kind: target.kind }, 'start');
 }

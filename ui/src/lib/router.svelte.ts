@@ -10,6 +10,7 @@
  *   #/file/<path>          file view        (?hl=<line>, ?src=1 for whole-file source)
  *   #/map                  module map       (?root=&depth=&tests=1)
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
+ *   #/entry                entry points     (where a flow starts)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
  * `<kind>:<relative/path>` (see src/extraction/tree-sitter-helpers.ts), so
@@ -40,6 +41,7 @@ export type Route =
       /** An encoded trail, read as a flow. Same format the `t` param uses. */
       trail: string | null;
     }
+  | { view: 'entry' }
   | { view: 'unknown'; path: string };
 
 export type ViewName = Route['view'];
@@ -99,6 +101,8 @@ export function parseHash(hash: string): RouterLocation {
       depth: Number.isFinite(depth) && depth >= 1 && depth <= 4 ? depth : 1,
       tests: params.get('tests') === '1',
     };
+  } else if (head === 'entry' && rest.length === 0) {
+    route = { view: 'entry' };
   } else if (head === 'flow' && rest.length === 0) {
     // The question travels in the URL exactly as it was asked, so a flow can be
     // linked in a review and reopen as the same path.
@@ -148,6 +152,10 @@ export function mapHref(
   if (opts.tests) params.set('tests', '1');
   const query = params.toString();
   return `#/map${query ? `?${query}` : ''}`;
+}
+
+export function entryHref(): string {
+  return '#/entry';
 }
 
 export function flowHref(

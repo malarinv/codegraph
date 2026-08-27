@@ -24,6 +24,61 @@ import type { CodeGraph } from '../../index';
 import { intParam } from './respond';
 import { toPosixPath } from './wire';
 
+/**
+ * HTTP verbs a route name may lead with, plus the two stand-ins the resolvers
+ * emit when the registration names no verb (`mux.Handle`, `app.use`).
+ *
+ * The split is done against this list rather than against "the first word" so
+ * a file-routed page (`/blog/[slug]`) or a message-bus subscription keeps its
+ * whole name in the URL column instead of losing its first segment to a
+ * method column that was never there.
+ */
+const HTTP_METHODS: ReadonlySet<string> = new Set([
+  'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT',
+  'ANY', 'ALL', 'USE',
+]);
+
+/** One row of the URL → handler map. */
+export interface WireRoute {
+  /** The route node's name, verbatim: "POST /v1/users/{id}". */
+  url: string;
+  /** The verb, when the name leads with one. Null for file-routed pages. */
+  method: string | null;
+  /** The URL without the verb — the same string as `url` when there is none. */
+  path: string;
+  handler: string;
+  handlerKind: string;
+  /** Where the request is SERVED. */
+  file: string;
+  line: number;
+  handlerId: string | null;
+  /** Where the URL is REGISTERED — the router file, which is how routes group. */
+  routeFile: string;
+  routeLine: number;
+  routeId: string;
+}
+
+export interface WireRoutes {
+  routed: boolean;
+  /** Every URL the index holds, whether or not its handler resolved. */
+  routeCount: number;
+  /** Rows in `entries` — the ones whose handler the manifest could name. */
+  shown: number;
+  truncated: boolean;
+  topHandlerFile: string | null;
+  topHandlerFileCount: number;
+  entries: WireRoute[];
+}
+
+/** "POST /v1/users" -> { method: 'POST', path: '/v1/users' }. */
+export function splitRouteName(url: string): { method: string | null; path: string } {
+  const space = url.indexOf(' ');
+  if (space <= 0) return { method: null, path: url };
+  const head = url.slice(0, space);
+  if (!HTTP_METHODS.has(head.toUpperCase())) return { method: null, path: url };
+  return { method: head.toUpperCase(), path: url.slice(space + 1).trimStart() };
+}
+
 /** Distinct handler files we will resolve node ids for. */
 const MAX_HANDLER_FILES = 60;
 
@@ -34,7 +89,7 @@ const MAX_HANDLER_FILES = 60;
  */
 const MIN_LIMIT = 3;
 
-export function buildRoutes(cg: CodeGraph, query: URLSearchParams): unknown {
+export function buildRoutes(cg: CodeGraph, query: URLSearchParams): WireRoutes {
   const limit = intParam(query, 'limit', { min: MIN_LIMIT, max: 500, default: 200 });
 
   // One row over the limit, purely to learn whether there were more.
@@ -70,21 +125,23 @@ export function buildRoutes(cg: CodeGraph, query: URLSearchParams): unknown {
     }
   }
 
-  const entries = rows.map((entry) => ({
+  const entries: WireRoute[] = rows.map((entry) => ({
     url: entry.url,
+    ...splitRouteName(entry.url),
     handler: entry.handler,
     handlerKind: entry.handlerKind,
     file: toPosixPath(entry.handlerFile),
     line: entry.handlerLine,
     handlerId:
       byFileLineName.get(`${entry.handlerFile} ${entry.handlerLine} ${entry.handler}`) ?? null,
+    routeFile: toPosixPath(entry.routeFile),
+    routeLine: entry.routeLine,
+    routeId: entry.routeId,
   }));
 
   return {
     routed: true,
-    /** Every URL the index holds, whether or not its handler resolved. */
     routeCount,
-    /** Rows in `entries` — the ones whose handler the manifest could name. */
     shown: entries.length,
     truncated,
     topHandlerFile: manifest.topHandlerFile ? toPosixPath(manifest.topHandlerFile) : null,

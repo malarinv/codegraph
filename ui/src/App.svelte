@@ -8,9 +8,11 @@
   import FileCodeView from './views/FileCodeView.svelte';
   import MapView from './views/MapView.svelte';
   import FlowView from './views/FlowView.svelte';
+  import EntryView from './views/EntryView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
   import Toast from './components/Toast.svelte';
-  import { router, navigate, back, mapHref, flowHref } from './lib/router.svelte';
+  import { router, navigate, back, mapHref, flowHref, entryHref } from './lib/router.svelte';
+  import { palette } from './lib/palette.svelte';
   import { trail, resolveTrailNames } from './lib/trail.svelte';
   import { project } from './lib/project.svelte';
   import { live } from './lib/live.svelte';
@@ -38,6 +40,10 @@
       if (tick === seenIndexTick) return;
       seenIndexTick = tick;
       void project.reload();
+      // The entry points describe the index, and they are fetched once and
+      // kept — so without this the resting palette, the empty screen and the
+      // entry-points panel would all keep describing the graph as it was.
+      void palette.reloadEntries();
       toast.show('Index updated · reloaded');
     });
   });
@@ -103,6 +109,10 @@
         event.preventDefault();
         navigate(flowHref());
         break;
+      case 'e':
+        event.preventDefault();
+        navigate(entryHref());
+        break;
       case 'Backspace':
       case '[':
         event.preventDefault();
@@ -132,6 +142,8 @@
       symbols={route.symbols}
       trailParam={route.trail}
     />
+  {:else if route.view === 'entry'}
+    <EntryView project={project.name} />
   {:else if route.view === 'unknown'}
     <NotFoundView path={route.path} />
   {:else}

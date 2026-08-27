@@ -306,11 +306,22 @@ export interface WireNodeRefs {
 /* ---------------------------------------------------------- entry points -- */
 
 export interface WireEntryRoute {
+  /** The route node's name, verbatim: "POST /v1/users/{id}". */
   url: string;
+  /** The verb, when the name leads with one. Null for a file-routed page. */
+  method: string | null;
+  /** The URL without the verb — the same string as `url` when there is none. */
+  path: string;
   handler: string;
+  handlerKind: string;
+  /** Where the request is SERVED. */
   file: string;
   line: number;
   handlerId: string | null;
+  /** Where the URL is REGISTERED — the router file, which is how routes group. */
+  routeFile: string;
+  routeLine: number;
+  routeId: string;
 }
 
 export interface WireEntryFile extends WireNodeRef {
@@ -326,11 +337,28 @@ export interface WireEntryHub extends WireNodeRef {
   dependents: number;
 }
 
+export interface WireEntryTest extends WireNodeRef {
+  /** Distinct other files this test reaches — what it exercises. */
+  reaches: number;
+  /** References behind that reach. */
+  refs: number;
+}
+
 export interface WireEntryPoints {
-  routes: { routed: boolean; routeCount: number; items: WireEntryRoute[] };
-  /** `total` is a floor on both lists — the server counts what its scan saw. */
+  /** Frameworks the resolver detected — named in the Routes header. */
+  frameworks: string[];
+  routes: {
+    routed: boolean;
+    /** Every `route` node in the graph, resolved handler or not. */
+    routeCount: number;
+    items: WireList<WireEntryRoute>;
+  };
+  /** `total` is a floor on `files` and `hubs`; on `tests` it is exact. */
   files: WireList<WireEntryFile>;
+  tests: WireList<WireEntryTest>;
   hubs: WireList<WireEntryHub>;
+  index: { lastIndexedAt: number | null; files: number };
+  timing: { elapsedMs: number; cached: boolean };
 }
 
 export interface WireStats {
@@ -606,11 +634,12 @@ export function fetchNodeRefs(ids: readonly string[], signal?: AbortSignal): Pro
 }
 
 export function fetchEntryPoints(
-  opts: { limit?: number } = {},
+  opts: { limit?: number; routes?: number } = {},
   signal?: AbortSignal
 ): Promise<WireEntryPoints> {
   const params = new URLSearchParams();
   if (opts.limit) params.set('limit', String(opts.limit));
+  if (opts.routes) params.set('routes', String(opts.routes));
   const query = params.toString();
   return getJson<WireEntryPoints>(`api/entrypoints${query ? `?${query}` : ''}`, signal);
 }

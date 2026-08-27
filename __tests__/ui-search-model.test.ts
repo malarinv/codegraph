@@ -186,7 +186,15 @@ describe('the palette', () => {
 
 function entryPoints(over: Partial<WireEntryPoints> = {}): WireEntryPoints {
   return {
-    routes: { routed: false, routeCount: 0, items: [] },
+    frameworks: [],
+    routes: {
+      routed: false,
+      routeCount: 0,
+      items: { total: 0, shown: 0, truncated: false, items: [] },
+    },
+    tests: { total: 0, shown: 0, truncated: false, items: [] },
+    index: { lastIndexedAt: null, files: 0 },
+    timing: { elapsedMs: 0, cached: false },
     files: {
       total: 2,
       shown: 2,
@@ -232,15 +240,26 @@ describe('the entry points', () => {
         routes: {
           routed: true,
           routeCount: 4,
-          items: [
-            {
-              url: 'GET /users',
-              handler: 'listUsers',
-              file: 'src/routes.ts',
-              line: 11,
-              handlerId: 'function:listUsers',
-            },
-          ],
+          items: {
+            total: 1,
+            shown: 1,
+            truncated: false,
+            items: [
+              {
+                url: 'GET /users',
+                method: 'GET',
+                path: '/users',
+                handler: 'listUsers',
+                handlerKind: 'function',
+                file: 'src/routes.ts',
+                line: 11,
+                handlerId: 'function:listUsers',
+                routeFile: 'src/routes.ts',
+                routeLine: 4,
+                routeId: 'route:src/routes.ts:4:GET:/users',
+              },
+            ],
+          },
         },
       })
     );
@@ -263,6 +282,67 @@ describe('the entry points', () => {
     }));
     expect(buildEntryPalette(many, { perSection: 3 }).items).toHaveLength(4);
     expect(buildEntryPalette(many).items).toHaveLength(11);
+  });
+
+  it('offers entry points under a typed query, BELOW the symbol matches', () => {
+    const entries = entryPoints({
+      routes: {
+        routed: true,
+        routeCount: 3,
+        items: {
+          total: 1,
+          shown: 1,
+          truncated: false,
+          items: [
+            {
+              url: 'POST /users',
+              method: 'POST',
+              path: '/users',
+              handler: 'createUser',
+              handlerKind: 'function',
+              file: 'src/handlers.ts',
+              line: 8,
+              handlerId: 'function:createUser',
+              routeFile: 'src/routes.ts',
+              routeLine: 4,
+              routeId: 'route:src/routes.ts:4:POST:/users',
+            },
+          ],
+        },
+      },
+    });
+
+    const palette = buildSearchPalette(
+      [answer([result({ id: 'class:Users', name: 'Users', kind: 'class' })])],
+      null,
+      { entries, query: 'users', entryRows: 6 }
+    );
+
+    // Symbol matches keep the top: someone typing a name asked for the name.
+    expect(palette.sections[0]?.title).toBe('Class');
+    const last = palette.sections[palette.sections.length - 1];
+    expect(last?.title).toBe('Entry points');
+    const row = last?.items[0];
+    expect(row?.type).toBe('entry');
+    // The row a plain search cannot produce: the URL WITH its handler.
+    expect(row?.name).toBe('POST /users');
+    expect(row?.meta).toBe('createUser · handlers.ts:8');
+    expect(row?.location).toBe('route');
+    // The keyboard's flat list still equals what is drawn.
+    expect(palette.items).toEqual(palette.sections.flatMap((s) => s.items));
+  });
+
+  it('does not repeat a symbol the search above already found', () => {
+    const hub = { ...result({ id: 'method:get', name: 'get' }), dependents: 264 };
+    const entries = entryPoints({
+      hubs: { total: 1, shown: 1, truncated: false, items: [hub] as any },
+    });
+    const palette = buildSearchPalette([answer([result({ id: 'method:get', name: 'get' })])], null, {
+      entries,
+      query: 'get',
+      entryRows: 6,
+    });
+    expect(palette.sections.map((s) => s.title)).not.toContain('Entry points');
   });
 
   it('draws nothing at all before the answer arrives', () => {

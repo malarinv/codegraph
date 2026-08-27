@@ -39,15 +39,16 @@ src/
   main.ts                 fonts + tokens, mounts App into index.html's #app
   app.css                 design tokens (light/dark), reset, shell grid
   App.svelte              top bar / trail bar / main, global keys
-  lib/router.svelte.ts    hash router: #/s/<id>, #/file/<path>, #/map, #/flow
+  lib/router.svelte.ts    hash router: #/s/<id>, #/file/<path>, #/map, #/flow, #/entry
   lib/trail.svelte.ts     the walked path; mirrored into the `t` query param
   lib/kinds.ts            kind glyph letters
   lib/map-model.ts        the Map's deterministic layered layout (pure)
   lib/flow-model.ts       the Flow strip's card/link geometry + the end cap — a DAG (pure)
   lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
+  lib/entry-model.ts      the entry-points panel: rows, file groups, flow arming (pure)
   lib/live.svelte.ts      /api/events: two counters every screen refreshes from
   lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
-  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, map/, flow/, symbol/, file/
+  components/             TopBar, TrailBar, KindGlyph, DriftBanner, Toast, map/, flow/, symbol/, file/, entry/
   views/                  one component per route
 ```
 
@@ -67,6 +68,29 @@ announce the project to a font CDN.
 | `#/flow?from=&to=` | flow strip — the call path between two symbols |
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
 | `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |
+| `#/entry` | entry points — routes, files that run something, tests, hubs |
+
+## Entry points
+
+`#/entry` draws `/api/entrypoints` as file groups, reusing the Symbol view's
+`.filegroup` / `.row` shapes rather than inventing a second visual language for
+"a list of code, grouped by where it lives". Three things about it are decisions,
+not accidents:
+
+- **Routes group by where the URL is REGISTERED, not where it is served.** A
+  router file is the shape a reader already has in mind; handlers scatter across
+  a package. The payload carries both, and the row's meta line names the handler
+  and its `file:line`.
+- **A row offers a flow only if it names a callable symbol.** `/api/flow`
+  searches the graph by NAME, and a file has none the path finder can look up —
+  so route and hub rows carry a `Flow ›` chip and file and test rows do not. A
+  chip that always failed would be worse than no chip.
+- **No empty Routes box.** A project with fewer than three resolvable routes is
+  not a routed app, and the section is absent rather than empty; the panel falls
+  back to the files that run something and the tests that exercise them.
+
+`buildEntryPanel` is pure and keeps `panel.rows` exactly equal to the sections it
+draws, the same identity the search palette rests its keyboard on.
 
 ## Where the graph stops
 

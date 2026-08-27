@@ -5,15 +5,19 @@
    * Nothing selected is the normal first state of a viewer opened on a project
    * nobody has read before, so it carries the same entry points the palette
    * shows at rest, at full length: the routes a request arrives on, the files
-   * that run something at module level, and the symbols the most code depends
-   * on. Every one of them is derived from the graph — see
-   * `src/ui-server/api/entrypoints.ts` for what each is derived from.
+   * that run something at module level, the tests that exercise the most of the
+   * project, and the symbols the most code depends on. Every one of them is
+   * derived from the graph — see `src/ui-server/api/entrypoints.ts` for what
+   * each is derived from.
+   *
+   * The full-length version, with the same rows grouped by file and able to
+   * start a flow, is `#/entry` (`EntryView`); this screen links to it.
    */
   import PaletteRows from '../components/PaletteRows.svelte';
   import { palette } from '../lib/palette.svelte';
   import { buildEntryPalette, type PaletteItem } from '../lib/search-model';
-  import { fileHref, flowHref, navigate } from '../lib/router.svelte';
-  import { walkTo } from '../lib/walk';
+  import { entryHref, fileHref, flowHref, navigate } from '../lib/router.svelte';
+  import { openEntryTarget, walkTo } from '../lib/walk';
 
   interface Props {
     project?: string | null;
@@ -31,6 +35,10 @@
     // but the row type is shared, so the branch is here rather than assumed away.
     if (item.type === 'flow') {
       navigate(flowHref({ from: item.from, to: item.to }));
+      return;
+    }
+    if (item.type === 'entry') {
+      openEntryTarget(item.row.target);
       return;
     }
     const id = item.type === 'route' ? item.nodeId : item.id;
@@ -65,7 +73,10 @@
 
   {#if entries.sections.length > 0}
     <section class="entries" aria-label="Where to start">
-      <h3>Where to start</h3>
+      <div class="entries-h">
+        <h3>Where to start</h3>
+        <a href={entryHref()}>All entry points ›</a>
+      </div>
       <div class="rows">
         <PaletteRows palette={entries} onpick={pick} />
       </div>
@@ -90,10 +101,28 @@
     padding: 8px 40px 48px;
   }
 
+  .entries-h {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
   .entries h3 {
-    margin: 0 0 8px;
+    margin: 0;
     font-size: 14px;
     font-weight: 600;
+  }
+
+  .entries-h a {
+    color: var(--ink-2);
+    font-size: 12px;
+  }
+
+  .entries-h a:hover {
+    color: var(--ink);
+    text-decoration: underline;
   }
 
   .rows {

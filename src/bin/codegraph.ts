@@ -1889,6 +1889,10 @@ box for the flow between two symbols: one card per hop, opened at the line that
 makes the next call, with dynamic-dispatch hops drawn dashed and named. The Map
 tab draws the whole project by module, with dependencies pointing down.
 
+Never opened this codebase before? The Entry points tab lists the routes with
+the symbols that serve them, the files that run something when they load, the
+tests, and what the most code depends on — and starts a flow from any of them.
+
 The page keeps up with the project while it is open: save a file and it says so
 within about a third of a second, and whatever is on screen re-reads the graph
 when something re-indexes it. It watches for that; it never polls.

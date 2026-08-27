@@ -1024,7 +1024,17 @@ export class QueryBuilder {
    * mapping AND the handler implementations.
    */
   getRoutingManifest(limit: number = 40): {
-    entries: Array<{ url: string; handler: string; handlerFile: string; handlerLine: number; handlerKind: string }>;
+    entries: Array<{
+      url: string;
+      handler: string;
+      handlerFile: string;
+      handlerLine: number;
+      handlerKind: string;
+      /** The route node itself: where the URL is REGISTERED, not where it is served. */
+      routeId: string;
+      routeFile: string;
+      routeLine: number;
+    }>;
     topHandlerFile: string | null;
     topHandlerFileCount: number;
     totalRoutes: number;
@@ -1036,6 +1046,9 @@ export class QueryBuilder {
       this.stmts.getRoutingManifest = this.db.prepare(`
         SELECT
           r.name AS url,
+          r.id AS route_id,
+          r.file_path AS route_file,
+          r.start_line AS route_line,
           h.name AS handler,
           h.file_path AS handler_file,
           h.start_line AS handler_line,
@@ -1051,7 +1064,8 @@ export class QueryBuilder {
       `);
     }
     const rows = this.stmts.getRoutingManifest.all(limit) as Array<{
-      url: string; handler: string; handler_file: string; handler_line: number; handler_kind: string;
+      url: string; route_id: string; route_file: string; route_line: number;
+      handler: string; handler_file: string; handler_line: number; handler_kind: string;
     }>;
     // Drop test/generated handlers — same hygiene as elsewhere.
     const generated = this.getGeneratedPathsAmong(rows.map(r => r.handler_file));
@@ -1077,6 +1091,9 @@ export class QueryBuilder {
         handlerFile: r.handler_file,
         handlerLine: r.handler_line,
         handlerKind: r.handler_kind,
+        routeId: r.route_id,
+        routeFile: r.route_file,
+        routeLine: r.route_line,
       })),
       topHandlerFile,
       topHandlerFileCount,
@@ -2074,6 +2091,58 @@ export class QueryBuilder {
        GROUP BY tn.file_path`
       )
       .all(JSON.stringify(filePaths)) as Array<{ filePath: string; dependents: number }>;
+  }
+
+  /**
+   * How far each of the given files reaches OUT: distinct other files its
+   * symbols touch, and how many references that is.
+   *
+   * The mirror of {@link getFileDependentCounts}, and the same reasoning about
+   * `contains` and same-file edges applies. It is driven from `nodes` rather
+   * than from `edges` so the work is proportional to the files asked about —
+   * the entry-points endpoint asks it about every test file in the index, and
+   * an edge-first plan would scan the whole table to answer a question about a
+   * tenth of it.
+   */
+  getFileReachCounts(filePaths: string[]): Array<{ filePath: string; reaches: number; refs: number }> {
+    if (filePaths.length === 0) return [];
+    return this.db
+      .prepare(
+        `SELECT sn.file_path AS filePath,
+                COUNT(DISTINCT tn.file_path) AS reaches,
+                COUNT(*) AS refs
+           FROM nodes sn
+           JOIN edges e ON e.source = sn.id
+           JOIN nodes tn ON tn.id = e.target
+          WHERE sn.file_path IN (SELECT value FROM json_each(?))
+            AND e.kind != 'contains'
+            AND tn.file_path <> sn.file_path
+       GROUP BY sn.file_path`
+      )
+      .all(JSON.stringify(filePaths)) as Array<{
+      filePath: string;
+      reaches: number;
+      refs: number;
+    }>;
+  }
+
+  /**
+   * The `file` nodes for the given paths, in one query.
+   *
+   * A file's own node is what makes a file row navigable, and looking it up
+   * with {@link getNodesInFile} means materialising every symbol in the file to
+   * throw all but one away.
+   */
+  getFileNodes(filePaths: string[]): Node[] {
+    if (filePaths.length === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM nodes
+          WHERE kind = 'file'
+            AND file_path IN (SELECT value FROM json_each(?))`
+      )
+      .all(JSON.stringify(filePaths)) as NodeRow[];
+    return rows.map(rowToNode);
   }
 
   /**

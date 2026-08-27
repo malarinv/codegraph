@@ -1438,6 +1438,24 @@ export class CodeGraph {
   }
 
   /**
+   * How far each of the given files reaches out: distinct other files their
+   * symbols touch, and how many references that is. The mirror of
+   * {@link getFileDependentCounts}; a test file's reach is what it exercises.
+   */
+  getFileReachCounts(filePaths: string[]): Map<string, { reaches: number; refs: number }> {
+    return new Map(
+      this.queries
+        .getFileReachCounts(filePaths)
+        .map((row) => [row.filePath, { reaches: row.reaches, refs: row.refs }])
+    );
+  }
+
+  /** The `file` nodes for the given paths, in one query. */
+  getFileNodes(filePaths: string[]): Node[] {
+    return this.queries.getFileNodes(filePaths);
+  }
+
+  /**
    * Roll the edge table up to module granularity, for a file → module
    * assignment the caller decides.
    *
@@ -1725,7 +1743,16 @@ export class CodeGraph {
    * null when fewer than 3 valid (non-test) routes exist.
    */
   getRoutingManifest(limit?: number): {
-    entries: Array<{ url: string; handler: string; handlerFile: string; handlerLine: number; handlerKind: string }>;
+    entries: Array<{
+      url: string;
+      handler: string;
+      handlerFile: string;
+      handlerLine: number;
+      handlerKind: string;
+      routeId: string;
+      routeFile: string;
+      routeLine: number;
+    }>;
     topHandlerFile: string | null;
     topHandlerFileCount: number;
     totalRoutes: number;

@@ -76,6 +76,12 @@
         <span class="mid">
           <span class="nm">{item.name}</span>
         </span>
+      {:else if item.type === 'entry'}
+        <KindGlyph kind={item.row.kind} />
+        <span class="mid" title={item.row.title}>
+          <span class="nm">{item.name}</span>
+          {#if item.meta}<span class="sig">{item.meta}</span>{/if}
+        </span>
       {:else}
         <KindGlyph kind={item.node.kind} />
         <span class="mid">

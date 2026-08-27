@@ -286,8 +286,29 @@ export function scorePathRelevance(
 
 /**
  * Check if a file path looks like a test file
+ *
+ * "Test" here is the wide reading: anything that is not production code,
+ * including examples, samples, benchmarks and fixtures. That is the right
+ * default for ranking — none of them are what a search is looking for — but it
+ * is the wrong set to put under a heading that says "Tests". A caller that
+ * means literally a test suite wants {@link isTestPath}.
  */
 export function isTestFile(filePath: string): boolean {
+  // Non-production directories: examples, samples, benchmarks, fixtures, demos.
+  // Check both mid-path (/integration/) and start-of-path (integration/) since
+  // file paths may be stored as relative paths without a leading slash.
+  return isTestPath(filePath) || matchesNonProductionDir(filePath.toLowerCase());
+}
+
+/**
+ * Check if a file path names a TEST — a suite that exercises other code.
+ *
+ * The narrow half of {@link isTestFile}: the filename and directory
+ * conventions every ecosystem uses for its test suites, and nothing else. An
+ * example, a benchmark or a fixture is not a test, and a list headed "Tests"
+ * that contains them is telling the reader something untrue.
+ */
+export function isTestPath(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   const fileName = path.basename(filePath);   // original case — needed for camelCase boundaries
   const lowerName = fileName.toLowerCase();
@@ -322,10 +343,7 @@ export function isTestFile(filePath: string): boolean {
     return true;
   }
 
-  // Non-production directories: examples, samples, benchmarks, fixtures, demos.
-  // Check both mid-path (/integration/) and start-of-path (integration/) since
-  // file paths may be stored as relative paths without a leading slash.
-  return matchesNonProductionDir(lower);
+  return false;
 }
 
 /**

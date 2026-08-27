@@ -1,10 +1,18 @@
 <script lang="ts">
-  import { router, mapHref, flowHref, symbolHref, fileHref, navigate } from '../lib/router.svelte';
+  import {
+    router,
+    mapHref,
+    flowHref,
+    entryHref,
+    symbolHref,
+    fileHref,
+    navigate,
+  } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
   import { palette } from '../lib/palette.svelte';
   import SearchPalette from './SearchPalette.svelte';
   import type { PaletteItem } from '../lib/search-model';
-  import { walkTo } from '../lib/walk';
+  import { openEntryTarget, walkTo } from '../lib/walk';
   import { live } from '../lib/live.svelte';
 
   interface Props {
@@ -47,6 +55,15 @@
       palette.reset();
       input?.blur();
       navigate(flowHref({ from: item.from, to: item.to }));
+      return;
+    }
+    // An entry-point row already knows where it goes — a handler, a file, a
+    // hub — and it is the one row type that can point at a FILE.
+    if (item.type === 'entry') {
+      if (!item.row.target) return;
+      palette.reset();
+      input?.blur();
+      openEntryTarget(item.row.target);
       return;
     }
     const id = item.type === 'route' ? item.nodeId : item.id;
@@ -149,6 +166,7 @@
   </a>
 
   <nav class="views" aria-label="Views">
+    <a href={entryHref()} class:active={view === 'entry'}>Entry points</a>
     <a href={mapHref()} class:active={view === 'map'}>Map</a>
     <a href={symbolTabHref} class:active={view === 'symbol' || view === 'home'}>Symbol</a>
     <a href={flowHref()} class:active={view === 'flow'}>Flow</a>

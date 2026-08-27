@@ -17,7 +17,7 @@
  * GET /api/file/<path>               the File view: outline and import rails
  * GET /api/filecode/<path>           the whole-file view: ports, arcs, callee rail
  * GET /api/routes                    the URL to handler map, when there is one
- * GET /api/entrypoints               where to start reading: routes, roots, hubs
+ * GET /api/entrypoints               where to start reading: routes, roots, tests, hubs
  * GET /api/map?root=&depth=          the module map: modules, links, cycles
  * GET /api/flow?from=&to=            the flow strip: one card per hop
  * GET /api/events                    the live channel (SSE): drift and refresh
@@ -51,7 +51,13 @@ import { EventHub } from './events';
 export { GraphSession } from './session';
 export { ApiError } from './respond';
 export * from './wire';
-export type { WireEntryPoints, WireEntryFile, WireEntryHub } from './entrypoints';
+export type {
+  WireEntryPoints,
+  WireEntryFile,
+  WireEntryTest,
+  WireEntryHub,
+} from './entrypoints';
+export type { WireRoute, WireRoutes } from './routes';
 export type { WireNodeRefs } from './nodes';
 export type {
   WireFlowPayload,

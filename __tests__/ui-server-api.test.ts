@@ -973,12 +973,12 @@ export default app;
 
       expect(body.routes.routed).toBe(true);
       expect(body.routes.routeCount).toBe(4);
-      const urls = body.routes.items.map((e: any) => e.url);
+      const urls = body.routes.items.items.map((e: any) => e.url);
       expect(urls).toEqual(
         expect.arrayContaining(['GET /users', 'GET /users/:id', 'POST /users', 'DELETE /users/:id'])
       );
       // A route row has to be navigable, or it is a label.
-      expect(body.routes.items.every((e: any) => e.handlerId)).toBe(true);
+      expect(body.routes.items.items.every((e: any) => e.handlerId)).toBe(true);
     });
 
     it('honours the limit and says when it cut the list', async () => {
@@ -1118,7 +1118,7 @@ describe('GET /api/entrypoints', () => {
   it('says a project without routes is not routed rather than failing', async () => {
     const body = await getJson('/api/entrypoints');
     expect(body.routes.routed).toBe(false);
-    expect(body.routes.items).toEqual([]);
+    expect(body.routes.items.items).toEqual([]);
     expect(body.routes.routeCount).toBe(0);
   });
 

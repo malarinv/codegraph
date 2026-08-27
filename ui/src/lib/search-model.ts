@@ -18,6 +18,7 @@ import type {
   WireSearch,
   WireSearchResult,
 } from './api';
+import { matchEntries, originLabel, type EntryRow } from './entry-model';
 import { basename, plural } from './symbol-model';
 
 /* ------------------------------------------------------------ flow query -- */
@@ -60,7 +61,13 @@ export function parseFlowQuery(query: string): FlowQuery | null {
 export type PaletteItem =
   | { type: 'symbol'; id: string; node: WireNodeRef; name: string; meta: string; location: string }
   | { type: 'route'; id: string; url: string; handler: string; location: string; nodeId: string | null }
-  | { type: 'flow'; id: string; from: string; to: string; name: string; meta: string; location: string };
+  | { type: 'flow'; id: string; from: string; to: string; name: string; meta: string; location: string }
+  /**
+   * An entry point that mentions what was typed. It carries the panel's own
+   * row, so a route here names its HANDLER — which is the thing a `/api/search`
+   * hit on the same URL cannot do.
+   */
+  | { type: 'entry'; id: string; row: EntryRow; name: string; meta: string; location: string };
 
 export interface PaletteSection {
   /** Sentence-case caption, e.g. "Methods", "Files that run something". */
@@ -171,7 +178,8 @@ export function groupByKind(results: readonly WireSearchResult[]): PaletteSectio
 
 export function buildSearchPalette(
   answers: readonly WireSearch[],
-  flow: FlowQuery | null
+  flow: FlowQuery | null,
+  entryOpts: { entries: WireEntryPoints | null; query: string; entryRows: number } | null = null
 ): Palette {
   const results =
     answers.length > 1
@@ -198,6 +206,32 @@ export function buildSearchPalette(
       ],
     });
   }
+  // Entry points come LAST, under their own heading: they are context on rows
+  // the search above may already have found, and putting context above matches
+  // would push what was actually asked for off the panel. Rows whose target is
+  // already in the results are dropped — the same symbol twice under two
+  // headings makes the panel look like it is guessing.
+  if (entryOpts) {
+    const seen = new Set(results.map((result) => result.id));
+    const matches = matchEntries(entryOpts.entries, entryOpts.query, entryOpts.entryRows).filter(
+      (match) => !(match.row.target?.type === 'symbol' && seen.has(match.row.target.id))
+    );
+    if (matches.length > 0) {
+      sections.push({
+        title: 'Entry points',
+        note: 'Where a flow starts — routes, files that run something, tests.',
+        items: matches.map(({ row, origin }) => ({
+          type: 'entry' as const,
+          id: `entry:${row.id}`,
+          row,
+          name: row.method ? `${row.method} ${row.name}` : row.name,
+          meta: row.meta,
+          location: originLabel(origin),
+        })),
+      });
+    }
+  }
+
   const items = sections.flatMap((section) => section.items);
 
   const hint = flow
@@ -232,13 +266,13 @@ export function buildEntryPalette(
     Number.isFinite(cap) ? items.slice(0, cap) : [...items];
   const sections: PaletteSection[] = [];
 
-  if (entries.routes.routed && entries.routes.items.length > 0) {
+  if (entries.routes.routed && entries.routes.items.items.length > 0) {
     sections.push({
       title: 'Routes',
       note: 'A request from outside arrives here.',
-      items: take(entries.routes.items).map((route) => ({
+      items: take(entries.routes.items.items).map((route) => ({
         type: 'route' as const,
-        id: `route:${route.url}:${route.file}:${route.line}`,
+        id: `route:${route.routeId}`,
         url: route.url,
         handler: route.handler,
         location: `${basename(route.file)}:${route.line}`,
@@ -253,6 +287,16 @@ export function buildEntryPalette(
       note: 'Statements at the top level of the file — a CLI, a worker entry, a script.',
       items: take(entries.files.items).map((file) =>
         symbolItem(file, `${plural(file.calls, 'call')} at module level · reaches ${plural(file.reaches, 'file')}`)
+      ),
+    });
+  }
+
+  if (entries.tests.items.length > 0) {
+    sections.push({
+      title: 'Tests',
+      note: 'What already exercises this code, widest reach first.',
+      items: take(entries.tests.items).map((test) =>
+        symbolItem(test, `exercises ${plural(test.reaches, 'file')}`)
       ),
     });
   }
@@ -273,7 +317,7 @@ export function buildEntryPalette(
     hint: null,
     empty:
       sections.length === 0
-        ? 'This index has no routes, no file that runs anything, and nothing depended on yet.'
+        ? 'This index has no routes, no file that runs anything, no test that reaches outside itself, and nothing depended on yet.'
         : null,
   };
 }

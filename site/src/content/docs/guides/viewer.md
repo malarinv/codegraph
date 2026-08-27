@@ -46,11 +46,23 @@ If the viewer ever loses touch with the server, it retries a handful of times wi
 ## Getting around
 
 - **Search** with `/` or Cmd-K: every symbol and file, grouped by kind, with signature and `file:line`. Arrow keys and Enter, no mouse needed.
-- **Entry points** on the opening screen: your framework's routes, the files that run code when they're imported, and the most depended-on symbols in the project.
+- **Entry points** on the opening screen, and in full on the **Entry points** tab (`e`) — see below.
+- **Typing a name also finds entry points.** They come back under their own heading below the symbol matches, so searching `payroll` returns the URL *with* the symbol that serves it, not just the URL.
 - **A trail** records the path you walked, with an arrow per hop showing whether you stepped into a call or up to a caller. Click any hop to jump back to it. The trail lives in the URL, so you can send someone the exact route you took.
 - **Keyboard:** arrow keys move within a column, left/right switch columns, Enter follows, Backspace steps back.
 
 Clicking any file path opens the **file view**: everything that file depends on, its outline in source order, and everything that depends on it.
+
+## Entry points
+
+The first screen worth opening on a codebase you have never seen. Four lists, all read out of the graph rather than guessed from filenames:
+
+- **Routes** — every URL with the symbol that serves it and the `file:line` you will find it at, grouped by the file the route is *registered* in (your router, not your handlers) and headed with the framework CodeGraph detected. A project with fewer than three routes is not a routed app, so this section is simply absent rather than empty.
+- **Top-level files with calls** — the files that *do* something when they load: a CLI, a worker entry, a build script. That is a fact about the graph (a statement outside every definition is recorded as a call from the file itself), not a guess about a filename, which is why a library module correctly shows nothing.
+- **Tests** — the other direction: what already exercises this code, widest reach first.
+- **Most depended on** — not where the project starts, but where a change radiates furthest.
+
+Every row opens the code. Every row that names a symbol also carries a **Flow ›** chip: press it, then name a second symbol — type it, or press **→ here** on another row — and you get the path between them. "How does `POST /v1/payroll/cycles/{cycleID}/run` reach the database" is two clicks once both ends are on the screen.
 
 ## The whole file
 

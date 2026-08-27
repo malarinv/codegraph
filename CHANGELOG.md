@@ -46,6 +46,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Nothing polls: the viewer watches for these two things and is told about them. If it loses touch with the server it retries a few times with a growing delay, then stops and says "Not live" in the top bar rather than hammering a port that isn't answering.
 
+- **"Where does anything start?" has a screen now.** The **Entry points** tab in `codegraph ui` (or press `e`) is the first thing worth opening on a codebase you have never seen. Every route with the symbol that serves it and the `file:line` you will find it at, grouped by the file the URL is registered in — your router, not your handlers — and headed with the framework CodeGraph detected it from. Under that, the files that actually *do* something when they load (a CLI, a worker entry, a build script), the tests ranked by how much of the project each one exercises, and the symbols the most code depends on.
+
+  None of it is guessed from a filename: a file "runs something" because the graph recorded a call from the file itself, and a project with fewer than three routes simply has no Routes section rather than an empty one. Every list says how much of itself it is showing, and says "at least" wherever the real total can only be a floor.
+
+  Any row that names a symbol can start a **flow**: press `Flow ›`, then type a second symbol or press `→ here` on another row, and you get the path between them — so "how does `POST /v1/payroll/cycles/{cycleID}/run` reach the database" is two clicks. Typing into the search box now finds entry points too, under their own heading below the symbol matches, so a URL comes back with its handler attached instead of on its own.
+
 ### Fixes
 
 - Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.

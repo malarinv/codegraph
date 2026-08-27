@@ -36,6 +36,19 @@ const ENTRY_LIMIT = 24;
 export const PALETTE_ENTRY_ROWS = 6;
 
 /**
+ * Route rows fetched.
+ *
+ * Separate from `ENTRY_LIMIT` because routes are the one list whose useful
+ * length is the project's, not the reader's: the panel groups them under their
+ * router files, where two hundred rows are still navigable, while two hundred
+ * "most depended on" symbols are a wall.
+ */
+const ENTRY_ROUTE_LIMIT = 200;
+
+/** Entry-point rows the palette adds under a typed query. */
+export const PALETTE_ENTRY_MATCHES = 6;
+
+/**
  * Milliseconds of quiet before a query is sent.
  *
  * The server answers a search in single-digit milliseconds on this repo's own
@@ -51,6 +64,9 @@ let loading = $state(false);
 let failure = $state<string | null>(null);
 let answers = $state<WireSearch[]>([]);
 let entries = $state<WireEntryPoints | null>(null);
+/** Null until the first attempt settles — the panel says "reading" until then. */
+let entriesSettled = $state(false);
+let entriesFailure = $state<string | null>(null);
 
 let inflight: AbortController | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -61,14 +77,21 @@ let entriesInflight: Promise<void> | null = null;
 
 function loadEntries(): Promise<void> {
   if (entriesInflight) return entriesInflight;
-  entriesInflight = fetchEntryPoints({ limit: ENTRY_LIMIT })
+  entriesInflight = fetchEntryPoints({ limit: ENTRY_LIMIT, routes: ENTRY_ROUTE_LIMIT })
     .then((value) => {
       entries = value;
+      entriesFailure = null;
     })
-    .catch(() => {
+    .catch((cause: unknown) => {
       // The palette still works without them; a failed "where do I start"
-      // should never stop someone from typing a name.
+      // should never stop someone from typing a name. The entry-points panel
+      // is the one screen that has nothing else to show, so the reason is
+      // kept rather than swallowed.
       entries = null;
+      entriesFailure = cause instanceof Error ? cause.message : String(cause);
+    })
+    .finally(() => {
+      entriesSettled = true;
     });
   return entriesInflight;
 }
@@ -122,7 +145,11 @@ function schedule(text: string): void {
 /** The palette as it should be drawn right now. */
 function current(): Palette {
   if (query.trim() === '') return buildEntryPalette(entries, { perSection: PALETTE_ENTRY_ROWS });
-  return buildSearchPalette(answers, parseFlowQuery(query));
+  return buildSearchPalette(answers, parseFlowQuery(query), {
+    entries,
+    query,
+    entryRows: PALETTE_ENTRY_MATCHES,
+  });
 }
 
 export const palette = {
@@ -185,7 +212,25 @@ export const palette = {
   },
   /** Load the entry points without opening the panel (the empty screen wants them). */
   ensureEntries: loadEntries,
+  /**
+   * Ask again, because the index moved.
+   *
+   * Entry points describe the index, so they are fetched once and kept — which
+   * means a sync would otherwise leave the resting palette, the empty screen
+   * and the entry-points panel all describing the graph as it was.
+   */
+  reloadEntries(): Promise<void> {
+    entriesInflight = null;
+    return loadEntries();
+  },
   get entries(): WireEntryPoints | null {
     return entries;
+  },
+  /** False until the first fetch settles, however it settled. */
+  get entriesSettled(): boolean {
+    return entriesSettled;
+  },
+  get entriesFailure(): string | null {
+    return entriesFailure;
   },
 };
