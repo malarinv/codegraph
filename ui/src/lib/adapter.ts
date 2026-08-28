@@ -36,6 +36,7 @@ import type {
   WireFlowPayload,
   WireMapPayload,
   WireScreensPayload,
+  WireStepsPayload,
   WireNodeRefs,
   WireRoutes,
   WireSearch,
@@ -178,6 +179,16 @@ export interface LiveHandlers {
   error(): void;
 }
 
+/** What happens from an anchor: by id, or by name (the first screen-like match). */
+export interface StepsRequest {
+  anchor?: string;
+  symbol?: string;
+  depth?: number;
+  limit?: number;
+  /** Enter the screens the walk reaches, instead of drawing them as boundaries. */
+  through?: boolean;
+}
+
 /* -------------------------------------------------------------- adapter -- */
 
 /**
@@ -213,6 +224,11 @@ export interface GraphAdapter {
   map(request?: MapRequest, signal?: AbortSignal): Promise<WireMapPayload>;
   /** The app's screens and the transitions between them, with their conditions. */
   screens(signal?: AbortSignal): Promise<WireScreensPayload>;
+  /**
+   * What happens from a screen or a symbol, as typed steps. Optional: a host
+   * that has not wired it renders the Steps view as absent-and-explained.
+   */
+  steps?(request: StepsRequest, signal?: AbortSignal): Promise<WireStepsPayload>;
   /** The URL → handler map. */
   routes(request?: RoutesRequest, signal?: AbortSignal): Promise<WireRoutes>;
   /** Where a reader starts: routes, files that run something, tests, hubs. */
@@ -398,6 +414,16 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
 
     screens(signal) {
       return getJson<WireScreensPayload>('api/screens', signal);
+    },
+
+    steps(request = {}, signal) {
+      const params = new URLSearchParams();
+      if (request.anchor) params.set('anchor', request.anchor);
+      else if (request.symbol) params.set('symbol', request.symbol);
+      if (request.depth) params.set('depth', String(request.depth));
+      if (request.limit) params.set('limit', String(request.limit));
+      if (request.through) params.set('through', '1');
+      return getJson<WireStepsPayload>(`api/steps${query(params)}`, signal);
     },
 
     entryPoints(request = {}, signal) {

@@ -73,3 +73,41 @@ export async function annotateWhen(cg: CodeGraph, projectRoot: string, batches: 
     }
   }
 }
+
+/**
+ * A per-request reader of the conditions ONE call site sits under, for the
+ * endpoints that walk chains rather than annotate rails (the Screens view's
+ * transitions, the Steps view's links). Files are resolved once, drifted
+ * files yield no label, and the count of sites labelled is bounded so a wide
+ * walk cannot turn one request into a parse of the repository.
+ */
+export function createWhenReader(
+  cg: CodeGraph,
+  projectRoot: string,
+  maxSites = 600
+): (caller: { filePath: string; language: Language }, site: { line?: number; column?: number }) => Promise<string> {
+  const files = new Map<string, { abs: string; language: Language } | null>();
+  let sites = 0;
+  return async (caller, site): Promise<string> => {
+    if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return '';
+    const posix = caller.filePath.replace(/\\/g, '/');
+    let file = files.get(posix);
+    if (file === undefined) {
+      file = null;
+      const found = findIndexedFile(cg, posix);
+      if (found && !hasDriftedOnDisk(projectRoot, found.storedPath, found.record)) {
+        try {
+          file = { abs: resolveProjectFile(projectRoot, found.storedPath), language: found.record.language as Language };
+        } catch {
+          file = null;
+        }
+      }
+      files.set(posix, file);
+    }
+    if (!file) return '';
+    sites++;
+    const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+    const g = (await guardsForFile(file.abs, file.language, [key])).get(siteKey(key));
+    return g ? guardLabel(g) : '';
+  };
+}

@@ -22,14 +22,15 @@
    */
   import { BaseEdge, EdgeLabel, type EdgeProps } from '@xyflow/svelte';
   import type { MapEdgeLayout } from '../../lib/map-model';
-  import { pathOf, type Curve, type PillPlacement, type ScreenEdgeInfo } from '../../lib/screens-model';
+  import { pathOf, type Curve, type PillPlacement } from '../../lib/screens-model';
 
   let { data }: EdgeProps = $props();
 
   const d = $derived(
     data as unknown as {
       edge: MapEdgeLayout;
-      info: ScreenEdgeInfo;
+      /** The Screens view's edge info, or the Steps view's — only `synthesized` is read. */
+      info: { synthesized: boolean };
       curve: Curve;
       /** One of the selected screen's, or under the pointer. */
       hot: boolean;

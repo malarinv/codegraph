@@ -123,6 +123,19 @@ export interface Point {
   y: number;
 }
 
+/**
+ * What the label placement and the pointer need from a picture: the Screens
+ * view's model, or any other drawn with its machinery (the Steps view draws
+ * typed steps with the same layout, curves, pills and hit-testing).
+ */
+export interface Picture {
+  layout: MapLayout;
+  layerGap: number;
+  edges: Map<string, { label: string }>;
+  curves: Map<string, Curve>;
+  polylines: Map<string, Point[]>;
+}
+
 /* ------------------------------------------------------------- layering -- */
 
 /**
@@ -286,7 +299,7 @@ export function clauses(when: string): string[] {
  * …` on both arms of a fork); the last clause is the one that tells the two
  * apart, and the full text is a hover away.
  */
-export function edgeLabel(links: readonly WireScreenLink[]): string {
+export function edgeLabel(links: ReadonlyArray<{ when: string }>): string {
   if (links.length === 1) {
     const when = links[0]!.when;
     if (!when) return '';
@@ -630,7 +643,7 @@ export interface EdgeHit {
  * the smaller id, so two visits agree.
  */
 export function nearestEdge(
-  model: ScreensModel,
+  model: Picture,
   point: Point,
   among: ReadonlySet<string> | null,
   reach: number
@@ -713,7 +726,7 @@ export function laneCount(layerGap: number): number {
  * the selected screen — `→` leaving it, `←` arriving — and the edge's label.
  * Empty when the edge has nothing to say (a single, unconditional transition).
  */
-export function pillText(info: ScreenEdgeInfo, edge: MapEdgeLayout, selected: string | null): string {
+export function pillText(info: { label: string }, edge: MapEdgeLayout, selected: string | null): string {
   if (!info.label) return '';
   const arriving = selected !== null && edge.target === selected && edge.source !== selected;
   return `${arriving ? '←' : '→'} ${info.label}`;
@@ -737,7 +750,7 @@ function intersects(a: Rect, b: Rect, gapX: number): boolean {
  * lane is free — or when `lanes` is 1 and that lane is taken.
  */
 function layPill(
-  model: ScreensModel,
+  model: Picture,
   edge: MapEdgeLayout,
   end: 'source' | 'target',
   text: string,
@@ -781,7 +794,7 @@ function layPill(
  * pill: the pill for a hovered edge that is not the selected screen's is
  * placed separately by {@link hoverPill}.
  */
-export function placeLabels(model: ScreensModel, selected: string | null): PillLayout {
+export function placeLabels(model: Picture, selected: string | null): PillLayout {
   const pills = new Map<string, PillPlacement>();
   if (selected === null) return { pills, hidden: 0 };
   const nodes = new Map(model.layout.nodes.map((n) => [n.id, n]));
@@ -827,7 +840,7 @@ export function placeLabels(model: ScreensModel, selected: string | null): PillL
  * with the whole condition, not the connector's short label.
  */
 export function hoverPill(
-  model: ScreensModel,
+  model: Picture,
   edgeId: string,
   selected: string | null,
   text?: string,

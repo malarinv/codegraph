@@ -8,6 +8,7 @@
   import FileCodeView from './views/FileCodeView.svelte';
   import MapView from './views/MapView.svelte';
   import ScreensView from './views/ScreensView.svelte';
+  import StepsView from './views/StepsView.svelte';
   import FlowView from './views/FlowView.svelte';
   import EntryView from './views/EntryView.svelte';
   import DeadCodeView from './views/DeadCodeView.svelte';
@@ -175,6 +176,8 @@
     <EntryView project={project.name} />
   {:else if route.view === 'screens' || (route.view === 'home' && hasScreens)}
     <ScreensView />
+  {:else if route.view === 'steps'}
+    <StepsView anchor={route.anchor} symbol={route.symbol} depth={route.depth} through={route.through} />
   {:else if route.view === 'dead'}
     <DeadCodeView exported={route.exported} />
   {:else if route.view === 'unknown'}

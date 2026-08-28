@@ -57,6 +57,7 @@ import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
 import { buildScreens } from './screens';
+import { buildSteps } from './steps';
 import { buildDeadCode } from './deadcode';
 import { buildFlow } from './flow';
 import { buildTrails, removeTrail, saveTrail, type TrailsOptions } from './trails';
@@ -203,6 +204,12 @@ const API_INDEX = {
       params: [],
     },
     {
+      path: '/api/steps',
+      description:
+        'What happens from a screen or a symbol: screens, handlers, native bridge calls and events, store writes and calls that leave the index, as typed steps with the conditions between them.',
+      params: ['anchor', 'symbol', 'depth', 'limit'],
+    },
+    {
       path: '/api/flow',
       description: 'The call path between symbols: one hop per card, opened at the calling line.',
       params: ['from', 'to', 'symbols', 'hop', 'limit'],
@@ -269,6 +276,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildMap(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/screens':
           return ok(res, await buildScreens(session.acquire(), ctx.projectRoot), ctx.method);
+        case '/api/steps':
+          return ok(res, await buildSteps(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/deadcode':
           return ok(res, buildDeadCode(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/entrypoints':

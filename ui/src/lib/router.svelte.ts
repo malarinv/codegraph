@@ -12,6 +12,7 @@
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *   #/entry                entry points     (where a flow starts)
  *   #/screens              screens          (the app's screens and transitions)
+ *   #/steps                steps            (?anchor=<id> | ?symbol=<name>: what happens from there)
  *   #/dead                 dead code        (?exported=1 widens the claim)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
@@ -43,6 +44,7 @@ export {
   navigate,
   screensHref,
   setNavigationDriver,
+  stepsHref,
   symbolHref,
 } from './navigation';
 export type {
@@ -51,6 +53,7 @@ export type {
   FlowHrefOptions,
   MapHrefOptions,
   NavigationDriver,
+  StepsHrefOptions,
   SymbolHrefOptions,
 } from './navigation';
 
@@ -77,6 +80,14 @@ export type Route =
     }
   | { view: 'entry' }
   | { view: 'screens' }
+  | {
+      view: 'steps';
+      /** The anchor by id; null with `symbol` set, or on the bare tab. */
+      anchor: string | null;
+      symbol: string | null;
+      depth: number | null;
+      through: boolean;
+    }
   | {
       view: 'dead';
       /** Symbols reachable from outside the index are on the list. */
@@ -141,6 +152,17 @@ export function parseHash(hash: string): RouterLocation {
     route = { view: 'entry' };
   } else if (head === 'screens' && rest.length === 0) {
     route = { view: 'screens' };
+  } else if (head === 'steps' && rest.length === 0) {
+    // The anchor travels in the URL, so "what happens on the review screen"
+    // is a link that reopens as the same picture.
+    const depth = Number.parseInt(params.get('depth') ?? '', 10);
+    route = {
+      view: 'steps',
+      anchor: params.get('anchor'),
+      symbol: params.get('symbol'),
+      depth: Number.isFinite(depth) && depth >= 1 && depth <= 14 ? depth : null,
+      through: params.get('through') === '1',
+    };
   } else if (head === 'dead' && rest.length === 0) {
     // The widening travels in the URL like the map's shape does: a link to
     // "including exported symbols" has to reopen the same list.

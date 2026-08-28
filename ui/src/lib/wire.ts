@@ -694,6 +694,76 @@ export interface WireScreensPayload {
   timing: { elapsedMs: number };
 }
 
+/* ------------------------------------------------------------------ steps -- */
+
+export type WireStepKind = 'anchor' | 'screen' | 'trigger' | 'bridge' | 'event' | 'store' | 'effect';
+
+export type WireStepLinkKind = 'calls' | 'navigates' | 'handler' | 'bridge' | 'event' | 'store' | 'effect';
+
+export interface WireStepSite {
+  file: string;
+  line: number;
+  /** `push /capture`, `calls`, `client.post` — what the site does, in a word or two. */
+  text: string;
+}
+
+export interface WireStep {
+  /** The node's id, or `effect:<function id>:<api>` for a call leaving the index. */
+  id: string;
+  kind: WireStepKind;
+  /** The step the picture starts from. A screen anchor keeps `kind: 'screen'`. */
+  anchor: boolean;
+  /** Null only for an effect, which is a call site rather than a symbol. */
+  node: WireNodeRef | null;
+  label: string;
+  sub: string;
+  /** Steps from the anchor: the row. */
+  depth: number;
+  /**
+   * Why the walk did not go on from this step: a cap (`depth`, `fan-out`,
+   * `folded`, `steps`), or `screen` — another screen, drawn as a boundary.
+   */
+  cut: 'depth' | 'fan-out' | 'folded' | 'steps' | 'screen' | 'component' | null;
+  /** The event name a native event step arrived on — the first, when several land here. */
+  event?: string;
+  /** Every event that lands on this step. */
+  events?: string[];
+  screen?: { path: string; component: WireNodeRef | null };
+  /** The calls one function makes into one category, and the function. */
+  effect?: { api: string; apis: string[]; category: string; by: WireNodeRef; line: number };
+}
+
+export interface WireStepLink {
+  id: string;
+  from: string;
+  to: string;
+  kind: WireStepLinkKind;
+  /** The symbols folded between the two steps, in order. */
+  via: WireNodeRef[];
+  /** Conditions along the whole chain, joined; '' when unconditional. */
+  when: string;
+  /** How the last hop was established when it was not a plain call. */
+  label: string;
+  synthesized: boolean;
+  uncertain: boolean;
+  sites: WireStepSite[];
+}
+
+export interface WireStepsPayload {
+  anchor: WireNodeRef;
+  /** Other symbols that share the anchor's name, when it was given by name. */
+  ambiguous: WireNodeRef[];
+  steps: WireStep[];
+  links: WireStepLink[];
+  depth: number;
+  limit: number;
+  /** Screens reached from the anchor were entered rather than drawn as boundaries. */
+  through: boolean;
+  truncated: { steps: number; hubs: number; chrome: number };
+  index: { lastIndexedAt: number | null; edges: number; files: number };
+  timing: { elapsedMs: number };
+}
+
 /* -------------------------------------------------------------- dead code -- */
 
 /** One symbol nothing in the index reaches. */

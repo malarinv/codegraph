@@ -24,7 +24,7 @@
   import KindGlyph from '../components/KindGlyph.svelte';
   import { fetchScreens, type WireScreensPayload, type WireScreenLink } from '../lib/api';
   import { live } from '../lib/live.svelte';
-  import { symbolHref, fileHref } from '../lib/navigation';
+  import { symbolHref, fileHref, stepsHref } from '../lib/navigation';
   import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
   import {
     buildScreensModel,
@@ -392,6 +392,7 @@
             {#if selectedInfo.screen}
               <a class="sub dim" href={fileHref(selectedInfo.screen.file)}>{selectedInfo.screen.file}</a>
             {/if}
+            <a class="sub act" href={stepsHref({ anchor: selectedInfo.id })}>What happens here →</a>
           </div>
           <button class="clear" onclick={() => (selected = null)}>clear</button>
         </div>
@@ -663,6 +664,9 @@
   }
   .sub:hover {
     text-decoration: underline;
+  }
+  .act {
+    color: var(--accent);
   }
   .clear {
     border: 1px solid var(--rule);

@@ -1406,10 +1406,13 @@ async function vueTemplateEdges(ctx: ResolutionContext, onYield: MaybeYield): Pr
  *     DeviceEventEmitter.addListener("locationUpdate", handler);
  *
  * Synthesize: native dispatch site → JS handler, keyed by the literal
- * event name. Only matches NAMED handlers (the existing `ON_RE` named-
- * capture form). Inline arrow handlers like `addListener('x', d => …)`
- * aren't named at extraction time and would need link-through-body
- * support; matches the deliberate scope of the in-language synthesizer.
+ * event name. A NAMED handler (`addListener('x', handleX)`) is the target
+ * when it is a node; an unnamed one — a parameter passed through, or an
+ * inline `(data) => {…}` written in a `useEffect` — is attributed to the
+ * enclosing function, where the event demonstrably lands. (The in-language
+ * synthesizer stays named-only; this channel pairs across a language
+ * boundary on a literal, which is the evidence that makes the wider
+ * attribution safe.)
  *
  * Provenance `'heuristic'`, synthesizedBy `'rn-event-channel'`.
  */
@@ -1518,6 +1521,9 @@ async function rnEventEdges(ctx: ResolutionContext, onYield: MaybeYield): Promis
       // function (the abstraction layer), giving a reachability-correct
       // hop even when the actual user-side handler lives one call up.
       const ADDLISTENER_ANY = /\.(?:on|once|addListener)\(\s*['"]([^'"]+)['"]\s*,\s*([A-Za-z_][\w.]*)/g;
+      // The inline form: `.addListener('x', (data) => {…})` / `function () {…}`.
+      const ADDLISTENER_INLINE =
+        /\.(?:on|once|addListener)\(\s*['"]([^'"]+)['"]\s*,\s*(?:async\s*)?(?:\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>|function\s*\()/g;
       ADDLISTENER_ANY.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = ADDLISTENER_ANY.exec(content))) {
@@ -1559,6 +1565,23 @@ async function rnEventEdges(ctx: ResolutionContext, onYield: MaybeYield): Promis
         if (!targetId) continue;
         const map = jsHandlersByEvent.get(event) ?? new Map<string, string>();
         map.set(targetId, `${file}:${lineOf(m.index)}`);
+        jsHandlersByEvent.set(event, map);
+      }
+      // Inline listeners — the shape a React component registers inside a
+      // `useEffect`: `nativeEmitter.addListener('onCaptureComplete', (data) =>
+      // { … router.push('/review') })`. There is no handler symbol to name,
+      // so the subscription is attributed to the enclosing function exactly
+      // as the unnamed-argument form above is: the native event lands in that
+      // component, and its body is where a reader looks next. This channel
+      // only — the in-language synthesizer keeps its named-handler policy.
+      ADDLISTENER_INLINE.lastIndex = 0;
+      while ((m = ADDLISTENER_INLINE.exec(content))) {
+        const event = m[1];
+        if (!event) continue;
+        const enclosing = enclosingFn(nodesInFile, lineOf(m.index));
+        if (!enclosing) continue;
+        const map = jsHandlersByEvent.get(event) ?? new Map<string, string>();
+        if (!map.has(enclosing.id)) map.set(enclosing.id, `${file}:${lineOf(m.index)}`);
         jsHandlersByEvent.set(event, map);
       }
     }

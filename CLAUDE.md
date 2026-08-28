@@ -86,6 +86,7 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/installer/` — see below.
 - `src/bin/codegraph.ts` — CLI (commander). Subcommands: `install`, `init`, `uninit`, `index`, `sync`, `status`, `query`, `files`, `context`, `affected`, `serve --mcp`.
 - `src/ui/` — terminal UI (shimmer progress, worker).
+- `src/ui-server/` — the `codegraph ui` browser viewer's read-only JSON API (`api/`: one module per endpoint — `node`, `flow`, `map`, `screens`, `steps`, `deadcode`, `trails`…) and static server; the Svelte viewer itself lives in `ui/` (see `docs/design/codegraph-ui-design-spec.md`). `api/screens.ts` (the app as screens and transitions) and `api/steps.ts` (what happens from a screen or a symbol, as typed steps — screens, handlers, native bridge calls and events, store actions, calls that leave the index) share one fold: everything between two boxes is `via`, and the branch guards along it join into `when` (`graph/branch-guards.ts`, read at request time).
 
 ### NodeKind / EdgeKind
 
@@ -152,7 +153,7 @@ Two functions in `src/mcp/tools.ts` scale explore with indexed file count. This 
 
 ### Dynamic-dispatch coverage — the flow must EXIST in the graph end-to-end
 
-Static tree-sitter extraction misses computed/indirect calls, so flows break at dynamic dispatch and the agent reads to reconstruct them. Synthesizers/resolvers bridge these so `codegraph_explore` connects them end-to-end (`src/resolution/callback-synthesizer.ts`, `src/resolution/frameworks/`). Channels today: callback/observer, EventEmitter, **React re-render** (`setState`→`render`), **JSX child** (`render`→child component), django ORM descriptor. All synthesized edges are `provenance:'heuristic'` with `metadata.synthesizedBy` + `registeredAt` (the wiring site), surfaced inline in `codegraph_explore`'s Flow section and the `codegraph_node` trail.
+Static tree-sitter extraction misses computed/indirect calls, so flows break at dynamic dispatch and the agent reads to reconstruct them. Synthesizers/resolvers bridge these so `codegraph_explore` connects them end-to-end (`src/resolution/callback-synthesizer.ts`, `src/resolution/frameworks/`). Channels today: callback/observer, EventEmitter, **React re-render** (`setState`→`render`), **JSX child** (`render`→child component), **React Native native→JS events** (`sendEvent(withName:)` / JVM `emit` → the `addListener` handler, named or inline, `rn-event-channel`), django ORM descriptor. The JS→native direction is a *resolver* (`frameworks/react-native.ts`: `RCT_EXPORT_METHOD`, `RCT_EXTERN_MODULE` Swift shims, TurboModules), which trusts receiver evidence — an alias bound to `NativeModules.X` — over the import resolver. All synthesized edges are `provenance:'heuristic'` with `metadata.synthesizedBy` + `registeredAt` (the wiring site), surfaced inline in `codegraph_explore`'s Flow section and the `codegraph_node` trail.
 
 **Principle: partial coverage is WORSE than none.** Bridging one boundary but not the next reveals a hop the agent then drills + reads to finish. Measured on excalidraw: react-render alone *raised* reads to 5–7; only completing the flow (adding the jsx-child hop) dropped it to 0–1. **Always close the flow end-to-end and re-measure** — never ship a half-bridged flow.
 

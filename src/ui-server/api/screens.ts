@@ -28,10 +28,8 @@
  */
 
 import type CodeGraph from '../../index';
-import type { Edge, Language, Node } from '../../types';
-import { guardLabel, guardsForFile, siteKey, supportsBranchGuards } from '../../graph/branch-guards';
-import { resolveProjectFile } from '../security';
-import { findIndexedFile, hasDriftedOnDisk } from './source';
+import type { Edge, Node } from '../../types';
+import { createWhenReader } from './when';
 import { toNodeRef, type WireNodeRef } from './wire';
 
 // =============================================================================
@@ -183,7 +181,8 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
     screenOfComponent.set(component.id, edge.source);
   }
 
-  const whenAt = makeWhenReader(cg, projectRoot);
+  const readWhen = createWhenReader(cg, projectRoot, MAX_WHEN_SITES);
+  const whenAt = (caller: Node, edge: Edge): Promise<string> => readWhen(caller, { line: edge.line, column: edge.column });
   const links = new Map<string, WireScreenLink>();
   const origins = new Map<string, WireScreenOrigin>();
   const counts = new Map<string, { incoming: number; outgoing: number }>();
@@ -466,33 +465,6 @@ function complementary(a: string, b: string): boolean {
     else return false;
   }
   return flips === 1;
-}
-
-function makeWhenReader(cg: CodeGraph, projectRoot: string) {
-  const files = new Map<string, { abs: string; language: Language } | null>();
-  let sites = 0;
-  return async (caller: Node, edge: Edge): Promise<string> => {
-    if (!edge.line || sites >= MAX_WHEN_SITES || !supportsBranchGuards(caller.language)) return '';
-    const posix = toPosix(caller.filePath);
-    let file = files.get(posix);
-    if (file === undefined) {
-      file = null;
-      const found = findIndexedFile(cg, posix);
-      if (found && !hasDriftedOnDisk(projectRoot, found.storedPath, found.record)) {
-        try {
-          file = { abs: resolveProjectFile(projectRoot, found.storedPath), language: found.record.language as Language };
-        } catch {
-          file = null;
-        }
-      }
-      files.set(posix, file);
-    }
-    if (!file) return '';
-    sites++;
-    const site = { line: edge.line, column: typeof edge.column === 'number' ? edge.column : null };
-    const g = (await guardsForFile(file.abs, file.language, [site])).get(siteKey(site));
-    return g ? guardLabel(g) : '';
-  };
 }
 
 function toPosix(p: string): string {

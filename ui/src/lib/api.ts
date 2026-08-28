@@ -20,6 +20,7 @@ import type {
   WireFlowPayload,
   WireMapPayload,
   WireScreensPayload,
+  WireStepsPayload,
   WireNodeRefs,
   WireRoutes,
   WireSearch,
@@ -28,7 +29,7 @@ import type {
   WireSymbolPayload,
   WireTrails,
 } from './wire';
-import type { SaveTrailRequest } from './adapter';
+import type { SaveTrailRequest, StepsRequest } from './adapter';
 
 export * from './wire';
 export { ApiFailure } from './adapter';
@@ -44,6 +45,7 @@ export type {
   SaveTrailRequest,
   SearchRequest,
   SourceRequest,
+  StepsRequest,
 } from './adapter';
 
 export function fetchStats(signal?: AbortSignal): Promise<WireStats> {
@@ -144,6 +146,24 @@ export function fetchSource(
  */
 export function fetchScreens(signal?: AbortSignal): Promise<WireScreensPayload> {
   return getGraphAdapter().screens(signal);
+}
+
+/**
+ * What happens from an anchor — a screen, a handler, any symbol — as typed
+ * steps with the conditions between them. Refused, not thrown at random, by
+ * an adapter that never offered it (see {@link canDrawSteps}).
+ */
+export function fetchSteps(request: StepsRequest, signal?: AbortSignal): Promise<WireStepsPayload> {
+  const adapter = getGraphAdapter();
+  if (typeof adapter.steps !== 'function') {
+    return Promise.reject(new ApiFailure(0, 'refused', 'This viewer cannot draw steps.', null));
+  }
+  return adapter.steps(request, signal);
+}
+
+/** Whether the installed adapter can answer {@link fetchSteps} at all. */
+export function canDrawSteps(): boolean {
+  return typeof getGraphAdapter().steps === 'function';
 }
 
 export function fetchMap(

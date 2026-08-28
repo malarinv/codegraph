@@ -55,6 +55,16 @@ export interface FlowHrefOptions {
   trail?: string;
 }
 
+export interface StepsHrefOptions {
+  /** A node id — a screen's route, a handler, any symbol. */
+  anchor?: string;
+  /** A name, when no id is at hand; the answering side picks the most screen-like match. */
+  symbol?: string;
+  depth?: number;
+  /** Enter the screens the walk reaches, instead of drawing them as boundaries. */
+  through?: boolean;
+}
+
 /**
  * Where the components send the reader.
  *
@@ -69,6 +79,7 @@ export interface NavigationDriver {
   flowHref(opts?: FlowHrefOptions): string;
   entryHref(): string;
   screensHref(): string;
+  stepsHref(opts?: StepsHrefOptions): string;
   deadHref(opts?: DeadCodeHrefOptions): string;
   /** Go to an href this driver built. */
   navigate(href: string, opts?: { replace?: boolean }): void;
@@ -136,6 +147,15 @@ export const hashNavigation: NavigationDriver = {
 
   screensHref() {
     return '#/screens';
+  },
+
+  stepsHref(opts = {}) {
+    const params = new URLSearchParams();
+    if (opts.anchor) params.set('anchor', opts.anchor);
+    else if (opts.symbol) params.set('symbol', opts.symbol);
+    if (opts.depth) params.set('depth', String(opts.depth));
+    if (opts.through) params.set('through', '1');
+    return `#/steps${query(params)}`;
   },
 
   deadHref(opts = {}) {
@@ -219,6 +239,10 @@ export function entryHref(): string {
 
 export function screensHref(): string {
   return driver.screensHref();
+}
+
+export function stepsHref(opts: StepsHrefOptions = {}): string {
+  return driver.stepsHref(opts);
 }
 
 export function deadHref(opts: DeadCodeHrefOptions = {}): string {

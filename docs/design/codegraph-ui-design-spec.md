@@ -440,6 +440,43 @@ for a pair with several. Placement: at the FAR end of the line; first lane centr
 lane; never over a box; overflow counted in the panel. Panel row hover: that pill prints the whole condition (wraps at
 360px), its line at 1.0, the rest at 0.38; a hovered line tints its row `--press`. Legend bottom-left, remembered per browser.
 
+### 3.13 Steps (`#/steps?anchor=<id>` | `?symbol=<name>`, `&depth=`)
+What happens from an anchor — a screen, a handler, any symbol — drawn with the Screens view's machinery (§3.12's
+layout, tracks, pills, nearest-line pointer, panel) over a different node universe. `/api/steps` walks FORWARD from
+the anchor over `calls` / `instantiates` / `navigates` / function-as-value `references` / function→function
+`contains`, folding everything that is not a step into the link's `via` and joining the branch guards along the
+fold into its `when`. A node is a step when it is a **screen** (a route, entered over `navigates`), a **trigger**
+(a function passed as a value — `onPress={handleX}`, `addListener('x', handleX)`), a **bridge** (the language
+family changes JS → native under the call), an **event** (native → JS: the RN event channel's edge, named on the
+box), a **store** action (a function in a store file — the graph has no store kind, so the file is the evidence and
+the legend says so), or an **effect** (a call that leaves the index into the network / storage / the device /
+telemetry, matched on the call text against a curated table — including a call through a project-made value such
+as `client.post` on an axios instance, whose edge resolves to the constant). A listener the screen registers is a
+trigger when first met and becomes the event's landing when the walk arrives from native. Two passes per fold —
+step-arriving edges first, then plumbing — so a handler is never both a box and folded `via` from the same
+component. **Another screen is a boundary** — drawn, marked `cut: 'screen'`, not entered (`&through=1` enters
+them; the summary's checkbox): the Screens view draws the way between screens, and a walk on through Home is the
+whole app; so is a native event that lands in a COMPONENT (the capture overlay taking `onCaptureProgress` is
+another screen's body — `cut: 'component'`). A bridge or event step needs evidence — a bridge resolver's edge or a synthesized channel's; a plain
+name-matched call across the families (`arr.flat()` landing on a Swift `flat`) is neither drawn nor walked. Effects
+are one box per (function, category), labelled by the first call and counting the rest (`client.post +1`), the calls
+listed in the panel. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
+at, drawn with `name …`), fan-out per node (80), folded nodes per step (300), steps per picture (120 default, ≤ 400);
+hubs (fan-in ≥ 40) and shared chrome (a component rendered by ≥ 5 parents — higher than the Screens view's 3, which
+attributes navigations rather than deciding what to walk into) are dead ends, counted in `truncated`. A step several
+events land on says `⇠ first +N` and lists them in the panel.
+
+Rows = distance from the anchor as the server counted it (first discovery), anchor on top with the entry mark. Boxes:
+the §3.12 screen box for a screen or a handler; **bridge / event** add a 3px `--accent` left rule (the language
+changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits on `--paper-2`; **effect** is dashed
+`--ink-3` (a place the graph cannot follow into), labelled by the API (`client.post`) over `category · caller`. Edges,
+pills, tooltip and the panel's hover contract are §3.12's verbatim; the panel adds *Start here →* (re-anchor) on any
+step with a symbol, *Open as a flow →* on any link whose ends are both symbols (`#/flow?from=&to=`), a depth `<select>`
+(4–12) that rewrites the URL, per-kind counts, and the `truncated` notes. The bare tab (`#/steps`) is a chooser: the
+project's screens by connectivity, or a hint to search. `Picture` (`screens-model.ts`) is the structural interface
+the shared machinery works over; `steps-model.ts` builds one. Pure model tests: `ui-steps-model.test.ts`; the
+endpoint against a real RN + Expo fixture: `ui-steps-api.test.ts`.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a

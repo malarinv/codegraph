@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, mapHref, flowHref, entryHref, screensHref, deadHref, symbolHref } from '../lib/router.svelte';
+  import { router, mapHref, flowHref, entryHref, screensHref, stepsHref, deadHref, symbolHref } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
   import SearchPalette from './SearchPalette.svelte';
   import { live } from '../lib/live.svelte';
@@ -68,6 +68,7 @@
 
   <nav class="views" aria-label="Views">
     {#if showScreens}<a href={screensHref()} class:active={view === 'screens' || view === 'home'}>Screens</a>{/if}
+    <a href={stepsHref()} class:active={view === 'steps'}>Steps</a>
     <a href={entryHref()} class:active={view === 'entry'}>Entry points</a>
     <a href={mapHref()} class:active={view === 'map'}>Map</a>
     <a href={symbolTabHref} class:active={view === 'symbol' || (view === 'home' && !showScreens)}>Symbol</a>
