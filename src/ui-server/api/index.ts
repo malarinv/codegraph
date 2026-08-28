@@ -56,6 +56,7 @@ import { buildRoutes } from './routes';
 import { buildEntryPoints } from './entrypoints';
 import { buildNodeRefs } from './nodes';
 import { buildMap } from './map';
+import { buildScreens } from './screens';
 import { buildDeadCode } from './deadcode';
 import { buildFlow } from './flow';
 import { buildTrails, removeTrail, saveTrail, type TrailsOptions } from './trails';
@@ -197,6 +198,11 @@ const API_INDEX = {
       params: ['root', 'depth'],
     },
     {
+      path: '/api/screens',
+      description: 'The app as screens and the transitions between them, each with the conditions it runs under.',
+      params: [],
+    },
+    {
       path: '/api/flow',
       description: 'The call path between symbols: one hop per card, opened at the calling line.',
       params: ['from', 'to', 'symbols', 'hop', 'limit'],
@@ -261,6 +267,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildRoutes(session.acquire(), ctx.query), ctx.method);
         case '/api/map':
           return ok(res, buildMap(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
+        case '/api/screens':
+          return ok(res, await buildScreens(session.acquire(), ctx.projectRoot), ctx.method);
         case '/api/deadcode':
           return ok(res, buildDeadCode(session.acquire(), ctx.projectRoot, ctx.query), ctx.method);
         case '/api/entrypoints':
@@ -278,7 +286,7 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           // the socket open, so it never goes through `ok()`.
           return events.subscribe(req, res, ctx.method);
         default:
-          return dispatchPathRoutes(route, res, ctx, session);
+          return await dispatchPathRoutes(route, res, ctx, session);
       }
     } catch (err) {
       // A refusal from the read chokepoint is a 403 with the reason attached —
@@ -352,16 +360,16 @@ async function dispatchWrite(
  * straight to an exact lookup, and anything that names nothing is a 404. File
  * paths go through the read chokepoint before anything is opened.
  */
-function dispatchPathRoutes(
+async function dispatchPathRoutes(
   route: string,
   res: Parameters<UiApiHandler>[1],
   ctx: UiRequestContext,
   session: GraphSession
-): boolean {
+): Promise<boolean> {
   const nodeId = suffixAfter(route, '/api/node/');
   if (nodeId !== null) {
     if (nodeId === '') throw badRequest('No symbol id was given. Use /api/node/<id>.');
-    return ok(res, buildNode(session.acquire(), ctx.projectRoot, nodeId), ctx.method);
+    return ok(res, await buildNode(session.acquire(), ctx.projectRoot, nodeId), ctx.method);
   }
 
   // Before `/api/file/`: that prefix is not a prefix of this route, but keeping

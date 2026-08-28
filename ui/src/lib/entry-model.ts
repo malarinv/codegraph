@@ -243,7 +243,9 @@ export function buildEntryPanel(entries: WireEntryPoints | null): EntryPanel {
       section(
         'routes',
         'Routes',
-        'A request from outside arrives here — the URL, and the symbol that serves it.',
+        entries.routes.items.items.every((r) => !r.method)
+          ? 'A screen of the app — its path, and the component that renders it.'
+          : 'A request from outside arrives here — the URL, and the symbol that serves it.',
         entries.routes.items,
         groupRows(
           entries.routes.items.items.map((route) => ({

@@ -19,6 +19,7 @@ import type {
   WireFileCodePayload,
   WireFlowPayload,
   WireMapPayload,
+  WireScreensPayload,
   WireNodeRefs,
   WireRoutes,
   WireSearch,
@@ -141,6 +142,10 @@ export function fetchSource(
  * is how many path segments under it name a module. Omitting `root` lets the
  * adapter pick the repository's source directory.
  */
+export function fetchScreens(signal?: AbortSignal): Promise<WireScreensPayload> {
+  return getGraphAdapter().screens(signal);
+}
+
 export function fetchMap(
   opts: { root?: string | null; depth?: number } = {},
   signal?: AbortSignal

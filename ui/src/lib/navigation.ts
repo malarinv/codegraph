@@ -68,6 +68,7 @@ export interface NavigationDriver {
   mapHref(opts?: MapHrefOptions): string;
   flowHref(opts?: FlowHrefOptions): string;
   entryHref(): string;
+  screensHref(): string;
   deadHref(opts?: DeadCodeHrefOptions): string;
   /** Go to an href this driver built. */
   navigate(href: string, opts?: { replace?: boolean }): void;
@@ -131,6 +132,10 @@ export const hashNavigation: NavigationDriver = {
 
   entryHref() {
     return '#/entry';
+  },
+
+  screensHref() {
+    return '#/screens';
   },
 
   deadHref(opts = {}) {
@@ -210,6 +215,10 @@ export function flowHref(opts: FlowHrefOptions = {}): string {
 
 export function entryHref(): string {
   return driver.entryHref();
+}
+
+export function screensHref(): string {
+  return driver.screensHref();
 }
 
 export function deadHref(opts: DeadCodeHrefOptions = {}): string {

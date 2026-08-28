@@ -181,6 +181,12 @@ export interface WireEdge {
   via?: string;
   registeredAt?: string;
   valueRef?: boolean;
+  /**
+   * The conditions the call site runs under (`!isUploading && isCollected`),
+   * read from the source at request time — see `graph/branch-guards.ts`.
+   * Absent when the site is unconditional or the language has no rules.
+   */
+  when?: string;
 }
 
 export function toWireEdge(edge: Edge): WireEdge {
@@ -339,6 +345,7 @@ export const CALLER_EDGE_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>([
   'references',
   'imports',
   'instantiates',
+  'navigates',
 ]);
 
 export { rel as toPosixPath };

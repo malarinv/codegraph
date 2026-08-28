@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, mapHref, flowHref, entryHref, deadHref, symbolHref } from '../lib/router.svelte';
+  import { router, mapHref, flowHref, entryHref, screensHref, deadHref, symbolHref } from '../lib/router.svelte';
   import { trail } from '../lib/trail.svelte';
   import SearchPalette from './SearchPalette.svelte';
   import { live } from '../lib/live.svelte';
@@ -9,9 +9,11 @@
     project?: string | null;
     /** "13,060 symbols · 46,004 edges · 593 files indexed". Null until loaded. */
     stats?: string | null;
+    /** The project's graph holds screen navigation: show the Screens tab and land on it. */
+    showScreens?: boolean;
   }
 
-  let { project = null, stats = null }: Props = $props();
+  let { project = null, stats = null, showScreens = false }: Props = $props();
 
   let search: SearchPalette | null = $state(null);
 
@@ -65,9 +67,10 @@
   </a>
 
   <nav class="views" aria-label="Views">
+    {#if showScreens}<a href={screensHref()} class:active={view === 'screens' || view === 'home'}>Screens</a>{/if}
     <a href={entryHref()} class:active={view === 'entry'}>Entry points</a>
     <a href={mapHref()} class:active={view === 'map'}>Map</a>
-    <a href={symbolTabHref} class:active={view === 'symbol' || view === 'home'}>Symbol</a>
+    <a href={symbolTabHref} class:active={view === 'symbol' || (view === 'home' && !showScreens)}>Symbol</a>
     <a href={flowHref()} class:active={view === 'flow'}>Flow</a>
     <a href={deadHref()} class:active={view === 'dead'}>Dead code</a>
   </nav>

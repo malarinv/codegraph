@@ -26,6 +26,7 @@ import { isTestFile } from '../../search/query-utils';
 import { buildHierarchy, type WireOverride } from './hierarchy';
 import { notFound } from './respond';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
+import { annotateWhen } from './when';
 import {
   BLAST_DEPTH,
   CALLER_EDGE_KINDS,
@@ -73,7 +74,7 @@ export interface WireMember extends WireNodeRef {
   overrides?: WireOverride;
 }
 
-export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): unknown {
+export async function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): Promise<unknown> {
   const node = cg.getNode(nodeId);
   if (!node) {
     throw notFound(
@@ -145,6 +146,13 @@ export function buildNode(cg: CodeGraph, projectRoot: string, nodeId: string): u
 
   const shownIncoming = incomingGroups.slice(0, MAX_INCOMING_GROUPS);
   const shownOutgoing = outgoingGroups.slice(0, MAX_OUTGOING_GROUPS);
+
+  // Branch conditions per call site: the right rail's sites are all in this
+  // file; the left rail's are in each caller's own file.
+  await annotateWhen(cg, projectRoot, [
+    { file: focalFile, edges: shownOutgoing.flatMap((r) => r.edges) },
+    ...shownIncoming.map((r) => ({ file: r.node.file, edges: r.edges })),
+  ]);
 
   // Fan-in for the rail pills ("hub · N"), for the rows actually returned —
   // one query, not one per row.

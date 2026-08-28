@@ -96,6 +96,9 @@
           <div class="nm">{rowName(node)}</div>
           <div class="meta">
             {#if row.words.length > 0}<span class="kindlbl">{row.words.join(', ')}</span>{/if}
+            {#each row.when as w (w)}<span class="tag when" title="The call runs only under this condition — read from the source as it is now"
+                >when {w}</span
+              >{/each}
             {#each row.lines as line (line)}
               <button
                 type="button"
@@ -297,6 +300,18 @@
     margin-top: 1px;
     color: var(--ink-3);
     font-size: 11px;
+  }
+
+  .tag {
+    flex: 0 0 auto;
+    padding: 0 4px;
+    border: 1px solid var(--rule-soft);
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+
+  .tag.when {
+    color: var(--ink-2);
   }
 
   .kindlbl {

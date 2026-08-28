@@ -35,6 +35,7 @@ import type {
   WireFileCodePayload,
   WireFlowPayload,
   WireMapPayload,
+  WireScreensPayload,
   WireNodeRefs,
   WireRoutes,
   WireSearch,
@@ -210,6 +211,8 @@ export interface GraphAdapter {
   flow(request: FlowRequest, signal?: AbortSignal): Promise<WireFlowPayload>;
   /** The repository at module granularity, layered. */
   map(request?: MapRequest, signal?: AbortSignal): Promise<WireMapPayload>;
+  /** The app's screens and the transitions between them, with their conditions. */
+  screens(signal?: AbortSignal): Promise<WireScreensPayload>;
   /** The URL → handler map. */
   routes(request?: RoutesRequest, signal?: AbortSignal): Promise<WireRoutes>;
   /** Where a reader starts: routes, files that run something, tests, hubs. */
@@ -391,6 +394,10 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
       const params = new URLSearchParams();
       if (request.limit) params.set('limit', String(request.limit));
       return getJson<WireRoutes>(`api/routes${query(params)}`, signal);
+    },
+
+    screens(signal) {
+      return getJson<WireScreensPayload>('api/screens', signal);
     },
 
     entryPoints(request = {}, signal) {

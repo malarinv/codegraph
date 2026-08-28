@@ -34,7 +34,8 @@
  */
 
 import type CodeGraph from '../../index';
-import type { Edge, Node } from '../../types';
+import type { Edge, Language, Node } from '../../types';
+import { guardLabel, guardsForFile, siteKey, supportsBranchGuards } from '../../graph/branch-guards';
 import {
   resolveNamedSymbolFlow,
   normalizeToken,
@@ -344,6 +345,8 @@ function toFlowEdge(edge: Edge, upward: boolean): WireFlowEdge {
 interface FileCache {
   lines: string[] | null;
   language: string;
+  /** Absolute path, when the file was read — what branch-guard parsing needs. */
+  abs?: string;
   drift: boolean;
   reason?: string;
 }
@@ -378,6 +381,7 @@ function loadFile(
       entry = {
         lines: splitLines(fs.readFileSync(absolute, 'utf-8')),
         language: found.record.language,
+        abs: absolute,
         drift: false,
       };
     } catch {
@@ -444,6 +448,23 @@ async function windowFor(
   };
 }
 
+/** The branch label for `edge`'s call site in `siteNode`'s file, or ''. */
+async function whenAt(
+  cg: CodeGraph,
+  projectRoot: string,
+  cache: Map<string, FileCache>,
+  siteNode: Node,
+  edge: Edge
+): Promise<string> {
+  if (!edge.line || !supportsBranchGuards(siteNode.language)) return '';
+  const file = loadFile(cg, projectRoot, cache, siteNode.filePath);
+  if (!file || file.drift || !file.abs) return '';
+  const site = { line: edge.line, column: typeof edge.column === 'number' ? edge.column : null };
+  const guards = await guardsForFile(file.abs, file.language as Language, [site]);
+  const g = guards.get(siteKey(site));
+  return g ? guardLabel(g) : '';
+}
+
 // =============================================================================
 // Building the flows
 // =============================================================================
@@ -494,9 +515,20 @@ async function toWireFlow(
         backwards: true,
       };
     }
+    // The connector's condition: the call site is in the caller's file — the
+    // previous card going down, this card itself when the reader stepped up.
+    const wireEdge = step.edge === null ? null : toFlowEdge(step.edge, step.upward);
+    if (wireEdge && step.edge?.line) {
+      const siteNode = step.upward ? step.node : previous?.node;
+      const when = siteNode ? await whenAt(cg, projectRoot, cache, siteNode, step.edge) : '';
+      if (when) {
+        wireEdge.when = when;
+        wireEdge.label = `${wireEdge.label} · when ${when}`;
+      }
+    }
     hops.push({
       node: toNodeRef(step.node),
-      edge: step.edge === null ? null : toFlowEdge(step.edge, step.upward),
+      edge: wireEdge,
       callRef,
       source: await windowFor(
         cg,

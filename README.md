@@ -392,6 +392,7 @@ CodeGraph detects web-framework routing files and emits `route` nodes linked by 
 | **ASP.NET** | `[HttpGet("/x")]` attributes on action methods |
 | **Vapor** | `app.get("x", use: handler)` |
 | **React Router** / **SvelteKit** | Route component nodes |
+| **Expo Router** | Every screen file under `app/` (`app/item/[id].tsx` → `/item/[id]`, groups stripped) becomes a route node bound to its default-export component; `router.push/replace/navigate('/path')`, template hrefs, and `{ pathname }` objects become `navigates` edges to the screen — so "where does tapping this go" is one hop in the graph |
 | **Vue Router** / **Nuxt** | `pages/` file-based routes, `server/api/` endpoints, route middleware |
 | **Astro** | `src/pages/` file-based routes (`.astro` pages + `.ts` endpoints, `[param]`/`[...rest]` syntax) |
 

@@ -53,6 +53,7 @@ export const MAP_EDGE_KINDS: readonly EdgeKind[] = [
   'instantiates',
   'extends',
   'implements',
+  'navigates',
 ];
 
 /**
@@ -61,7 +62,7 @@ export const MAP_EDGE_KINDS: readonly EdgeKind[] = [
  * A `references` edge to a type is real traffic but "Config → Config" is not
  * an interesting row; calls and imports are what a reader wants named.
  */
-const PAIR_EDGE_KINDS: readonly EdgeKind[] = ['calls', 'imports', 'instantiates'];
+const PAIR_EDGE_KINDS: readonly EdgeKind[] = ['calls', 'imports', 'instantiates', 'navigates'];
 
 /** Symbol pairs kept per link — the tooltip shows four (design spec §3.6). */
 const TOP_PAIRS_PER_LINK = 4;
@@ -261,12 +262,17 @@ export function pickDefaultRoot(
   if (total === 0) return '';
   let best = '';
   let bestSymbols = 0;
+  let second = 0;
   for (const [dir, symbols] of [...byDir].sort((a, b) => a[0].localeCompare(b[0]))) {
     if (symbols > bestSymbols) {
+      second = bestSymbols;
       best = dir;
       bestSymbols = symbols;
-    }
+    } else if (symbols > second) second = symbols;
   }
+  // A second root holding a fifth of the code (a React Native app's `ios/`
+  // beside its `src/`) belongs on the picture: map the whole project.
+  if (second * 5 >= total) return '';
   return bestSymbols * 2 > total ? best : '';
 }
 
@@ -310,7 +316,7 @@ export function parseMapQuery(query: URLSearchParams): { root: string | null; de
 
 export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchParams): WireMapPayload {
   const started = Date.now();
-  const { root: requestedRoot, depth } = parseMapQuery(query);
+  let { root: requestedRoot, depth } = parseMapQuery(query);
 
   const fileRecords = cg.getFiles().map((file) => {
     const path = toPosixPath(file.path);
@@ -324,6 +330,10 @@ export function buildMap(cg: CodeGraph, projectRoot: string, query: URLSearchPar
   });
 
   const root = requestedRoot ?? pickDefaultRoot(fileRecords);
+  // Left to choose, and choosing the whole project (two substantial roots):
+  // one level deeper, so the boxes are `src/app` and `ios/CaptureView`, not
+  // `src` and `ios`.
+  if (requestedRoot === null && root === '' && !query.has('depth')) depth = 2;
   const stats = cg.getStats();
   const key = [
     projectRoot,

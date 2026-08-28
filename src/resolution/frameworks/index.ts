@@ -26,6 +26,7 @@ import { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
 import { expoModulesResolver } from './expo-modules';
+import { expoRouterResolver } from './expo-router';
 import { fabricViewResolver } from './fabric';
 import { cicsResolver } from './cics';
 import { terraformResolver } from './terraform';
@@ -70,6 +71,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   reactNativeBridgeResolver,
   // Expo Modules — Function/AsyncFunction/Property DSL on Swift/Kotlin
   expoModulesResolver,
+  // Expo Router — `app/` screen files → route nodes; `router.push('/x')` → navigates edges
+  expoRouterResolver,
   // React Native Fabric / Codegen view components — TS spec → component nodes
   fabricViewResolver,
   // CICS pseudo-conversational TRANSID hops (COBOL)
@@ -151,4 +154,5 @@ export { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';
 export { expoModulesResolver } from './expo-modules';
+export { expoRouterResolver } from './expo-router';
 export { fabricViewResolver } from './fabric';

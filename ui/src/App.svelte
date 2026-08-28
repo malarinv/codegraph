@@ -7,6 +7,7 @@
   import FileView from './views/FileView.svelte';
   import FileCodeView from './views/FileCodeView.svelte';
   import MapView from './views/MapView.svelte';
+  import ScreensView from './views/ScreensView.svelte';
   import FlowView from './views/FlowView.svelte';
   import EntryView from './views/EntryView.svelte';
   import DeadCodeView from './views/DeadCodeView.svelte';
@@ -19,6 +20,7 @@
     mapHref,
     flowHref,
     entryHref,
+    screensHref,
     deadHref,
   } from './lib/router.svelte';
   import { palette } from './lib/palette.svelte';
@@ -65,6 +67,11 @@
   let topbar: TopBar | null = $state(null);
 
   let route = $derived(router.route);
+
+  // An app with screens opens on them. The Symbol tab's empty state is for a
+  // library, where there is nothing to draw until a name is typed; a project
+  // whose graph holds screen navigation has a picture worth landing on.
+  let hasScreens = $derived((project.stats?.graph.edgesByKind.navigates ?? 0) > 0);
 
   // Keep the in-memory trail and the `t` param in step. untrack() because the
   // body writes the same store it would otherwise read itself into a loop.
@@ -127,6 +134,10 @@
         event.preventDefault();
         navigate(entryHref());
         break;
+      case 's':
+        event.preventDefault();
+        navigate(screensHref());
+        break;
       case 'd':
         event.preventDefault();
         navigate(deadHref());
@@ -142,7 +153,7 @@
 
 <svelte:window {onkeydown} />
 
-<TopBar bind:this={topbar} project={project.name} stats={project.summary} />
+<TopBar bind:this={topbar} project={project.name} stats={project.summary} showScreens={hasScreens} />
 <TrailBar />
 <main>
   {#if route.view === 'symbol'}
@@ -162,6 +173,8 @@
     />
   {:else if route.view === 'entry'}
     <EntryView project={project.name} />
+  {:else if route.view === 'screens' || (route.view === 'home' && hasScreens)}
+    <ScreensView />
   {:else if route.view === 'dead'}
     <DeadCodeView exported={route.exported} />
   {:else if route.view === 'unknown'}

@@ -1068,7 +1068,8 @@ export class ReferenceResolver {
       // traverse `references`, so registration sites surface with no
       // graph-layer changes.
       let kind: Edge['kind'] =
-        ref.original.referenceKind === 'function_ref' ? 'references' : ref.original.referenceKind;
+        ref.edgeKind ??
+        (ref.original.referenceKind === 'function_ref' ? 'references' : ref.original.referenceKind);
 
       // Promote "extends" to "implements" when a class/struct targets an interface
       if (kind === 'extends') {
@@ -1103,6 +1104,7 @@ export class ReferenceResolver {
         line: ref.original.line,
         column: ref.original.column,
         metadata: {
+          ...(ref.metadata ?? {}),
           confidence: ref.confidence,
           resolvedBy: ref.resolvedBy,
           // The ORIGINAL reference text (and kind, when edge-kind promotion

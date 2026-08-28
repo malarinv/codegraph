@@ -186,6 +186,22 @@ export interface MapLayout {
 
 export interface MapLayoutOptions {
   includeTests: boolean;
+  /** Override the hidden-link floor; 0 draws every link (the Screens view). */
+  minWeight?: number;
+  /**
+   * The two lines a box is sized for. The Map's boxes show the module id and
+   * its counts; a view that shows something else (a screen's path and its
+   * component) must size for what it draws, or an opaque id decides the width.
+   */
+  sizing?: (module: WireMapModule, island: boolean) => { label: string; meta: string };
+  /**
+   * Replace longest-path layering. Receives every module id and the acyclic
+   * links (mutual pairs already broken); returns each id's layer, 0 at the
+   * BOTTOM. The Screens view lays out by distance from the entry screen,
+   * where "one layer above what it depends on" would put the head of the
+   * longest chain of screens above the login page.
+   */
+  layering?: (ids: string[], links: ReadonlyArray<{ source: string; target: string }>) => Map<string, number>;
 }
 
 export function strokeWidthFor(count: number): number {
@@ -212,7 +228,7 @@ export function buildMapLayout(
   // depends on is depended on, whatever this screen is currently showing.
   const depended = new Set(payload.links.map((l) => l.target));
   const links = payload.links.filter((l) => present.has(l.source) && present.has(l.target));
-  const minWeight = options.includeTests ? MIN_WEIGHT_WITH_TESTS : MIN_WEIGHT;
+  const minWeight = options.minWeight ?? (options.includeTests ? MIN_WEIGHT_WITH_TESTS : MIN_WEIGHT);
 
   const declaredLinks = links.filter((l) => l.declared > 0);
   const useDeclared =
@@ -246,7 +262,12 @@ export function buildMapLayout(
   for (const list of out.values()) list.sort();
 
   const layer = new Map<string, number>();
-  for (const module of modules) longestPath(module.id, out, layer, new Set());
+  if (options.layering) {
+    for (const [id, value] of options.layering(modules.map((m) => m.id), acyclic)) layer.set(id, value);
+    for (const module of modules) if (!layer.has(module.id)) layer.set(module.id, 0);
+  } else {
+    for (const module of modules) longestPath(module.id, out, layer, new Set());
+  }
 
   const layerCount = Math.max(1, ...[...layer.values()].map((v) => v + 1));
   const rows: string[][] = Array.from({ length: layerCount }, () => []);
@@ -282,7 +303,11 @@ export function buildMapLayout(
   // --- placement -----------------------------------------------------------
   const islands = new Set(modules.filter((m) => !depended.has(m.id)).map((m) => m.id));
   const widths = new Map(
-    modules.map((m) => [m.id, nodeWidth(m.id, moduleMetaLabel(m, islands.has(m.id)))])
+    modules.map((m) => {
+      const island = islands.has(m.id);
+      const lines = options.sizing?.(m, island) ?? { label: m.id, meta: moduleMetaLabel(m, island) };
+      return [m.id, nodeWidth(lines.label, lines.meta)];
+    })
   );
   const rowSums = rows.map((row) => row.reduce((sum, id) => sum + (widths.get(id) ?? 0), 0));
   // Natural span = the boxes shoulder to shoulder. The content width is the

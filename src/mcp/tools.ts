@@ -40,6 +40,7 @@ import {
 } from 'fs';
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
+import { guardLabel, guardsForFileSync, siteKey, supportsBranchGuards, warmBranchGuardGrammars } from '../graph/branch-guards';
 import { findDynamicBoundaries, type BoundarySite } from '../graph/dynamic-boundary-report';
 import { countImplementers } from '../graph/type-hierarchy';
 import {
@@ -377,7 +378,7 @@ const ISOLATED_WEAK_KIND_WEIGHT = 0.08;
  */
 const RELEVANCE_USAGE_EDGES: ReadonlySet<string> = new Set([
   'calls', 'references', 'extends', 'implements', 'overrides',
-  'instantiates', 'returns', 'type_of', 'decorates',
+  'instantiates', 'returns', 'type_of', 'decorates', 'navigates',
 ]);
 
 /**
@@ -2440,6 +2441,29 @@ export class ToolHandler {
    * for ordinary static edges. Used by trace + the node trail so a synthesized
    * hop reads as "registered via onUpdate at App.tsx:3148", not a bare arrow.
    */
+  /**
+   * The branch conditions a flow hop's call site runs under, read from the
+   * caller's source now (`graph/branch-guards.ts`); '' when unconditional,
+   * unreadable, or the grammar for that language is not loaded.
+   */
+  private whenLabel(cg: CodeGraph, caller: Node, edge: Edge): string {
+    if (!edge.line || !supportsBranchGuards(caller.language)) return '';
+    try {
+      const rec = cg.getFile(caller.filePath);
+      if (!rec) return '';
+      const abs = validatePathWithinRoot(cg.getProjectRoot(), caller.filePath);
+      if (!abs) return '';
+      const st = statSync(abs);
+      // Drifted since the index: the recorded line may point elsewhere.
+      if (st.size !== rec.size || Math.floor(st.mtimeMs) !== Math.floor(rec.modifiedAt)) return '';
+      const site = { line: edge.line, column: typeof edge.column === 'number' ? edge.column : null };
+      const g = guardsForFileSync(abs, caller.language, [site]).get(siteKey(site));
+      return g ? guardLabel(g) : '';
+    } catch {
+      return '';
+    }
+  }
+
   private synthEdgeNote(edge: Edge | null): { label: string; compact: string; registeredAt?: string } | null {
     if (!edge || edge.provenance !== 'heuristic') return null;
     const m = edge.metadata as Record<string, unknown> | undefined;
@@ -2704,7 +2728,11 @@ export class ToolHandler {
         out.push('**Flow (call path among the symbols you queried)**', '');
         for (let i = 0; i < best!.length; i++) {
           const step = best![i]!;
-          if (step.edge) { const sy = this.synthEdgeNote(step.edge); out.push(`   ↓ ${sy ? sy.compact : step.edge.kind}`); }
+          if (step.edge) {
+            const sy = this.synthEdgeNote(step.edge);
+            const when = i > 0 ? this.whenLabel(cg, best![i - 1]!.node, step.edge) : '';
+            out.push(`   ↓ ${sy ? sy.compact : step.edge.kind}${when ? ` (when ${when})` : ''}`);
+          }
           out.push(`${i + 1}. ${step.node.name} (${step.node.filePath}:${step.node.startLine})`);
         }
         out.push('');
@@ -3014,7 +3042,7 @@ export class ToolHandler {
 
     const RANK_EDGES = new Set<string>([
       'calls', 'references', 'extends', 'implements', 'overrides',
-      'instantiates', 'returns', 'type_of', 'imports',
+      'instantiates', 'returns', 'type_of', 'imports', 'navigates',
     ]);
     const adj: number[][] = Array.from({ length: n }, () => []);
     for (const e of edges) {
@@ -3948,6 +3976,9 @@ export class ToolHandler {
     // Compute the flow spine once — used both to prepend the Flow section (below)
     // and to gate adaptive source sizing: files on the spine get full source,
     // off-spine peers skeletonize.
+    // The Flow section labels each hop with its branch conditions; that read
+    // is synchronous, so the grammars it needs are loaded here, once.
+    await warmBranchGuardGrammars();
     const flow = this.buildFlowFromNamedSymbols(cg, matchQuery);
 
     // Snapshot every ranked candidate's scoring inputs, in final sort order, so

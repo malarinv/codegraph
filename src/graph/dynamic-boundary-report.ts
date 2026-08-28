@@ -303,7 +303,7 @@ function handlerMethodOf(cg: CodeGraph, cls: Node): Node | null {
 // Continuations
 // =============================================================================
 
-const CONTINUATION_KINDS = new Set(['calls', 'instantiates']);
+const CONTINUATION_KINDS = new Set(['calls', 'instantiates', 'navigates']);
 
 /**
  * The calls recorded out of a symbol, minus the ones already on the path.

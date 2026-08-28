@@ -4,7 +4,7 @@
  * Types for the reference resolution system.
  */
 
-import { Language, Node, ReferenceKind } from '../types';
+import { EdgeKind, Language, Node, ReferenceKind } from '../types';
 
 /**
  * An unresolved reference from extraction
@@ -43,6 +43,15 @@ export interface ResolvedRef {
   confidence: number;
   /** How it was resolved */
   resolvedBy: 'exact-match' | 'import' | 'qualified-name' | 'framework' | 'fuzzy' | 'instance-method' | 'file-path' | 'function-ref';
+  /**
+   * Edge kind the edge should carry when it is NOT the ref's own kind — a
+   * framework that turns a `calls` ref into a `navigates` edge, for example.
+   * The original kind is still recorded on the edge as `metadata.refKind`, so
+   * re-resolution after a target is removed reconstructs the ref faithfully.
+   */
+  edgeKind?: EdgeKind;
+  /** Extra metadata the strategy wants persisted on the edge (`href`, …). */
+  metadata?: Record<string, unknown>;
 }
 
 /**

@@ -117,6 +117,8 @@ export interface WireEdge {
   via?: string;
   registeredAt?: string;
   valueRef?: boolean;
+  /** Branch conditions the call site runs under — `!isUploading && isCollected`. */
+  when?: string;
 }
 
 /** Every edge between the focal symbol and ONE other symbol, as a single row. */
@@ -640,6 +642,56 @@ export interface WireMapPayload {
   excluded: { uncertainEdges: number; confidenceBelow: number };
   index: { lastIndexedAt: number | null; edges: number; files: number };
   timing: { elapsedMs: number; cached: boolean };
+}
+
+/* ---------------------------------------------------------------- screens -- */
+
+export interface WireScreen {
+  id: string;
+  path: string;
+  file: string;
+  line: number;
+  component: WireNodeRef | null;
+  incoming: number;
+  outgoing: number;
+}
+
+export interface WireScreenOrigin {
+  id: string;
+  node: WireNodeRef;
+  outgoing: number;
+  /** Shared chrome: how many screens render it. */
+  sharedBy?: number;
+}
+
+export interface WireScreenSite {
+  file: string;
+  line: number;
+  href: string;
+  method: string;
+  when: string;
+}
+
+export interface WireScreenLink {
+  id: string;
+  from: string;
+  to: string;
+  fromOrigin: boolean;
+  via: WireNodeRef[];
+  when: string;
+  sites: WireScreenSite[];
+  synthesized: boolean;
+}
+
+export interface WireScreensPayload {
+  routed: boolean;
+  entry: string | null;
+  screens: WireScreen[];
+  origins: WireScreenOrigin[];
+  links: WireScreenLink[];
+  dropped: number;
+  index: { lastIndexedAt: number | null; edges: number; files: number };
+  timing: { elapsedMs: number };
 }
 
 /* -------------------------------------------------------------- dead code -- */

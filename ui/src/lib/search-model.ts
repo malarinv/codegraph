@@ -269,7 +269,9 @@ export function buildEntryPalette(
   if (entries.routes.routed && entries.routes.items.items.length > 0) {
     sections.push({
       title: 'Routes',
-      note: 'A request from outside arrives here.',
+      note: entries.routes.items.items.every((r) => !r.method)
+        ? 'A screen of the app.'
+        : 'A request from outside arrives here.',
       items: take(entries.routes.items.items).map((route) => ({
         type: 'route' as const,
         id: `route:${route.routeId}`,

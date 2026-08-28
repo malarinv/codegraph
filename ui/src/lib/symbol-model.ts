@@ -65,6 +65,8 @@ export function edgeWord(edge: WireEdge): string {
       return '';
     case 'instantiates':
       return 'creates';
+    case 'navigates':
+      return 'navigates to';
     case 'references':
       return edge.valueRef ? 'passes as value' : 'uses type';
     default:
@@ -80,6 +82,16 @@ export function relationWords(relation: WireRelation): string[] {
     if (word && !words.includes(word)) words.push(word);
   }
   return words;
+}
+
+/** The distinct branch conditions across a relation's edges, at most three. */
+export function relationWhens(relation: WireRelation): string[] {
+  const out: string[] = [];
+  for (const edge of relation.edges) {
+    if (edge.when && !out.includes(edge.when)) out.push(edge.when);
+    if (out.length === 3) break;
+  }
+  return out;
 }
 
 /** The synthesizer that produced this relation's edge, when one did. */
@@ -335,6 +347,8 @@ export interface CalleeRow {
   lines: number[];
   words: string[];
   via: string | null;
+  /** `when` conditions, distinct, for the meta line. */
+  when: string[];
 }
 
 export interface CalleeRailModel {
@@ -357,6 +371,7 @@ export function buildCalleeRail(payload: WireSymbolPayload): CalleeRailModel {
       lines: relation.lines,
       words: relationWords(relation),
       via: synthesizedBy(relation),
+      when: relationWhens(relation),
     };
     if (relation.uncertain) uncertain.push(row);
     else rows.push(row);
@@ -380,6 +395,8 @@ export interface CallerRow {
   /** Call-site lines in the CALLER's file — the `:4657` chips. */
   lines: number[];
   via: string | null;
+  /** `when` conditions, distinct, for the meta line. */
+  when: string[];
 }
 
 export interface CallerFileGroup {
@@ -420,6 +437,7 @@ export function buildCallerRail(payload: WireSymbolPayload): CallerRailModel {
       words: relationWords(relation),
       lines: relation.lines,
       via: synthesizedBy(relation),
+      when: relationWhens(relation),
     };
     // Uncertainty wins over test-ness: a name-only guess is a claim about the
     // edge, and burying it in the tests fold would present it as established.

@@ -81,6 +81,9 @@
         {#if row.via}<span class="tag" title="A synthesized edge — dynamic dispatch the parser cannot see"
             >via {row.via}</span
           >{/if}
+        {#each row.when as w (w)}<span class="tag when" title="The call runs only under this condition — read from the source as it is now"
+            >when {w}</span
+          >{/each}
       </div>
     </div>
   </div>
@@ -247,6 +250,10 @@
     border: 1px solid var(--rule-soft);
     color: var(--ink-3);
     font-size: 10.5px;
+  }
+
+  .tag.when {
+    color: var(--ink-2);
   }
 
   .rfold {

@@ -11,6 +11,7 @@
  *   #/map                  module map       (?root=&depth=&tests=1)
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *   #/entry                entry points     (where a flow starts)
+ *   #/screens              screens          (the app's screens and transitions)
  *   #/dead                 dead code        (?exported=1 widens the claim)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
@@ -40,6 +41,7 @@ export {
   hashNavigation,
   mapHref,
   navigate,
+  screensHref,
   setNavigationDriver,
   symbolHref,
 } from './navigation';
@@ -74,6 +76,7 @@ export type Route =
       trail: string | null;
     }
   | { view: 'entry' }
+  | { view: 'screens' }
   | {
       view: 'dead';
       /** Symbols reachable from outside the index are on the list. */
@@ -136,6 +139,8 @@ export function parseHash(hash: string): RouterLocation {
     };
   } else if (head === 'entry' && rest.length === 0) {
     route = { view: 'entry' };
+  } else if (head === 'screens' && rest.length === 0) {
+    route = { view: 'screens' };
   } else if (head === 'dead' && rest.length === 0) {
     // The widening travels in the URL like the map's shape does: a link to
     // "including exported symbols" has to reopen the same list.
