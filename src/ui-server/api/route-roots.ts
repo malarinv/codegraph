@@ -35,7 +35,14 @@ export interface RouteRoot {
   inline: boolean;
 }
 
-const HANDLER_KINDS: ReadonlySet<Node['kind']> = new Set(['function', 'method', 'class', 'component']);
+/**
+ * What a resolver's `references` edge may name as the handler. A constant or
+ * a variable counts: `const authUser = asyncHandler(async (req, res) => …)` is
+ * how an Express handler is written with a wrapper, and the registration site
+ * named it — the arrow inside has no node of its own, so the binding is the
+ * handler, and the walk lends it the file-scope calls within its lines.
+ */
+const HANDLER_KINDS: ReadonlySet<Node['kind']> = new Set(['function', 'method', 'class', 'component', 'constant', 'variable']);
 const JS_FAMILY: ReadonlySet<string> = new Set(['javascript', 'typescript', 'tsx', 'jsx']);
 
 /** A React component, by the convention that names one: a PascalCase function in a JS-family file. */
@@ -59,7 +66,7 @@ export function routeRoots(cg: CodeGraph, routes: readonly Node[]): Map<string, 
     list.push(e);
     byRoute.set(e.source, list);
   }
-  const rank = (n: Node): number => (n.kind === 'function' || n.kind === 'method' ? 0 : n.kind === 'component' ? 1 : 2);
+  const rank = (n: Node): number => (n.kind === 'function' || n.kind === 'method' ? 0 : n.kind === 'component' ? 1 : n.kind === 'class' ? 2 : 3);
   for (const route of routes) {
     const list = byRoute.get(route.id);
     if (!list || list.length === 0) continue;

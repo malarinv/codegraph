@@ -2,8 +2,8 @@
 
 **Status:** plan, written 2026-08-28 at the end of the session that built the Steps view and the
 readings it rests on (Expo + React Native app, `amniservices-mobile-app`). **Updated the same day, later
-session: P0, P1, P2, P5 and P6 are built** (see the per-item notes marked *Built*); P3 (cross-tier
-channels), P4 (Next.js as a Screens app) and P7's agent A/B numbers are open. Every claim about what a
+sessions: P0, P1, P2, P3, P5 and P6 are built** (see the per-item notes marked *Built*); P4 (Next.js as a
+Screens app) and P7's agent A/B numbers are open. Every claim about what a
 resolver emits *today* was verified against the source on this date — re-verify before building on it,
 the resolvers move. What was learned building it, beyond the plan: the index keeps only the LAST
 segment of a deep member call (`create` for `prisma.user.create`) and name-matches it — often to the
@@ -279,6 +279,24 @@ class and method, `@Process`, `@Cron`, `queue.process`, `socket.on`.
 consumer reads `FIRES FROM @Process('email')`.
 
 ### P3 — Cross-tier channels (the RN bridge, for the web)
+
+*Built* (2026-08-28, later session) — `src/resolution/tier-synthesizer.ts` (one pass, three channels: `http-client` with
+`tier: 'client→server'`, `queue-job`, `event-bus` for a bus and for sockets both ways; registered before the emitter pass), Next
+server actions marked at request time from the `'use server'` directive (`api/when.ts` `directive`), `crossing()` in `steps.ts`
+reading `tier` / `channel`, an endpoint reached across a tier drawn as a bridge box that is a boundary like a screen, a channel's
+call never also an effect, a top-level `new Worker` landing on its constant with the file-scope calls lent to it; Express mounts
+(`app.use('/api', router)`, nested, by import or `require`) composed onto route names in `postExtract`, and the chained
+`router.route('/x').get(h).put(h2)` form extracted; `e2e/` counts as a test directory. Test: `__tests__/ui-steps-cross-tier.test.ts`.
+Verified on `bradtraversy/proshop_mern` (30 routes, 23 client→route edges, every one correct on inspection; `login` reads
+`login → ⇢ POST /api/users/login (authUser) → User.findOne({ email }) → 401 rows → jwt.sign via generateToken`, which needed
+`routeRoots` to accept a function-valued constant — `const authUser = asyncHandler(async (req, res) => …)` — and the walk to lend
+such a value the file-scope calls and unresolved refs within its lines; and framework detection to read a workspace's
+`package.json` (`frameworks/package-deps.ts`), proshop keeping `react` in `frontend/`) and `nestjs/nest`
+(`sample/26-queues` `transcode` → `@Process('transcode')`, `sample/30-event-emitter` → `@OnEvent`; the `integration/*/e2e`
+helpers no longer count). **Not built:** tRPC (a procedure's inline handler is not a node — extractor work with the kernel twin).
+**Gap found:** a nested `const handleSubmit = async (e) => …` inside a component is not a node (only `function` declarations and
+`useCallback`-bound arrows are — `tree-sitter.ts` `reactHookBoundName`), so such a handler's `fetch` attributes to the component and
+the link carries no FIRES FROM; the fix is an extractor rule for a nested arrow bound by a declarator, in TS and in the Rust kernel.
 
 *Where:* new synthesizers in `resolution/callback-synthesizer.ts` (register in the channel list with a
 language gate), or a resolver for the resolvable ones; each tagged `provenance: 'heuristic'`,

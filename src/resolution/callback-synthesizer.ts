@@ -30,6 +30,8 @@ import { cFnPointerDispatchEdges } from './c-fnptr-synthesizer';
 import { goframeRouteEdges } from './goframe-synthesizer';
 import { expoRouterReturnEdges } from './expo-router-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
+import { crossTierEdges } from './tier-synthesizer';
+import { enclosingFn, makeLineAt } from './synth-utils';
 
 const REGISTRAR_NAME = /^(on[A-Z]\w*|subscribe|addListener|addEventListener|register|watch|listen|addCallback)$/;
 const DISPATCHER_NAME = /(emit|trigger|notify|dispatch|fire|publish|flush)/i;
@@ -110,33 +112,6 @@ function sliceLines(content: string, startLine?: number, endLine?: number): stri
   return content.split('\n').slice(startLine - 1, endLine).join('\n');
 }
 
-/**
- * Per-match line resolver over `src`, 1-based at `baseLine`. The inline
- * `src.slice(0, idx).split('\n').length` idiom is O(source-length) PER MATCH,
- * which goes quadratic on a match-dense source (a generated function full of
- * `.push(` calls re-scanned tens of thousands of times was most of the #1235
- * indexing wedge). Builds the newline index once — lazily, since most sources
- * never produce a match — then answers each call with a binary search.
- */
-function makeLineAt(src: string, baseLine: number): (idx: number) => number {
-  let nl: number[] | null = null;
-  return (idx: number) => {
-    if (!nl) {
-      nl = [];
-      for (let i = src.indexOf('\n'); i !== -1; i = src.indexOf('\n', i + 1)) nl.push(i);
-    }
-    // Count newlines strictly before idx.
-    let lo = 0;
-    let hi = nl.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (nl[mid]! < idx) lo = mid + 1;
-      else hi = mid;
-    }
-    return baseLine + lo;
-  };
-}
-
 function registrarField(src: string): string | null {
   const m = src.match(/this\.(\w+)\.(?:add|push|set)\(/);
   return m ? m[1]! : null;
@@ -148,21 +123,6 @@ function dispatcherField(src: string): string | null {
   const forEach = src.match(/this\.(\w+)\.forEach\(/);
   if (forEach) return forEach[1]!;
   return null;
-}
-
-const FN_KINDS = new Set(['method', 'function', 'component']);
-
-/** Innermost function/method node whose line range contains `line`. */
-function enclosingFn(nodesInFile: Node[], line: number): Node | null {
-  let best: Node | null = null;
-  for (const n of nodesInFile) {
-    if (!FN_KINDS.has(n.kind)) continue;
-    const end = n.endLine ?? n.startLine;
-    if (n.startLine <= line && end >= line) {
-      if (!best || n.startLine >= best.startLine) best = n; // prefer the tightest (latest-starting) encloser
-    }
-  }
-  return best;
 }
 
 /**
@@ -3578,6 +3538,11 @@ const ALWAYS = (): boolean => true;
 export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'fieldEdges', gate: ALWAYS, run: (q, c, y) => fieldChannelEdges(q, c, y) },
   { name: 'closureCollEdges', gate: ALWAYS, run: (q, c, y) => closureCollectionEdges(q, c, y) },
+  // Cross-tier channels — a client's `fetch('/api/x')` onto its own route,
+  // a queue job onto its consumer, a bus / socket event onto its handler.
+  // Before the in-process emitter pass: the same (source, target) pair
+  // keeps the more specific edge — the one that says which tier it crosses.
+  { name: 'tierEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => crossTierEdges(c, y) },
   { name: 'emitterEdges', gate: ALWAYS, run: (_q, c, y) => eventEmitterEdges(c, y) },
   { name: 'renderEdges', gate: ALWAYS, run: (q, c, y) => reactRenderEdges(q, c, y) },
   { name: 'jsxEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => reactJsxChildEdges(c, y) },

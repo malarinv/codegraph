@@ -6,6 +6,7 @@
 
 import { Node } from '../../types';
 import { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types';
+import { dependsOn } from './package-deps';
 
 export const reactResolver: FrameworkResolver = {
   name: 'react',
@@ -17,19 +18,8 @@ export const reactResolver: FrameworkResolver = {
   languages: ['javascript', 'typescript', 'tsx', 'jsx'],
 
   detect(context: ResolutionContext): boolean {
-    // Check for React in package.json
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.react || deps.next || deps['react-native']) {
-          return true;
-        }
-      } catch {
-        // Invalid JSON
-      }
-    }
+    // React in a package.json — the root's, or a workspace's (`frontend/`, `apps/web/`).
+    if (dependsOn(context, 'react', 'next', 'react-native')) return true;
 
     // Check for .jsx/.tsx files
     const allFiles = context.getAllFiles();

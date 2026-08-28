@@ -2478,6 +2478,33 @@ export class ToolHandler {
         registeredAt,
       };
     }
+    if (m?.synthesizedBy === 'http-client') {
+      const req = `${String(m.method ?? 'GET')} ${String(m.href ?? '')}`.trim();
+      return {
+        label: `HTTP request \`${req}\` — the client's call onto its own route (cross-tier)`,
+        compact: `dynamic: HTTP ${req}${at}`,
+        registeredAt,
+      };
+    }
+    if (m?.synthesizedBy === 'queue-job') {
+      const job = m.event ? `\`${String(m.event)}\`` : 'a job';
+      const queue = m.queue ? ` on queue \`${String(m.queue)}\`` : '';
+      return {
+        label: `queue job ${job}${queue} — producer → consumer (cross-tier)`,
+        compact: `dynamic: queue job ${job}${at}`,
+        registeredAt,
+      };
+    }
+    if (m?.synthesizedBy === 'event-bus') {
+      const ev = m.event ? `\`${String(m.event)}\`` : 'an event';
+      const what = m.channel === 'socket' ? 'socket message' : 'bus event';
+      const dir = m.tier === 'client→server' ? ', client → server' : m.tier === 'server→client' ? ', server → client' : '';
+      return {
+        label: `${what} ${ev} — emit → handler${dir} (dynamic dispatch)`,
+        compact: `dynamic: ${what} ${ev}${at}`,
+        registeredAt,
+      };
+    }
     if (m?.synthesizedBy === 'event-emitter') {
       const ev = m.event ? `\`${String(m.event)}\`` : 'an event';
       return {

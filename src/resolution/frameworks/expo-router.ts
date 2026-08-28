@@ -44,6 +44,7 @@ import type {
   UnresolvedRef,
 } from '../types';
 import { stripCommentsForRegex } from '../strip-comments';
+import { dependsOn } from './package-deps';
 
 // =============================================================================
 // Route files
@@ -143,8 +144,8 @@ export function navVerb(name: string): string | null {
 /** Lines a single navigation call is allowed to span. */
 const MAX_CALL_LINES = 12;
 
-/** Placeholder for an interpolated `${…}` inside a template-literal href. */
-const HOLE = '\u0000';
+/** Placeholder for an interpolated `${…}` inside a template-literal href (shared with the cross-tier synthesizer). */
+export const HOLE = '\u0000';
 
 /** Index of the `)` matching the `(` at `open`, skipping string bodies; -1 if unbalanced. */
 function matchParen(s: string, open: number): number {
@@ -573,16 +574,7 @@ export const expoRouterResolver: FrameworkResolver = {
   languages: [...ROUTE_LANGUAGES],
 
   detect(context: ResolutionContext): boolean {
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps['expo-router']) return true;
-      } catch {
-        // Not JSON — fall through to the layout check.
-      }
-    }
+    if (dependsOn(context, 'expo-router')) return true;
     const files = context.getAllFiles();
     const hasLayout = files.some((f) => /(?:^|\/)(?:src\/)?app\/_layout\.(?:tsx|jsx|ts|js)$/.test(f));
     const hasExpoConfig = files.some((f) => /^app\.(?:json|config\.(?:js|ts))$/.test(f));

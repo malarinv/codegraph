@@ -273,8 +273,18 @@ describe('NestJS', () => {
     expect(db.effect).toMatchObject({ model: 'cats', access: 'write', by: { name: 'create' } });
     const dbLink = p.links.find((l) => l.to === db.id)!;
     expect(dbLink.via.map((v) => v.name)).toEqual(['create']);
-    const queue = effect(p, 'queue')!;
-    expect(queue.label).toBe("this.catsQueue.add('index', { id })");
+    // The job put on the `cats` queue lands on the processor that consumes it
+    // — an arrival, not a call outside the index; the site is the `add` as written.
+    expect(effect(p, 'queue')).toBeUndefined();
+    const landing = p.steps.find((s) => s.kind === 'event' && s.node?.name === 'handleIndex')!;
+    expect(landing).toBeDefined();
+    expect(landing.event).toBe('index');
+    expect(landing.trigger).toEqual({ kind: 'decorator', name: 'Process', of: "'index'", in: 'cats.processor.ts' });
+    const toLanding = p.links.find((l) => l.to === landing.id)!;
+    expect(toLanding.kind).toBe('event');
+    expect(toLanding.synthesized).toBe(true);
+    expect(toLanding.sites[0]).toMatchObject({ text: 'this.catsQueue.add', args: "'index', { id }" });
+    expect(toLanding.label).toBe('via queue-job · job index · queue cats · registered at src/nest/cats.processor.ts:4');
   });
 
   it('a thrown exception is the 404 the request gets', async () => {

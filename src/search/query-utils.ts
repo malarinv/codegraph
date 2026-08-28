@@ -332,9 +332,10 @@ export function isTestPath(filePath: string): boolean {
     lower.includes('/tests/') || lower.includes('/test/') ||
     lower.includes('/__tests__/') || lower.includes('/spec/') ||
     lower.includes('/specs/') || lower.includes('/testlib/') ||
-    lower.includes('/testing/') ||
+    lower.includes('/testing/') || lower.includes('/e2e/') ||
     lower.startsWith('test/') || lower.startsWith('tests/') ||
     lower.startsWith('spec/') || lower.startsWith('specs/') ||
+    lower.startsWith('e2e/') ||
     // CamelCase test source-set dirs (Kotlin Multiplatform / Gradle / Xcode):
     // jvmTest/, commonTest/, androidTest/, iosTest/, integrationTest/. Capital-led
     // so "latest/" / "manifest/" are not matched.

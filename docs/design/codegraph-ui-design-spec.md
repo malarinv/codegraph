@@ -513,6 +513,29 @@ endpoints grouped by router file when there are no screens. A production walk ne
 and a repository-shaped method the walk cannot enter (an interface's, the ORM's) is the database. Conditions and arguments
 are read for Python, Java, Kotlin, C#, Go and C as for JS and Swift (§3.14); a language without rules yields nothing.
 
+**Across the tiers (a web app, a monorepo).** A web app is two programs that talk over a wire the graph cannot see, and the
+same picture wants the same evidence the RN bridge gives it: a string on both sides. `resolution/tier-synthesizer.ts` pairs them at
+index time (`provenance: 'heuristic'`, `synthesizedBy`, `channel`, `tier`, `registeredAt`): a client call with a literal path —
+`fetch('/api/users', { method: 'POST' })`, `axios.post`, `ky`, `got`, `$fetch`, `useFetch`, `useSWR`, or a project instance made by
+`axios.create({ baseURL })` — onto the one route `METHOD path` it names (`http-client`, `tier: 'client→server'`; a template hole fills
+a `:param` and never a literal segment, a hole in front of the path matches a route by its tail, a variable url or a path two routes
+serve alike is nothing); `queue.add('welcome')` on a named queue onto the `@Process('welcome')` method of the `@Processor` class, a
+WorkerHost's `process`, a `new Worker('email', handler)` or Bull's `queue.process` (`queue-job`, `channel: 'queue'`);
+`eventEmitter.emit('user.created')` onto `@OnEvent` listeners, globs honoured (`event-bus`, `channel: 'event'`); a client's
+`socket.emit('x')` onto the gateway's `@SubscribeMessage('x')` and the server's `server.emit('x')` back onto the component that
+registered `socket.on('x', …)` inline (`channel: 'socket'`, the `tier` each way). A Next server action needs no edge: a call from a file
+without the directive into a function whose file (or body) opens with `'use server'` is marked `client→server` at request time.
+`crossing()` reads the marker before the languages, so a hop between two TypeScript files can be a **bridge** or an **event**: an
+endpoint reached across a tier draws as a bridge box that keeps its endpoint face (`⇢ POST /api/users` over its handler's name, `FIRES
+FROM POST /api/users · after …`) and is a boundary exactly as another screen is — `cut: 'screen'`, entered with `&through=1`, the walk
+going on into the handler; a job, an event or a message arriving draws as `⇠ welcome` on its consumer, whose trigger already says
+`@Process('welcome')`. The site of such a hop is the call as written (`fetch('/api/users', { method, body })`, `emailQueue.add('welcome',
+{ userId })`) with its conditions, and the link's label says the channel, the way it crosses and where it was registered (`via http-client
+· POST /api/users · to the server · registered at app.ts:4`). A call a channel follows is not also drawn as a call outside the index
+— the crossing is the story — and a top-level `const worker = new Worker('q', async (job) => …)` lends its constant the file-scope calls
+within its lines, so the landing walks on into what the handler does. Test suites and generated files are never sources: forty supertest
+calls would make a route a hub. A mounted Express router (`app.use('/api', routes)`, nested) names its routes by the path a request takes.
+
 Rows = distance from the anchor as the server counted it (first discovery), anchor on top with the entry mark. Boxes:
 the §3.12 screen box for a screen or a handler; **bridge / event** add a 3px `--accent` left rule (the language
 changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits on `--paper-2`; **effect** is dashed

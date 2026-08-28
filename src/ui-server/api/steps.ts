@@ -103,8 +103,9 @@ export interface WireStep {
   depth: number;
   /**
    * Why the walk did not go on from this step, when it did not: a cap it hit
-   * (`depth`, `fan-out`, `folded`, `steps`), or `screen` — another screen is
-   * a chapter of its own, drawn but not entered unless `through` asks.
+   * (`depth`, `fan-out`, `folded`, `steps`), or `screen` — another screen, or
+   * an endpoint reached across a tier, is a chapter of its own, drawn but not
+   * entered unless `through` asks.
    */
   cut: 'depth' | 'fan-out' | 'folded' | 'steps' | 'screen' | 'component' | null;
   /** The event name a native event step arrived on (`onZipComplete`) — the first, when several land here. */
@@ -227,8 +228,19 @@ const WALK_KINDS: Edge['kind'][] = ['calls', 'instantiates', 'navigates', 'refer
 const JS_FAMILY: ReadonlySet<Language> = new Set<Language>(['javascript', 'typescript', 'tsx', 'jsx']);
 const NATIVE_FAMILY: ReadonlySet<Language> = new Set<Language>(['swift', 'objc', 'java', 'kotlin']);
 
-/** JS → native is a bridge call; native → JS is an event. Anything else is one family. */
-export function crossing(from: Language, to: Language): 'bridge' | 'event' | null {
+/**
+ * JS → native is a bridge call; native → JS is an event. Anything else is one
+ * family — unless the edge itself says which way it crosses: a synthesized
+ * channel (`resolution/tier-synthesizer.ts`) marks a client's request onto its
+ * own route `client→server`, a socket message back `server→client`, and a
+ * queue job or a bus event as a `channel` whose landing is an arrival; a
+ * server action called from a client file is marked `client→server` at
+ * request time, by its directive.
+ */
+export function crossing(from: Language, to: Language, meta: Record<string, unknown> = {}): 'bridge' | 'event' | null {
+  if (meta.tier === 'client→server') return 'bridge';
+  if (meta.tier === 'server→client') return 'event';
+  if (meta.channel === 'queue' || meta.channel === 'event' || meta.channel === 'socket') return 'event';
   if (JS_FAMILY.has(from) && NATIVE_FAMILY.has(to)) return 'bridge';
   if (NATIVE_FAMILY.has(from) && JS_FAMILY.has(to)) return 'event';
   return null;
@@ -470,6 +482,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   const fanIn = new Map<string, number>();
   const chromeParents = new Map<string, number>();
   const fileScopeRefs = new Map<string, Edge[]>();
+  const fileScopeUnresolved = new Map<string, UnresolvedReference[]>();
 
   const stepFor = (node: Node, kind: WireStepKind, depth: number, extra: Partial<WireStep> = {}): StepRecord | null => {
     const existing = steps.get(node.id);
@@ -495,7 +508,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const routeRoot = isRoute ? (roots.get(node.id) ?? null) : null;
     const record: StepRecord = {
       id: node.id,
-      kind: isRoute ? 'screen' : kind,
+      // A route is a screen or an endpoint — except one reached across a
+      // tier (`fetch('/api/users')` onto its own route), which is the crossing.
+      kind: isRoute && kind !== 'bridge' ? 'screen' : kind,
       anchor: false,
       node: toNodeRef(node),
       label: node.name,
@@ -708,7 +723,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     // Another screen is a chapter of its own: the Screens view draws the way
     // between screens, and a picture that walked on through Home would be the
     // whole app. Drawn as a boundary, entered on request.
-    if (step.kind === 'screen' && !step.anchor && !through) {
+    // An endpoint reached across a tier is the same kind of boundary: the
+    // request's own picture starts at its handler, entered on request.
+    if ((step.kind === 'screen' || (step.kind === 'bridge' && step.node?.kind === 'route')) && !step.anchor && !through) {
       step.cut = 'screen';
       continue;
     }
@@ -743,9 +760,14 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       // from the FILE scope, at the wrapper's line. Lend the wrapper those
       // references, so the screen that renders `<Memoized/>` walks on into
       // what the component does.
+      // The same for a value a registration is written inside — `const
+      // worker = new Worker('q', async (job) => { … })`: the arrow's calls
+      // belong to the file scope and the constant spans them; a queue job
+      // lands on the constant, and the walk goes on into what the handler does.
       for (const fold of frontier) {
-        if (fold.node.kind !== 'component' || (bySource.get(fold.node.id)?.length ?? 0) > 0) continue;
-        for (const e of fileScopeFnRefsWithin(cg, fold.node, fileScopeRefs)) {
+        const value = fold.node.kind === 'constant' || fold.node.kind === 'variable';
+        if ((fold.node.kind !== 'component' && !value) || (bySource.get(fold.node.id)?.length ?? 0) > 0) continue;
+        for (const e of fileScopeEdgesWithin(cg, fold.node, fileScopeRefs, value)) {
           const list = bySource.get(fold.node.id) ?? [];
           list.push({ ...e, source: fold.node.id });
           bySource.set(fold.node.id, list);
@@ -759,17 +781,38 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       if (unknownFanIn.length > 0) for (const [id, n] of cg.getFanIn(unknownFanIn)) fanIn.set(id, n);
 
       for (const fold of frontier) {
-        // Effects made by this node, folded or not.
+        // A call a synthesized channel already follows — the `fetch` that
+        // reaches its own route, the `queue.add` its consumer picks up — is
+        // the crossing, not also a call outside the index.
+        const channelLines = new Set<number>();
+        /** Per line, the last segment of each call a channel follows there (`add` of `emailQueue.add`). */
+        const channelCalls = new Map<number, Set<string>>();
+        for (const e of bySource.get(fold.node.id) ?? []) {
+          const m = e.metadata as Record<string, unknown> | undefined;
+          if (typeof m?.channel !== 'string' || typeof e.line !== 'number') continue;
+          channelLines.add(e.line);
+          if (typeof m.callee === 'string') {
+            const set = channelCalls.get(e.line) ?? new Set<string>();
+            set.add(m.callee.split(/[.:]/).pop() ?? m.callee);
+            channelCalls.set(e.line, set);
+          }
+        }
+        // Effects made by this node, folded or not. A value a handler is
+        // written inside (`const authUser = asyncHandler(async (req, res) =>
+        // …)`) made none itself — the arrow's calls belong to the file scope —
+        // so it is lent the file's, within its lines, as its call edges are.
         if (effectScans < MAX_EFFECT_SCANS) {
           effectScans++;
           let refs: UnresolvedReference[] = [];
           try {
             refs = cg.getUnresolvedReferencesFrom(fold.node.id);
+            if (refs.length === 0 && (fold.node.kind === 'constant' || fold.node.kind === 'variable')) refs = fileScopeRefsWithin(cg, fold.node, fileScopeUnresolved);
           } catch {
             refs = [];
           }
           for (const ref of [...refs].sort((a, b) => a.line - b.line || a.column - b.column)) {
             if (ref.referenceKind !== 'calls' && ref.referenceKind !== 'instantiates') continue;
+            if (channelLines.has(ref.line)) continue;
             await effectLink(step, fold, { referenceName: ref.referenceName, referenceKind: ref.referenceKind, line: ref.line, column: ref.column }, null);
           }
         }
@@ -824,6 +867,14 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           // same case with the constant as the target.
           let target = targets.get(e.target)!;
           let retargeted = false;
+          // `api.get('/users')` resolves to the `api` constant — and
+          // `this.audioQueue.add('transcode')` to some `add` by name — AND,
+          // on the same line, a channel follows the call: the channel is the story.
+          if (typeof meta.channel !== 'string' && e.kind === 'calls' && channelLines.has(e.line ?? -1)) {
+            const written = typeof meta.refName === 'string' ? meta.refName : target.name;
+            const last = written.split(/[.:]/).pop() ?? written;
+            if (target.kind === 'constant' || target.kind === 'variable' || channelCalls.get(e.line!)?.has(last)) continue;
+          }
           if (e.kind === 'calls' && typeof meta.synthesizedBy !== 'string' && e.provenance !== 'heuristic') {
             const refName = typeof meta.refName === 'string' ? meta.refName : target.name;
             const bare = !refName.includes('.');
@@ -873,11 +924,28 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const isCall = e.kind === 'calls' || e.kind === 'instantiates' || (e.kind === 'references' && meta.fnRef === true);
           const trigger = isCall ? await triggerAt(fold.node, { line: e.line, column: e.column }) : null;
 
+          // A server action, by its directive: a function in a `'use server'`
+          // file (or opening with the directive) called from a file that is
+          // not — the call crosses to the server, whatever the import says.
+          if (
+            e.provenance !== 'heuristic' &&
+            (e.kind === 'calls' || (e.kind === 'references' && meta.fnRef === true)) &&
+            (target.kind === 'function' || target.kind === 'method') &&
+            JS_FAMILY.has(target.language) &&
+            JS_FAMILY.has(fold.node.language)
+          ) {
+            const callee = await calls.directive(target);
+            if ((callee.file === 'server' || callee.own) && (await calls.directive(fold.node)).file !== 'server') {
+              meta.tier = 'client→server';
+              meta.channel = 'server-action';
+            }
+          }
+
           // What kind of step, if any, this edge arrives at.
           let kind: WireStepKind | null = null;
           let linkKind: WireStepLinkKind = 'calls';
           const extra: Partial<WireStep> = {};
-          if (target.kind === 'route') {
+          if (target.kind === 'route' && meta.tier !== 'client→server') {
             kind = 'screen';
             linkKind = 'navigates';
           } else {
@@ -886,8 +954,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             // a synthesized channel's. A plain name-matched call across the
             // families (`arr.flat()` landing on a Swift `flat`) is noise, and
             // is neither drawn nor walked.
-            const cross = crossing(fold.node.language, target.language);
-            const evidenced = e.provenance === 'heuristic' || meta.bridge === 'react-native' || meta.resolvedBy === 'framework';
+            const cross = crossing(fold.node.language, target.language, meta);
+            const evidenced =
+              e.provenance === 'heuristic' || meta.bridge === 'react-native' || meta.resolvedBy === 'framework' || meta.channel === 'server-action';
             if (cross !== null && !evidenced) continue;
             if (cross === 'event') {
               kind = 'event';
@@ -937,8 +1006,15 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const at = { line: a.e.line, column: a.e.column };
           const when = await whenAt(fold.node, at);
           // A call-shaped hop says what it passes; a navigation already says
-          // its href, a handler binding and an event channel pass nothing.
-          const site = a.linkKind === 'bridge' || a.linkKind === 'store' || a.linkKind === 'calls' ? await withArgs(a.site, fold.node, at) : a.site;
+          // its href, a handler binding and a native event channel pass
+          // nothing. A hop over a synthesized channel is a call in the source
+          // — `fetch('/api/users', {…})`, `emailQueue.add('welcome', {…})` —
+          // and its site reads as written.
+          let site = a.site;
+          if (typeof a.meta.channel === 'string' && a.meta.channel !== 'server-action') {
+            const written = await callAt(fold.node, at);
+            site = written && written.callee ? { ...a.site, text: written.callee, args: written.args } : await withArgs(a.site, fold.node, at);
+          } else if (a.linkKind === 'bridge' || a.linkKind === 'store' || a.linkKind === 'calls') site = await withArgs(a.site, fold.node, at);
           link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger);
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
@@ -1116,20 +1192,40 @@ function basename(p: string): string {
 }
 
 /**
- * Function-as-value references made at a file's top level within a node's
- * lines — what `const Memoized = memo(CaptureComponent)` leaves behind: the
- * reference belongs to the file scope, the wrapper node spans the line.
+ * Function-as-value references — and, for a value, calls — made at a file's
+ * top level within a node's lines: what `const Memoized = memo(CaptureComponent)`
+ * leaves behind (the reference belongs to the file scope, the wrapper node
+ * spans the line), and what `const worker = new Worker('q', async (job) =>
+ * { … })` leaves behind (the handler's calls belong to the file scope, the
+ * constant spans them).
  */
-function fileScopeFnRefsWithin(cg: CodeGraph, node: Node, memo: Map<string, Edge[]>): Edge[] {
+function fileScopeEdgesWithin(cg: CodeGraph, node: Node, memo: Map<string, Edge[]>, calls: boolean): Edge[] {
   let refs = memo.get(node.filePath);
   if (refs === undefined) {
     const file = cg.getNodesInFile(node.filePath).find((n) => n.kind === 'file');
     refs = file
-      ? cg.getOutgoingEdgesFrom([file.id], ['references']).filter((e) => (e.metadata as Record<string, unknown> | undefined)?.fnRef === true)
+      ? cg
+          .getOutgoingEdgesFrom([file.id], ['references', 'calls'])
+          .filter((e) => e.kind === 'calls' || (e.metadata as Record<string, unknown> | undefined)?.fnRef === true)
       : [];
     memo.set(node.filePath, refs);
   }
-  return refs.filter((e) => typeof e.line === 'number' && e.line >= node.startLine && e.line <= node.endLine);
+  return refs.filter((e) => (calls || e.kind === 'references') && typeof e.line === 'number' && e.line >= node.startLine && e.line <= node.endLine);
+}
+
+/** The file scope's unresolved calls within a value's lines — what a wrapped handler's arrow body leaves on the file node. */
+function fileScopeRefsWithin(cg: CodeGraph, node: Node, memo: Map<string, UnresolvedReference[]>): UnresolvedReference[] {
+  let refs = memo.get(node.filePath);
+  if (refs === undefined) {
+    const file = cg.getNodesInFile(node.filePath).find((n) => n.kind === 'file');
+    try {
+      refs = file ? cg.getUnresolvedReferencesFrom(file.id) : [];
+    } catch {
+      refs = [];
+    }
+    memo.set(node.filePath, refs);
+  }
+  return refs.filter((r) => r.line >= node.startLine && r.line <= node.endLine);
 }
 
 /** `push /capture`, `renders <Button>`, `via rn-event-channel`, `calls`. */
@@ -1143,6 +1239,7 @@ function siteText(edge: Edge, meta: Record<string, unknown>, target: Node): stri
   if (edge.kind === 'contains') return `defines ${target.name}`;
   if (edge.kind === 'instantiates') return `new ${target.name}`;
   if (meta.bridge === 'react-native') return `bridge ${typeof meta.module === 'string' ? meta.module + '.' : ''}${target.name}`;
+  if (meta.channel === 'http') return `${typeof meta.method === 'string' ? meta.method : 'GET'} ${typeof meta.href === 'string' ? meta.href : target.name}`;
   if (typeof meta.synthesizedBy === 'string') return `via ${meta.synthesizedBy}`;
   return `calls ${target.name}`;
 }
@@ -1152,8 +1249,13 @@ function hopLabel(meta: Record<string, unknown>, synthesized: boolean): string {
   const parts: string[] = [];
   if (typeof meta.synthesizedBy === 'string') parts.push(`via ${meta.synthesizedBy}`);
   else if (synthesized) parts.push('inferred');
+  if (meta.channel === 'server-action') parts.push('server action');
+  if (meta.channel === 'http' && typeof meta.method === 'string') parts.push(`${meta.method} ${typeof meta.href === 'string' ? meta.href : ''}`.trim());
+  if (meta.tier === 'client→server') parts.push('to the server');
+  else if (meta.tier === 'server→client') parts.push('from the server');
   if (meta.resolvedBy === 'receiver-type') parts.push('by the receiver’s declared type');
-  if (typeof meta.event === 'string') parts.push(`event ${meta.event}`);
+  if (typeof meta.event === 'string') parts.push(`${meta.channel === 'queue' ? 'job' : meta.channel === 'socket' ? 'message' : 'event'} ${meta.event}`);
+  if (typeof meta.queue === 'string') parts.push(`queue ${meta.queue}`);
   if (meta.bridge === 'react-native') parts.push(`React Native bridge${typeof meta.module === 'string' ? ` · ${meta.module}` : ''}`);
   if (typeof meta.registeredAt === 'string') parts.push(`registered at ${meta.registeredAt}`);
   return parts.join(' · ');

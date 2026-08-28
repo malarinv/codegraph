@@ -86,6 +86,8 @@ export function kindWords(kind: WireStep['kind'], project: ProjectKind = 'app', 
     case 'trigger':
       return ['handler', 'handlers'];
     case 'bridge':
+      // An endpoint reached across a tier is a call to the server wherever it is.
+      if (step?.screen?.endpoint) return ['call to the server', 'calls to the server'];
       return project === 'app' ? ['native call', 'native calls'] : project === 'web' ? ['call to the server', 'calls to the server'] : ['call to another tier', 'calls to another tier'];
     case 'event':
       return project === 'app' ? ['native event', 'native events'] : project === 'web' ? ['arrives from the server', 'arrive from the server'] : ['arrives from a queue or bus', 'arrive from a queue or bus'];
@@ -153,6 +155,8 @@ export function stepSub(step: WireStep, project: ProjectKind = 'app'): string {
       // The event before the file: `onPress · <Button> · index.tsx`.
       return step.trigger ? `${triggerWords(step.trigger)} · ${file}` : `handler · ${file}`;
     case 'bridge':
+      // An endpoint the code crosses to says its handler, as an endpoint box does.
+      if (step.screen) return step.sub;
       return `${project === 'app' ? 'native' : project === 'web' ? 'server' : 'another tier'} · ${file}`;
     case 'event':
       return `${step.label} · ${file}`;

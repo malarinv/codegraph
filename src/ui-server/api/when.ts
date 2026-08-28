@@ -10,6 +10,7 @@
  * Symbol view into a parse of the repository.
  */
 
+import * as fs from 'fs';
 import type CodeGraph from '../../index';
 import type { Language } from '../../types';
 import {
@@ -107,7 +108,19 @@ export interface SiteReader {
   decorators(definition: { filePath: string; language: Language; startLine: number }): Promise<DefinitionDecorators | null>;
   /** The declared types of the members of the class a definition belongs to, by member name; empty when unreadable. */
   memberTypes(definition: { filePath: string; language: Language; startLine: number }): Promise<Map<string, string>>;
+  /**
+   * The `'use server'` / `'use client'` directive a JS-family file opens with,
+   * and whether the definition itself opens with `'use server'` (a server
+   * action declared inline). Nothing for other languages or unreadable files.
+   */
+  directive(definition: { filePath: string; language: Language; startLine: number }): Promise<{ file: 'server' | 'client' | null; own: boolean }>;
 }
+
+const JS_FAMILY: ReadonlySet<string> = new Set(['javascript', 'typescript', 'tsx', 'jsx']);
+/** A file read for its directives, at most. */
+const MAX_DIRECTIVE_FILE = 512 * 1024;
+const FILE_DIRECTIVE = /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*(['"])use (server|client)\1/;
+const OWN_DIRECTIVE = /^\s*(['"])use server\1\s*;?\s*$/m;
 
 /**
  * Both readings of one call site — WHEN it runs and WITH WHAT — for the
@@ -117,6 +130,7 @@ export interface SiteReader {
  */
 export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 600): SiteReader {
   const files = new Map<string, { abs: string; language: Language } | null>();
+  const texts = new Map<string, string | null>();
   let sites = 0;
   const resolve = (caller: { filePath: string; language: Language }): { abs: string; language: Language } | null => {
     const posix = caller.filePath.replace(/\\/g, '/');
@@ -182,6 +196,31 @@ export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 
       const file = resolve(definition);
       if (!file) return new Map();
       return memberTypesForFile(file.abs, file.language, definition.startLine);
+    },
+    async directive(definition) {
+      // Not counted: a text read, cached per file, no tree.
+      const none = { file: null, own: false } as const;
+      if (!JS_FAMILY.has(definition.language)) return none;
+      const file = resolve(definition);
+      if (!file) return none;
+      let text = texts.get(file.abs);
+      if (text === undefined) {
+        try {
+          text = fs.statSync(file.abs).size <= MAX_DIRECTIVE_FILE ? fs.readFileSync(file.abs, 'utf8') : null;
+        } catch {
+          text = null;
+        }
+        texts.set(file.abs, text);
+      }
+      if (text === null) return none;
+      const head = FILE_DIRECTIVE.exec(text);
+      const fileDirective = head ? (head[2] as 'server' | 'client') : null;
+      let own = false;
+      if (definition.startLine > 0) {
+        const lines = text.split('\n');
+        own = OWN_DIRECTIVE.test(lines.slice(definition.startLine - 1, definition.startLine + 3).join('\n'));
+      }
+      return { file: fileDirective, own };
     },
   };
 }

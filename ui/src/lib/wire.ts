@@ -750,7 +750,8 @@ export interface WireStep {
   depth: number;
   /**
    * Why the walk did not go on from this step: a cap (`depth`, `fan-out`,
-   * `folded`, `steps`), or `screen` — another screen, drawn as a boundary.
+   * `folded`, `steps`), or `screen` — another screen, or an endpoint reached
+   * across a tier, drawn as a boundary.
    */
   cut: 'depth' | 'fan-out' | 'folded' | 'steps' | 'screen' | 'component' | null;
   /** The event name a native event step arrived on — the first, when several land here. */
@@ -760,7 +761,8 @@ export interface WireStep {
   /** For a handler: what fires it. */
   trigger?: WireStepTrigger;
   /**
-   * For a screen or an endpoint: its path and the symbol that serves it.
+   * For a screen or an endpoint — also a `bridge` step that is an endpoint
+   * reached across a tier: its path and the symbol that serves it.
    * `endpoint` when the route leads with an HTTP verb; `inline` when the
    * handler is anonymous at the registration site (component is null).
    */

@@ -412,6 +412,12 @@ export class ContextBuilder {
         ? `renders <${String(m.via || 'child')}>`
         : m.synthesizedBy === 'vue-handler'
         ? `Vue @${String(m.event || 'event')} handler`
+        : m.synthesizedBy === 'http-client'
+        ? `HTTP ${String(m.method || 'GET')} ${String(m.href || '')} — the client's call onto its own route${at}`
+        : m.synthesizedBy === 'queue-job'
+        ? `queue job ${m.event ? `\`${String(m.event)}\`` : ''}${m.queue ? ` on \`${String(m.queue)}\`` : ''}${at}`
+        : m.synthesizedBy === 'event-bus' && m.channel === 'socket'
+        ? `socket message ${m.event ? `\`${String(m.event)}\`` : ''}${m.tier === 'client→server' ? ' → server' : m.tier === 'server→client' ? ' → client' : ''}${at}`
         : `event ${m.event ? `\`${String(m.event)}\`` : ''}${at}`;
       synthByPair.set(`${e.source}>${e.target}`, label);
     }

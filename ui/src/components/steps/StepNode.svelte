@@ -3,7 +3,9 @@
    * One step on the Steps view. The box is the Screens view's screen box with
    * a kind: a screen is drawn exactly as there; a handler is a plain box; a
    * native call or a native event carries an accent rule on its left, where
-   * the language changes under the code; a store action sits on `--paper-2`;
+   * the language changes under the code — and so does an endpoint the code
+   * crosses to (`⇢ POST /api/users`) or a job, an event, a message arriving;
+   * a store action sits on `--paper-2`;
    * a call that leaves the index is dashed, like a trigger no screen reaches
    * on the Screens view — a place the graph cannot follow into. The anchor
    * carries the entry mark. A step the walk was cut at ends its name with an
@@ -43,7 +45,7 @@
       case 'steps':
         return ' The picture reached its size limit here.';
       case 'screen':
-        return ' Another screen — a chapter of its own. Start here to see what happens on it.';
+        return ` Another ${kindWord('screen', node.project, step)} — a chapter of its own. Start here to see what happens on it.`;
       case 'component':
         return ' The event lands in a component of another screen — a picture of its own. Start here to see it.';
       default:

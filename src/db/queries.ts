@@ -1058,7 +1058,7 @@ export class QueryBuilder {
         JOIN nodes h ON e.target = h.id
         WHERE r.kind = 'route'
           AND e.kind IN ('references', 'calls')
-          AND h.kind IN ('function', 'method', 'class')
+          AND h.kind IN ('function', 'method', 'class', 'constant', 'variable')
         ORDER BY r.file_path, r.start_line
         LIMIT ?
       `);
