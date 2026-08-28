@@ -29,6 +29,7 @@
 
 import type CodeGraph from '../../index';
 import type { Edge, Node } from '../../types';
+import { routeRoots } from './route-roots';
 import { createWhenReader } from './when';
 import { toNodeRef, type WireNodeRef } from './wire';
 
@@ -170,20 +171,21 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
     };
   }
 
-  // Route → the component it renders; component → its route.
+  // Route → the symbol that serves it (`route-roots.ts`: the component a
+  // screen file exports, or the handler a resolver named); symbol → its route.
+  // A route standing in for its own inline handler binds to nothing here — a
+  // walk back from a navigation cannot land on a registration site.
   const routeById = new Map(routes.map((r) => [r.id, r]));
   const routeByFile = new Map(routes.map((r) => [r.filePath, r.id]));
-  const renders = cg.getOutgoingEdgesFrom(routeIds, ['calls', 'instantiates']);
-  const componentIds = new Set(renders.map((e) => e.target));
-  const nodesById = cg.getNodesByIds([...componentIds, ...navEdges.map((e) => e.source)]);
+  const roots = routeRoots(cg, routes);
   const componentOf = new Map<string, Node>();
   const screenOfComponent = new Map<string, string>();
-  for (const edge of renders) {
-    const component = nodesById.get(edge.target);
-    if (!component || componentOf.has(edge.source)) continue;
-    componentOf.set(edge.source, component);
-    screenOfComponent.set(component.id, edge.source);
+  for (const [routeId, root] of roots) {
+    if (root.inline) continue;
+    componentOf.set(routeId, root.node);
+    if (!screenOfComponent.has(root.node.id)) screenOfComponent.set(root.node.id, routeId);
   }
+  const nodesById = cg.getNodesByIds([...componentOf.values()].map((n) => n.id).concat(navEdges.map((e) => e.source)));
 
   const readWhen = createWhenReader(cg, projectRoot, MAX_WHEN_SITES);
   const whenAt = (caller: Node, edge: Edge): Promise<string> => readWhen(caller, { line: edge.line, column: edge.column });

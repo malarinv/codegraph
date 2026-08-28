@@ -4,7 +4,7 @@
  * rule, and the panel's two lists.
  */
 import { describe, it, expect } from 'vitest';
-import { buildStepsModel, kindWord, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
+import { buildStepsModel, countWords, kindWord, kindWords, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
 import { placeLabels } from '../ui/src/lib/screens-model';
 import type { WireNodeRef, WireStep, WireStepLink, WireStepsPayload } from '../ui/src/lib/wire';
 
@@ -25,6 +25,7 @@ function payload(steps: WireStep[], links: WireStepLink[]): WireStepsPayload {
   return {
     anchor: steps[0]!.node!,
     ambiguous: [],
+    project: 'app',
     steps,
     links,
     depth: 8,
@@ -113,5 +114,26 @@ describe('steps model', () => {
     const lists = stepNeighbourhood(payload([screen, handler, bridge, event, effect, store, home], links), event.id);
     expect(lists.arrivesFrom.map((l) => l.from)).toEqual([bridge.id]);
     expect(lists.leadsTo.map((l) => l.to)).toEqual([effect.id, store.id, home.id, store.id]);
+  });
+});
+
+describe('words per project', () => {
+  it('names the same box for an app, an API and a web app', () => {
+    expect(kindWord('screen', 'app')).toBe('screen');
+    expect(kindWord('screen', 'api')).toBe('endpoint');
+    expect(kindWord('screen', 'web')).toBe('page');
+    // A route that leads with a verb is an endpoint wherever it is.
+    const endpoint = { id: 'r', kind: 'screen', anchor: false, node: null, label: 'POST /users', sub: 'createUser', depth: 1, cut: null, screen: { path: 'POST /users', component: null, endpoint: true, inline: false } } as const;
+    expect(kindWord('screen', 'web', endpoint)).toBe('endpoint');
+    expect(kindWords('store', 'api')).toEqual(['data call', 'data calls']);
+    expect(kindWords('bridge', 'app')).toEqual(['native call', 'native calls']);
+    expect(countWords(11, 'effect', 'api')).toBe('11 outside the index');
+    expect(countWords(1, 'trigger')).toBe('1 handler');
+    expect(countWords(3, 'trigger')).toBe('3 handlers');
+  });
+  it('says what fires a server-side step', () => {
+    expect(triggerWords({ kind: 'request', name: 'POST', of: '/users', in: 'users.routes.ts', after: ['authenticate', 'validate(…)'] })).toBe('POST /users · after authenticate, validate(…)');
+    expect(triggerWords({ kind: 'decorator', name: 'Process', of: "'email'", in: 'x.ts' })).toBe("@Process('email')");
+    expect(triggerWords({ kind: 'load', name: 'GET', of: '/blog/[slug]', in: 'page.tsx' })).toBe('page load · /blog/[slug]');
   });
 });

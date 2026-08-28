@@ -57,7 +57,7 @@ const JS_FAMILY: ReadonlySet<Language> = new Set(['typescript', 'javascript', 't
 
 /** Languages with walk rules below. Others yield no guards (never a wrong one). */
 export function supportsBranchGuards(language: Language | string | undefined | null): boolean {
-  return !!language && (JS_FAMILY.has(language as Language) || language === 'swift');
+  return !!language && RULES_BY_LANGUAGE.has(language as Language);
 }
 
 /**
@@ -77,7 +77,23 @@ function renderGuard(g: BranchGuard): string {
   // `!x` negated reads back as `x`; a simple operand takes a bare `!`;
   // anything with operators is parenthesised so the negation is unambiguous.
   if (/^!(?![=])/.test(g.text) && isSimpleOperand(g.text.slice(1))) return g.text.slice(1);
+  if (/^not\s+/.test(g.text) && isSimpleOperand(g.text.slice(4).trim())) return g.text.slice(4).trim();
+  // One comparison flips instead of wrapping: the reader of a Go `if err !=
+  // nil { return }` wants `err == nil`, not `!(err != nil)`.
+  const flipped = flipComparison(g.text);
+  if (flipped !== null) return flipped;
   return isSimpleOperand(g.text) ? `!${g.text}` : `!(${g.text})`;
+}
+
+/** `a != b` → `a == b`, `x is None` → `x is not None`; null when the text is not one plain comparison. */
+function flipComparison(text: string): string | null {
+  if (/&&|\|\||\band\b|\bor\b|\?/.test(text)) return null;
+  if (hasTopLevelOr(text)) return null;
+  const m = /^([^=!<>]+?)\s*(===|!==|==|!=|\bis not\b|\bis\b)\s*([^=!<>]+)$/.exec(text);
+  if (!m) return null;
+  const flip: Record<string, string> = { '===': '!==', '!==': '===', '==': '!=', '!=': '==', is: 'is not', 'is not': 'is' };
+  const op = flip[m[2]!];
+  return op ? `${m[1]!.trim()} ${op} ${m[3]!.trim()}` : null;
 }
 
 /** A `||` outside every bracket and string — the condition is a disjunction as written. */
@@ -100,7 +116,22 @@ function hasTopLevelOr(text: string): boolean {
 }
 
 function isSimpleOperand(text: string): boolean {
-  return /^[\w$.?!]+(?:\([^()]*\))?$/.test(text) && !/[=<>]/.test(text);
+  // A name, a member chain, or one call on it — `Objects.equals(owner.getId(), id)`
+  // included: the parens must balance and nothing may sit outside them.
+  if (/[=<>]/.test(text) || /\s(?:&&|\|\||and|or)\s/.test(text)) return false;
+  const m = /^([\w$.?!]+)(\(.*\))?$/s.exec(text);
+  if (!m) return false;
+  if (!m[2]) return true;
+  let depth = 0;
+  for (let i = 0; i < m[2].length; i++) {
+    const ch = m[2][i]!;
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0 && i < m[2].length - 1) return false;
+    }
+  }
+  return depth === 0;
 }
 
 // =============================================================================
@@ -179,10 +210,16 @@ export interface CallSite {
   line: number;
   /** 0-based; null/undefined = the first non-blank column of the line. */
   column?: number | null;
+  /**
+   * The callee's last segment, when known (`json` for `res.status(201).json(…)`):
+   * a position at the start of a chain sits on the innermost call, and the
+   * climb continues to the call that is actually this one.
+   */
+  callee?: string;
 }
 
 export function siteKey(site: CallSite): string {
-  return `${site.line}:${typeof site.column === 'number' ? site.column : ''}`;
+  return `${site.line}:${typeof site.column === 'number' ? site.column : ''}${site.callee ? `:${site.callee}` : ''}`;
 }
 
 /**
@@ -252,7 +289,21 @@ export function guardsForFileSync(
 }
 
 /** The languages with rules here — what {@link warmBranchGuardGrammars} loads. */
-export const BRANCH_GUARD_LANGUAGES: readonly Language[] = ['typescript', 'tsx', 'javascript', 'jsx', 'swift'];
+export const BRANCH_GUARD_LANGUAGES: readonly Language[] = [
+  'typescript',
+  'tsx',
+  'javascript',
+  'jsx',
+  'swift',
+  'python',
+  'java',
+  'kotlin',
+  'csharp',
+  'go',
+  'c',
+  'cpp',
+  'objc',
+];
 
 // =============================================================================
 // Call arguments — what a site passes
@@ -264,7 +315,16 @@ const MAX_ARGS_TEXT = 96;
 const MAX_ARG_TEXT = 40;
 /** Object keys listed before `…` stands for the rest. */
 const MAX_OBJECT_KEYS = 4;
-const CALL_TYPES: ReadonlySet<string> = new Set(['call_expression', 'new_expression']);
+/** Call nodes, across the grammars with rules here: JS, Swift, Python, Java, Kotlin, C#, Go, C. */
+const CALL_TYPES: ReadonlySet<string> = new Set([
+  'call_expression',
+  'new_expression',
+  'call',
+  'method_invocation',
+  'object_creation_expression',
+  'invocation_expression',
+  'constructor_invocation',
+]);
 const ARGUMENT_CONTAINERS: ReadonlySet<string> = new Set(['arguments', 'value_arguments', 'argument_list']);
 const STRING_TYPES: ReadonlySet<string> = new Set([
   'string',
@@ -272,10 +332,38 @@ const STRING_TYPES: ReadonlySet<string> = new Set([
   'line_string_literal',
   'multi_line_string_literal',
   'raw_string_literal',
+  'string_literal',
+  'interpreted_string_literal',
+  'concatenated_string',
+  'verbatim_string_literal',
+  'interpolated_string_expression',
+  'char_literal',
 ]);
-const OBJECT_TYPES: ReadonlySet<string> = new Set(['object', 'object_expression']);
-const ARRAY_TYPES: ReadonlySet<string> = new Set(['array', 'array_literal', 'dictionary_literal']);
-const FUNCTION_TYPES: ReadonlySet<string> = new Set(['arrow_function', 'function_expression', 'function']);
+const OBJECT_TYPES: ReadonlySet<string> = new Set(['object', 'object_expression', 'dictionary', 'anonymous_object_creation_expression']);
+const ARRAY_TYPES: ReadonlySet<string> = new Set([
+  'array',
+  'array_literal',
+  'dictionary_literal',
+  'list',
+  'tuple',
+  'set',
+  'list_comprehension',
+  'array_creation_expression',
+  'array_initializer',
+  'initializer_list',
+  'collection_expression',
+  'collection_literal',
+]);
+const FUNCTION_TYPES: ReadonlySet<string> = new Set([
+  'arrow_function',
+  'function_expression',
+  'function',
+  'lambda',
+  'lambda_expression',
+  'func_literal',
+  'anonymous_function',
+  'anonymous_method_expression',
+]);
 
 /**
  * The arguments a call site passes, as written, abbreviated to what a reader
@@ -329,25 +417,61 @@ export function callArgumentsInTree(
   line: number,
   column: number | null
 ): string | null {
+  return callSiteInTree(root, source, line, column)?.args ?? null;
+}
+
+/** One call site, both halves: what is called, as written, and what it is passed. */
+export interface CallSiteText {
+  /**
+   * The callee as written, normalised: `prisma.article.findFirst`,
+   * `this.owners.findById().orElseThrow`, `res.status().json` — member
+   * chains kept whole (the index keeps only the last segment of a deep
+   * chain), argument lists emptied, `await`/`new` dropped, `?.` as `.`.
+   */
+  callee: string;
+  /** The argument list, abbreviated as {@link callArgumentsForFile} says. */
+  args: string;
+  /** The same arguments one by one — a registration site's middleware chain is `argList.slice(1, -1)`. */
+  argList: string[];
+}
+
+/** Longest callee text kept before it is cut. */
+const MAX_CALLEE_TEXT = 96;
+
+/** The call node a site belongs to: climb from the callee to the call. A few levels cover a member chain. */
+function callAt(root: SyntaxNode, source: string, line: number, column: number | null, callee?: string): SyntaxNode | null {
   const row = line - 1;
-  const col = column ?? firstNonBlankColumn(source, row);
-  const start = innermostAt(root, row, col);
-  if (!start) return null;
-  // The site's position is on the callee (`setItemAsync` in
-  // `SecureStore.setItemAsync(…)`): climb to the call it belongs to. A few
-  // levels cover a member chain; further up would be another statement.
-  let call: SyntaxNode | null = null;
-  let node: SyntaxNode | null = start;
-  for (let up = 0; node && up < 6; up++, node = node.parent) {
-    if (CALL_TYPES.has(node.type)) {
-      call = node;
-      break;
+  // The recorded column may sit a character off the callee (a 1-based
+  // column, the space before `prisma`): a near miss is tried before giving up.
+  const columns = column === null ? [firstNonBlankColumn(source, row)] : [column, column + 1, Math.max(0, column - 1), firstNonBlankColumn(source, row)];
+  const want = callee ? callee.split(/[.:]/).pop() ?? callee : null;
+  for (const col of columns) {
+    const start = innermostAt(root, row, col);
+    if (!start) continue;
+    let node: SyntaxNode | null = start;
+    let first: SyntaxNode | null = null;
+    for (let up = 0; node && up < 10; up++, node = node.parent) {
+      if (!CALL_TYPES.has(node.type)) continue;
+      if (!first) first = node;
+      if (want === null) return node;
+      // A chain's position is its start: `res.status(201).json(…)` at `res`
+      // meets `res.status(…)` first; the call that is THIS one names `json`.
+      const container = argumentsOf(node);
+      const text = container ? calleeChainText(node, container) : '';
+      if ((text.replace(/\([^()]*\)/g, '').split(/[.:]/).pop() ?? '') === want) return node;
     }
+    if (first) return first;
   }
+  return null;
+}
+
+export function callSiteInTree(root: SyntaxNode, source: string, line: number, column: number | null, want?: string): CallSiteText | null {
+  const call = callAt(root, source, line, column, want);
   if (!call) return null;
   const container = argumentsOf(call);
   if (!container) return null;
-  if (container.type === 'lambda_literal') return '{ … }';
+  const callee = calleeChainText(call, container);
+  if (container.type === 'lambda_literal') return { callee, args: '{ … }', argList: ['{ … }'] };
   const parts: string[] = [];
   for (let i = 0; i < container.namedChildCount; i++) {
     const c = container.namedChild(i);
@@ -355,7 +479,68 @@ export function callArgumentsInTree(
     parts.push(abbreviateArgument(c, source));
   }
   const text = parts.join(', ');
-  return text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text;
+  return { callee, args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text, argList: parts };
+}
+
+/** The text of a call before its arguments, normalised to a member chain. */
+function calleeChainText(call: SyntaxNode, container: SyntaxNode): string {
+  // Kotlin and Swift wrap the arguments in a `call_suffix`; the callee is
+  // everything before that suffix.
+  let end = container.startIndex;
+  const suffix = container.parent && container.parent.type === 'call_suffix' ? container.parent : null;
+  if (suffix) end = suffix.startIndex;
+  let text = collapse(call.text.slice(0, Math.max(0, end - call.startIndex)));
+  text = text.replace(/^(?:await|new|yield|return)\s+/, '').replace(/^(?:await|new)\s+/, '');
+  // Empty every nested argument list, innermost first: `a(b(c)).d` → `a().d`
+  // — keeping one short literal or name (`res.status(404).json`,
+  // `ResponseEntity.status(HttpStatus.NOT_FOUND).body`), which is the fact a
+  // reader of the chain wants.
+  for (let i = 0; i < 6 && /\([^()]*\)/.test(text); i++) {
+    text = text.replace(/\(([^()]*)\)/g, (_m, inner: string) => (/^\s*[\w.]{1,28}\s*$/.test(inner) ? `(${inner.trim()})` : '()'));
+  }
+  text = text
+    .replace(/\?\./g, '.')
+    .replace(/!\./g, '.')
+    .replace(/\s+/g, '')
+    .replace(/<[^<>]*>/g, '')
+    .replace(/\([^()]*\)$/, '');
+  return text.length > MAX_CALLEE_TEXT ? `${text.slice(0, MAX_CALLEE_TEXT - 1)}…` : text;
+}
+
+/** Both halves of every site, keyed by {@link siteKey}, from one cached tree. */
+export async function callSitesForFile(
+  absPath: string,
+  language: Language,
+  sites: readonly CallSite[]
+): Promise<Map<string, CallSiteText>> {
+  const out = new Map<string, CallSiteText>();
+  if (!supportsBranchGuards(language) || sites.length === 0) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  for (const site of sites) {
+    const key = siteKey(site);
+    if (out.has(key)) continue;
+    const found = callSiteInTree(cached.tree.rootNode, cached.source, site.line, site.column ?? null, site.callee);
+    if (found !== null) out.set(key, found);
+  }
+  return out;
+}
+
+/** {@link callSitesForFile} over source text — the test surface. */
+export async function callSiteInSource(
+  source: string,
+  language: Language,
+  line: number,
+  column: number | null
+): Promise<CallSiteText | null> {
+  if (!supportsBranchGuards(language)) return null;
+  const tree = await parse(source, language);
+  if (!tree) return null;
+  try {
+    return callSiteInTree(tree.rootNode, source, line, column);
+  } finally {
+    tree.delete();
+  }
 }
 
 /** The node holding a call's arguments: the `arguments` field, a container child, or Swift's `call_suffix` contents. */
@@ -379,6 +564,24 @@ function argumentsOf(call: SyntaxNode): SyntaxNode | null {
 
 function abbreviateArgument(node: SyntaxNode, source: string): string {
   const type = node.type;
+  // Python `name=value`, C# `name: value` — the name is half the meaning.
+  if (type === 'keyword_argument') {
+    const name = node.childForFieldName('name');
+    const value = node.childForFieldName('value');
+    return `${name?.text ?? ''}=${value ? abbreviateArgument(value, source) : ''}`;
+  }
+  if (type === 'argument') {
+    // C#: an `argument` wraps the expression, optionally with a name.
+    const name = node.childForFieldName('name');
+    const inner = lastNamed(node);
+    const value = inner ? abbreviateArgument(inner, source) : cut(collapse(node.text), MAX_ARG_TEXT);
+    return name && inner && name.id !== inner.id ? `${name.text}: ${value}` : value;
+  }
+  // Go `gin.H{"error": err}` / `User{Name: n}`: the type, then the braces.
+  if (type === 'composite_literal') {
+    const t = node.childForFieldName('type');
+    return `${t ? cut(collapse(t.text), 24) : ''}{…}`;
+  }
   if (STRING_TYPES.has(type)) return cut(collapse(node.text), MAX_ARG_TEXT);
   if (OBJECT_TYPES.has(type)) return objectKeys(node, source);
   if (ARRAY_TYPES.has(type)) return '[…]';
@@ -406,7 +609,7 @@ function abbreviateArgument(node: SyntaxNode, source: string): string {
     }
     return named.length > 0 ? abbreviateArgument(named[named.length - 1]!, source) : cut(collapse(node.text), MAX_ARG_TEXT);
   }
-  if (type === 'lambda_argument' || type === 'trailing_closure') return '{ … }';
+  if (type === 'lambda_argument' || type === 'trailing_closure' || type === 'annotated_lambda') return '{ … }';
   return cut(collapse(node.text), MAX_ARG_TEXT);
 }
 
@@ -446,11 +649,20 @@ function objectKeys(node: SyntaxNode, source: string): string {
  * (`useEffect`, `setTimeout`, `addListener('x')`, `.then`).
  */
 export interface SiteTrigger {
-  kind: 'prop' | 'option' | 'callback';
-  /** `onPress`, `onSubmit`, `useEffect`, `addListener`. */
+  /**
+   * `prop` / `option` / `callback` are read at the site (below). `request`
+   * (a route: `name` the verb, `of` the path), `decorator` (`@Process('email')`:
+   * `name` the decorator, `of` its literal argument) and `load` (a page's own
+   * load-time work) are set by the Steps endpoint from the registration
+   * site, not read from the tree.
+   */
+  kind: 'prop' | 'option' | 'callback' | 'request' | 'decorator' | 'load';
+  /** `onPress`, `onSubmit`, `useEffect`, `addListener`, `POST`, `Process`. */
   name: string;
   /** `Button` for a prop, `useFormik` for an option, the first string argument for a callback; null when unknown. */
   of: string | null;
+  /** What runs before it fires — the middleware / guard chain at the registration site, in order. */
+  after?: string[];
 }
 
 /** Callees whose function argument runs LATER — a callback, not a call. Matched on the last segment. */
@@ -654,7 +866,8 @@ export function guardsInTree(
   }
   let node: SyntaxNode | null = innermostAt(root, row, col);
   if (!node) return [];
-  const rules: Rules = language === 'swift' ? SWIFT : JS;
+  const rules = RULES_BY_LANGUAGE.get(language);
+  if (!rules) return [];
   const found: BranchGuard[] = [];
 
   // Innermost → outermost. `found` is reversed at the end, so within one level
@@ -736,6 +949,9 @@ function condText(node: SyntaxNode | null | undefined): string {
   // `(x)` — the parens are the statement's, not the condition's.
   while (n.type === 'parenthesized_expression' && n.namedChildCount === 1) n = n.namedChild(0)!;
   const text = n.text.replace(/\s+/g, ' ').trim();
+  // A bare keyword is a grammar's error recovery (`let` from an `if let` it
+  // could not parse), never a condition a reader can use.
+  if (/^(?:let|var|case|try|await|guard|if|else|some|any)$/.test(text)) return '';
   return text.length > MAX_TEXT ? text.slice(0, MAX_TEXT - 1) + '…' : text;
 }
 
@@ -894,6 +1110,7 @@ function swiftConditions(node: SyntaxNode): { node: SyntaxNode | null; text: str
   const last = parts[parts.length - 1]!;
   const raw = node.text.slice(first.startIndex - node.startIndex, last.endIndex - node.startIndex);
   const text = raw.replace(/\s+/g, ' ').trim();
+  if (/^(?:let|var|case|try|await)$/.test(text)) return { node: null, text: '' };
   return { node: first, text: text.length > MAX_TEXT ? text.slice(0, MAX_TEXT - 1) + '…' : text };
 }
 
@@ -971,4 +1188,816 @@ const SWIFT: Rules = {
 function indexOf(parent: SyntaxNode, child: SyntaxNode): number {
   for (let i = 0; i < parent.childCount; i++) if (parent.child(i)!.id === child.id) return i;
   return -1;
+}
+
+/** The named children of a node, in order. */
+function namedChildren(node: SyntaxNode): SyntaxNode[] {
+  const out: SyntaxNode[] = [];
+  for (let i = 0; i < node.namedChildCount; i++) out.push(node.namedChild(i)!);
+  return out;
+}
+
+/**
+ * Shared shape of "an early exit before the site": the preceding statements
+ * of the block that are an `if` with no else whose body always leaves.
+ */
+function guardsBefore(
+  parent: SyntaxNode,
+  child: SyntaxNode,
+  out: BranchGuard[],
+  isIf: (s: SyntaxNode) => boolean,
+  hasElse: (s: SyntaxNode) => boolean,
+  body: (s: SyntaxNode) => SyntaxNode | null,
+  alwaysExits: (b: SyntaxNode | null) => boolean,
+  condition: (s: SyntaxNode) => { node: SyntaxNode | null; text: string }
+): void {
+  const before = precedingSiblings(parent, child);
+  for (let i = before.length - 1; i >= 0; i--) {
+    const s = before[i]!;
+    if (!isIf(s) || hasElse(s)) continue;
+    if (!alwaysExits(body(s))) continue;
+    const c = condition(s);
+    push(out, guard('guard', c.node, true, c.text));
+  }
+}
+
+// ------------------------------------------------------------------- Python --
+
+const PY_EXITS = new Set(['return_statement', 'raise_statement', 'break_statement', 'continue_statement']);
+
+function pyAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (PY_EXITS.has(node.type)) return true;
+  if (node.type === 'block') return pyAlwaysExits(lastNamed(node));
+  return false;
+}
+
+function pyOperator(node: SyntaxNode): string {
+  const field = node.childForFieldName('operator');
+  if (field) return field.text;
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i)!;
+    if (!c.isNamed && (c.text === 'and' || c.text === 'or')) return c.text;
+  }
+  return '';
+}
+
+const PYTHON: Rules = {
+  boundaries: new Set(['function_definition', 'class_definition', 'module']),
+  inlineFunctions: new Set(['lambda']),
+  bindingParents: new Set(['assignment', 'augmented_assignment']),
+  blocks: new Set(['block', 'module']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_statement': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('if', cond, false));
+        else if (child.type === 'elif_clause' || child.type === 'else_clause') {
+          // An elif/else arm runs when the `if` and every earlier elif failed.
+          push(out, guard('else', cond, true));
+          for (const s of precedingSiblings(parent, child)) {
+            if (s.type === 'elif_clause') push(out, guard('else', s.childForFieldName('condition'), true));
+          }
+        }
+        return;
+      }
+      case 'elif_clause': {
+        if (isField(parent, 'consequence', child)) push(out, guard('if', parent.childForFieldName('condition'), false));
+        return;
+      }
+      case 'conditional_expression': {
+        // `a if cond else b`: children are [a, cond, b].
+        const kids = namedChildren(parent);
+        if (kids.length < 3) return;
+        if (child.id === kids[0]!.id) push(out, guard('ternary', kids[1], false));
+        else if (child.id === kids[2]!.id) push(out, guard('ternary', kids[1], true));
+        return;
+      }
+      case 'case_clause': {
+        if (isField(parent, 'consequence', child)) {
+          const stmt = parent.parent?.parent;
+          const subject = condText(stmt?.childForFieldName('subject'));
+          const pattern = namedChildren(parent).find((n) => n.type === 'case_pattern');
+          const value = pattern ? condText(pattern) : '';
+          const isDefault = value === '_' || value === '';
+          const text = isDefault ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
+          push(out, guard('case', pattern ?? null, false, text));
+        }
+        return;
+      }
+      case 'boolean_operator': {
+        if (!isField(parent, 'right', child)) return;
+        const op = pyOperator(parent);
+        const left = parent.childForFieldName('left');
+        if (op === 'and') push(out, guard('and', left, false));
+        else if (op === 'or') push(out, guard('or', left, true));
+        return;
+      }
+      case 'except_clause':
+      case 'except_group_clause':
+        if (child.type === 'block') push(out, guard('catch', null, false, 'on error'));
+        return;
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_statement',
+      (s) => namedChildren(s).some((n) => n.type === 'elif_clause' || n.type === 'else_clause'),
+      (s) => s.childForFieldName('consequence'),
+      pyAlwaysExits,
+      (s) => ({ node: s.childForFieldName('condition'), text: condText(s.childForFieldName('condition')) })
+    );
+  },
+};
+
+// --------------------------------------------------------------------- Java --
+
+const JAVA_EXITS = new Set(['return_statement', 'throw_statement', 'break_statement', 'continue_statement', 'yield_statement']);
+
+function javaAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (JAVA_EXITS.has(node.type)) return true;
+  if (node.type === 'block') return javaAlwaysExits(lastNamed(node));
+  return false;
+}
+
+/** `case A:` / `case A ->` / `default` labels of a Java switch group or rule, as one condition text. */
+function javaCaseText(labels: SyntaxNode[], subject: string): string {
+  const values = labels.map((l) => namedChildren(l).map((n) => condText(n)).filter(Boolean).join(', ')).filter(Boolean);
+  if (values.length === 0) return subject ? `${subject}: default` : 'default';
+  const value = values.join(', ');
+  return subject ? `${subject} == ${value}` : value;
+}
+
+const JAVA: Rules = {
+  boundaries: new Set([
+    'method_declaration',
+    'constructor_declaration',
+    'class_declaration',
+    'class_body',
+    'interface_declaration',
+    'enum_declaration',
+    'record_declaration',
+    'program',
+  ]),
+  inlineFunctions: new Set(['lambda_expression']),
+  bindingParents: new Set(['variable_declarator', 'assignment_expression', 'field_declaration']),
+  blocks: new Set(['block', 'switch_block_statement_group', 'program', 'constructor_body']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_statement': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('if', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('else', cond, true));
+        return;
+      }
+      case 'ternary_expression': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('ternary', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('ternary', cond, true));
+        return;
+      }
+      case 'switch_block_statement_group':
+      case 'switch_rule': {
+        if (child.type === 'switch_label') return;
+        const stmt = parent.parent?.parent;
+        const subject = condText(stmt?.childForFieldName('condition'));
+        const labels = namedChildren(parent).filter((n) => n.type === 'switch_label');
+        push(out, guard('case', labels[0] ?? null, false, javaCaseText(labels, subject)));
+        return;
+      }
+      case 'binary_expression': {
+        if (!isField(parent, 'right', child)) return;
+        const op = parent.childForFieldName('operator')?.text;
+        const left = parent.childForFieldName('left');
+        if (op === '&&') push(out, guard('and', left, false));
+        else if (op === '||') push(out, guard('or', left, true));
+        return;
+      }
+      case 'catch_clause':
+        if (isField(parent, 'body', child)) push(out, guard('catch', null, false, 'on error'));
+        return;
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_statement',
+      (s) => !!s.childForFieldName('alternative'),
+      (s) => s.childForFieldName('consequence'),
+      javaAlwaysExits,
+      (s) => ({ node: s.childForFieldName('condition'), text: condText(s.childForFieldName('condition')) })
+    );
+  },
+};
+
+// ------------------------------------------------------------------- Kotlin --
+
+function ktAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (node.type === 'jump_expression') return true;
+  if (node.type === 'control_structure_body' || node.type === 'statements') return ktAlwaysExits(lastNamed(node));
+  return false;
+}
+
+/** The two arms of a Kotlin `if`: the bodies, in order (then, else). */
+function ktArms(ifExpr: SyntaxNode): SyntaxNode[] {
+  return namedChildren(ifExpr).filter((n) => n.type === 'control_structure_body');
+}
+
+const KOTLIN: Rules = {
+  boundaries: new Set([
+    'function_declaration',
+    'secondary_constructor',
+    'class_declaration',
+    'class_body',
+    'object_declaration',
+    'getter',
+    'setter',
+    'source_file',
+  ]),
+  inlineFunctions: new Set(['lambda_literal', 'anonymous_function']),
+  bindingParents: new Set(['property_declaration', 'assignment']),
+  blocks: new Set(['statements', 'function_body', 'source_file']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_expression': {
+        const kids = namedChildren(parent);
+        const cond = kids[0] ?? null;
+        if (cond && child.id === cond.id) return;
+        const arms = ktArms(parent);
+        if (arms[0] && child.id === arms[0].id) push(out, guard('if', cond, false));
+        else if (arms[1] && child.id === arms[1].id) push(out, guard('else', cond, true));
+        return;
+      }
+      case 'when_entry': {
+        if (child.type !== 'control_structure_body') return;
+        const when = parent.parent;
+        const subject = condText(namedChildren(when!).find((n) => n.type === 'when_subject')).replace(/^\((.*)\)$/, '$1');
+        const conds = namedChildren(parent).filter((n) => n.type === 'when_condition');
+        if (conds.length === 0) push(out, guard('case', null, false, subject ? `${subject}: else` : 'else'));
+        else {
+          const value = conds.map((c) => condText(c)).join(', ');
+          push(out, guard('case', conds[0]!, false, subject ? `${subject} == ${value}` : value));
+        }
+        return;
+      }
+      case 'conjunction_expression':
+      case 'disjunction_expression': {
+        const kids = namedChildren(parent);
+        if (kids.length < 2 || child.id !== kids[kids.length - 1]!.id) return;
+        const left = kids[0]!;
+        if (parent.type === 'conjunction_expression') push(out, guard('and', left, false));
+        else push(out, guard('or', left, true));
+        return;
+      }
+      case 'catch_block':
+        if (child.type === 'statements') push(out, guard('catch', null, false, 'on error'));
+        return;
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_expression',
+      (s) => ktArms(s).length > 1,
+      (s) => ktArms(s)[0] ?? null,
+      ktAlwaysExits,
+      (s) => {
+        const cond = namedChildren(s)[0] ?? null;
+        return { node: cond, text: condText(cond) };
+      }
+    );
+  },
+};
+
+// ----------------------------------------------------------------------- C# --
+
+const CS_EXITS = new Set(['return_statement', 'throw_statement', 'break_statement', 'continue_statement']);
+
+function csAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (CS_EXITS.has(node.type)) return true;
+  if (node.type === 'block') return csAlwaysExits(lastNamed(node));
+  return false;
+}
+
+const CSHARP: Rules = {
+  boundaries: new Set([
+    'method_declaration',
+    'constructor_declaration',
+    'local_function_statement',
+    'class_declaration',
+    'struct_declaration',
+    'record_declaration',
+    'interface_declaration',
+    'declaration_list',
+    'property_declaration',
+    'accessor_declaration',
+    'compilation_unit',
+  ]),
+  inlineFunctions: new Set(['lambda_expression', 'anonymous_method_expression']),
+  bindingParents: new Set(['variable_declarator', 'assignment_expression', 'equals_value_clause']),
+  blocks: new Set(['block', 'switch_section', 'compilation_unit']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_statement': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('if', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('else', cond, true));
+        return;
+      }
+      case 'conditional_expression': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('ternary', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('ternary', cond, true));
+        return;
+      }
+      case 'switch_section': {
+        const isLabel = (n: SyntaxNode) => /pattern$|switch_label$/.test(n.type);
+        if (isLabel(child)) return;
+        const stmt = parent.parent?.parent;
+        const subject = condText(stmt?.childForFieldName('value'));
+        const labels = namedChildren(parent).filter(isLabel);
+        const value = labels.map((l) => condText(l)).filter(Boolean).join(', ');
+        const text = value === '' ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
+        push(out, guard('case', labels[0] ?? null, false, text));
+        return;
+      }
+      case 'switch_expression_arm': {
+        if (!isField(parent, 'expression', child)) return;
+        const subject = condText(parent.parent?.childForFieldName('value'));
+        const pattern = parent.childForFieldName('pattern');
+        const value = condText(pattern);
+        const text = value === '_' || value === '' ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
+        push(out, guard('case', pattern, false, text));
+        return;
+      }
+      case 'binary_expression': {
+        if (!isField(parent, 'right', child)) return;
+        const op = parent.childForFieldName('operator')?.text;
+        const left = parent.childForFieldName('left');
+        if (op === '&&') push(out, guard('and', left, false));
+        else if (op === '||') push(out, guard('or', left, true));
+        return;
+      }
+      case 'catch_clause':
+        if (isField(parent, 'body', child)) push(out, guard('catch', null, false, 'on error'));
+        return;
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_statement',
+      (s) => !!s.childForFieldName('alternative'),
+      (s) => s.childForFieldName('consequence'),
+      csAlwaysExits,
+      (s) => ({ node: s.childForFieldName('condition'), text: condText(s.childForFieldName('condition')) })
+    );
+  },
+};
+
+// ----------------------------------------------------------------------- Go --
+
+const GO_EXITS = new Set(['return_statement', 'break_statement', 'continue_statement', 'goto_statement']);
+
+function goAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (GO_EXITS.has(node.type)) return true;
+  if (node.type === 'block') return goAlwaysExits(lastNamed(node));
+  if (node.type === 'expression_statement') {
+    const call = node.namedChild(0);
+    const fn = call?.type === 'call_expression' ? call.childForFieldName('function')?.text : '';
+    return fn === 'panic' || fn === 'os.Exit' || fn === 'log.Fatal' || fn === 'log.Fatalf' || fn === 'log.Fatalln';
+  }
+  return false;
+}
+
+const GO: Rules = {
+  boundaries: new Set(['function_declaration', 'method_declaration', 'source_file']),
+  inlineFunctions: new Set(['func_literal']),
+  bindingParents: new Set(['short_var_declaration', 'var_spec', 'assignment_statement', 'const_spec']),
+  blocks: new Set(['block', 'expression_case', 'default_case', 'type_case', 'communication_case', 'source_file']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_statement': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('if', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('else', cond, true));
+        return;
+      }
+      case 'expression_case':
+      case 'type_case':
+      case 'communication_case': {
+        const value = parent.childForFieldName('value') ?? parent.childForFieldName('type') ?? parent.childForFieldName('communication');
+        if (value && child.id === value.id) return;
+        const stmt = parent.parent;
+        const subject = condText(stmt?.childForFieldName('value'));
+        const v = condText(value);
+        if (parent.type === 'communication_case') push(out, guard('case', value, false, v));
+        else push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v));
+        return;
+      }
+      case 'default_case': {
+        const stmt = parent.parent;
+        const subject = condText(stmt?.childForFieldName('value'));
+        push(out, guard('case', stmt?.childForFieldName('value'), false, subject ? `${subject}: default` : 'default'));
+        return;
+      }
+      case 'binary_expression': {
+        if (!isField(parent, 'right', child)) return;
+        const op = parent.childForFieldName('operator')?.text;
+        const left = parent.childForFieldName('left');
+        if (op === '&&') push(out, guard('and', left, false));
+        else if (op === '||') push(out, guard('or', left, true));
+        return;
+      }
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_statement',
+      (s) => !!s.childForFieldName('alternative'),
+      (s) => s.childForFieldName('consequence'),
+      goAlwaysExits,
+      (s) => ({ node: s.childForFieldName('condition'), text: condText(s.childForFieldName('condition')) })
+    );
+  },
+};
+
+// -------------------------------------------------------------------- C/C++ --
+
+const C_EXITS = new Set(['return_statement', 'break_statement', 'continue_statement', 'goto_statement', 'throw_statement']);
+
+function cAlwaysExits(node: SyntaxNode | null): boolean {
+  if (!node) return false;
+  if (C_EXITS.has(node.type)) return true;
+  if (node.type === 'compound_statement') return cAlwaysExits(lastNamed(node));
+  if (node.type === 'expression_statement') {
+    const call = node.namedChild(0);
+    const fn = call?.type === 'call_expression' ? call.childForFieldName('function')?.text : '';
+    return fn === 'exit' || fn === '_exit' || fn === 'abort' || fn === 'longjmp';
+  }
+  return false;
+}
+
+const C: Rules = {
+  boundaries: new Set([
+    'function_definition',
+    'class_specifier',
+    'struct_specifier',
+    'namespace_definition',
+    'translation_unit',
+    'field_declaration_list',
+  ]),
+  inlineFunctions: new Set(['lambda_expression']),
+  bindingParents: new Set(['init_declarator', 'assignment_expression']),
+  blocks: new Set(['compound_statement', 'case_statement', 'translation_unit']),
+
+  enclosing(parent, child, out) {
+    switch (parent.type) {
+      case 'if_statement': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('if', cond, false));
+        else if (isField(parent, 'alternative', child) || child.type === 'else_clause') push(out, guard('else', cond, true));
+        return;
+      }
+      case 'conditional_expression': {
+        const cond = parent.childForFieldName('condition');
+        if (isField(parent, 'consequence', child)) push(out, guard('ternary', cond, false));
+        else if (isField(parent, 'alternative', child)) push(out, guard('ternary', cond, true));
+        return;
+      }
+      case 'case_statement': {
+        const value = parent.childForFieldName('value');
+        if (value && child.id === value.id) return;
+        const stmt = parent.parent?.parent;
+        const subject = condText(stmt?.childForFieldName('condition'));
+        if (!value) push(out, guard('case', stmt?.childForFieldName('condition'), false, subject ? `${subject}: default` : 'default'));
+        else {
+          const v = condText(value);
+          push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v));
+        }
+        return;
+      }
+      case 'binary_expression': {
+        if (!isField(parent, 'right', child)) return;
+        const op = parent.childForFieldName('operator')?.text;
+        const left = parent.childForFieldName('left');
+        if (op === '&&') push(out, guard('and', left, false));
+        else if (op === '||') push(out, guard('or', left, true));
+        return;
+      }
+      case 'catch_clause':
+        if (isField(parent, 'body', child)) push(out, guard('catch', null, false, 'on error'));
+        return;
+      default:
+        return;
+    }
+  },
+
+  earlyExits(parent, child, out) {
+    guardsBefore(
+      parent,
+      child,
+      out,
+      (s) => s.type === 'if_statement',
+      (s) => !!s.childForFieldName('alternative') || namedChildren(s).some((n) => n.type === 'else_clause'),
+      (s) => s.childForFieldName('consequence'),
+      cAlwaysExits,
+      (s) => ({ node: s.childForFieldName('condition'), text: condText(s.childForFieldName('condition')) })
+    );
+  },
+};
+
+/** The rules per language. A language absent here yields no guards — never a wrong one. */
+const RULES_BY_LANGUAGE: ReadonlyMap<Language, Rules> = new Map<Language, Rules>([
+  ['typescript', JS],
+  ['tsx', JS],
+  ['javascript', JS],
+  ['jsx', JS],
+  ['swift', SWIFT],
+  ['python', PYTHON],
+  ['java', JAVA],
+  ['kotlin', KOTLIN],
+  ['csharp', CSHARP],
+  ['go', GO],
+  ['c', C],
+  ['cpp', C],
+  ['objc', C],
+]);
+
+// =============================================================================
+// Decorators — what is written on a definition
+// =============================================================================
+
+/**
+ * The decorators / annotations / attributes on the definition at a line, and
+ * on the class that holds it: `UseGuards(AuthGuard('jwt'))`,
+ * `PreAuthorize("hasRole('ADMIN')")`, `HttpPost("items")`, `Process('email')`.
+ * Text as written, without the `@` or the brackets, whitespace collapsed,
+ * capped. The index keeps no decorators, so they are read here at request
+ * time like the guards.
+ */
+export interface DefinitionDecorators {
+  own: string[];
+  /** The enclosing class's, when the definition is a member. */
+  class: string[];
+}
+
+const DEFINITION_TYPES: ReadonlySet<string> = new Set([
+  'function_declaration',
+  'function_definition',
+  'method_definition',
+  'method_declaration',
+  'constructor_declaration',
+  'class_declaration',
+  'class_definition',
+  'decorated_definition',
+  'local_function_statement',
+  'lexical_declaration',
+  'variable_declaration',
+  'public_field_definition',
+]);
+const CLASS_TYPES: ReadonlySet<string> = new Set(['class_declaration', 'class_definition', 'class', 'object_declaration', 'struct_declaration', 'record_declaration']);
+const DECORATOR_TYPES: ReadonlySet<string> = new Set(['decorator', 'annotation', 'marker_annotation', 'attribute']);
+const MAX_DECORATOR_TEXT = 80;
+
+export async function decoratorsForFile(
+  absPath: string,
+  language: Language,
+  lines: readonly number[]
+): Promise<Map<number, DefinitionDecorators>> {
+  const out = new Map<number, DefinitionDecorators>();
+  if (!supportsBranchGuards(language) || lines.length === 0) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  for (const line of lines) {
+    if (out.has(line)) continue;
+    const found = decoratorsInTree(cached.tree.rootNode, cached.source, line);
+    if (found !== null) out.set(line, found);
+  }
+  return out;
+}
+
+/** {@link decoratorsForFile} over source text — the test surface. */
+export async function decoratorsInSource(source: string, language: Language, line: number): Promise<DefinitionDecorators | null> {
+  if (!supportsBranchGuards(language)) return null;
+  const tree = await parse(source, language);
+  if (!tree) return null;
+  try {
+    return decoratorsInTree(tree.rootNode, source, line);
+  } finally {
+    tree.delete();
+  }
+}
+
+export function decoratorsInTree(root: SyntaxNode, source: string, line: number): DefinitionDecorators | null {
+  const row = line - 1;
+  const col = firstNonBlankColumn(source, row);
+  let node: SyntaxNode | null = innermostAt(root, row, col);
+  if (!node) return null;
+  // Up to the definition the line belongs to.
+  let definition: SyntaxNode | null = null;
+  for (let up = 0; node && up < 12; up++, node = node.parent) {
+    if (DEFINITION_TYPES.has(node.type)) {
+      definition = node;
+      break;
+    }
+  }
+  if (!definition) return null;
+  // A Python decorated function is the child of the node that holds the decorators.
+  const holder = definition.parent && definition.parent.type === 'decorated_definition' ? definition.parent : definition;
+  const own = decoratorsOn(holder);
+  let cls: SyntaxNode | null = holder.parent;
+  for (let up = 0; cls && up < 6 && !CLASS_TYPES.has(cls.type); up++) cls = cls.parent;
+  const clsHolder = cls && cls.parent && cls.parent.type === 'decorated_definition' ? cls.parent : cls;
+  return { own, class: clsHolder ? decoratorsOn(clsHolder) : [] };
+}
+
+/** Decorator texts on one definition node: its own leading decorator children, its modifiers/attribute lists, or the siblings before it. */
+function decoratorsOn(definition: SyntaxNode): string[] {
+  const out: string[] = [];
+  const add = (n: SyntaxNode) => {
+    if (n.type === 'attribute_list') {
+      for (const a of namedChildren(n)) if (a.type === 'attribute') out.push(decoratorText(a));
+      return;
+    }
+    if (DECORATOR_TYPES.has(n.type)) out.push(decoratorText(n));
+  };
+  for (const c of namedChildren(definition)) {
+    if (c.type === 'modifiers') for (const m of namedChildren(c)) add(m);
+    else add(c);
+  }
+  // JS: decorators are siblings that precede the member in the class body.
+  if (out.length === 0 && definition.parent) {
+    const before = precedingSiblings(definition.parent, definition);
+    for (let i = before.length - 1; i >= 0; i--) {
+      const s = before[i]!;
+      if (s.type !== 'decorator') break;
+      out.unshift(decoratorText(s));
+    }
+  }
+  return out;
+}
+
+function decoratorText(node: SyntaxNode): string {
+  let text = collapse(node.text).replace(/^@\s*/, '');
+  if (node.type === 'attribute_list') text = text.replace(/^\[|\]$/g, '');
+  return cut(text, MAX_DECORATOR_TEXT);
+}
+
+
+// =============================================================================
+// Member types — what a class declares its members to be
+// =============================================================================
+
+/**
+ * The declared types of a class's members, read from the tree: the
+ * constructor's parameter properties (`private readonly usersService:
+ * UsersService`), its fields (`private final OwnerRepository owners`,
+ * `val owners: OwnerRepository`, `private readonly IRepo _repo`), its typed
+ * properties. The index keeps no type for these, and a member call the
+ * extractor kept only the last segment of (`this.usersService.findByEmail`
+ * → `findByEmail`) resolves by name alone; the declared type is what says
+ * where it really goes, and whether it leaves the index.
+ *
+ * Keyed by member name, the type as written without generics'
+ * arguments (`Repository<Cat>` → `Repository<Cat>` is kept whole; callers
+ * strip what they need).
+ */
+export async function memberTypesForFile(absPath: string, language: Language, line: number): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!supportsBranchGuards(language)) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  return memberTypesInTree(cached.tree.rootNode, cached.source, line);
+}
+
+/** {@link memberTypesForFile} over source text — the test surface. */
+export async function memberTypesInSource(source: string, language: Language, line: number): Promise<Map<string, string>> {
+  if (!supportsBranchGuards(language)) return new Map();
+  const tree = await parse(source, language);
+  if (!tree) return new Map();
+  try {
+    return memberTypesInTree(tree.rootNode, source, line);
+  } finally {
+    tree.delete();
+  }
+}
+
+const CLASS_BODY_TYPES: ReadonlySet<string> = new Set(['class_body', 'declaration_list', 'field_declaration_list']);
+
+export function memberTypesInTree(root: SyntaxNode, source: string, line: number): Map<string, string> {
+  const out = new Map<string, string>();
+  const row = line - 1;
+  let node: SyntaxNode | null = innermostAt(root, row, firstNonBlankColumn(source, row));
+  let cls: SyntaxNode | null = null;
+  for (let up = 0; node && up < 16; up++, node = node.parent) {
+    if (CLASS_TYPES.has(node.type)) {
+      cls = node;
+      break;
+    }
+  }
+  if (!cls) return out;
+  const typeText = (n: SyntaxNode | null | undefined): string => (n ? collapse(n.text).replace(/^:\s*/, '').trim() : '');
+  const put = (name: string | null | undefined, type: string) => {
+    if (name && type && !out.has(name)) out.set(name, type);
+  };
+  const visitParams = (params: SyntaxNode | null) => {
+    if (!params) return;
+    for (const p of namedChildren(params)) {
+      // TS: `private readonly x: T` (a parameter property); Kotlin: `val x: T`; C#/Java: `T x` — a field of the same name may follow.
+      if (p.type === 'required_parameter' || p.type === 'optional_parameter') {
+        if (!namedChildren(p).some((c) => c.type === 'accessibility_modifier' || c.type === 'override_modifier') && !/^\s*(?:public|private|protected|readonly)\b/.test(p.text)) continue;
+        put(p.childForFieldName('pattern')?.text, typeText(p.childForFieldName('type')));
+      } else if (p.type === 'class_parameter') {
+        const kids = namedChildren(p);
+        const name = kids.find((c) => c.type === 'simple_identifier');
+        const type = kids.find((c) => c.type === 'user_type' || c.type === 'nullable_type');
+        if (kids.some((c) => c.type === 'binding_pattern_kind')) put(name?.text, typeText(type));
+      } else if (p.type === 'parameter' || p.type === 'formal_parameter') {
+        put(p.childForFieldName('name')?.text, typeText(p.childForFieldName('type')));
+      }
+    }
+  };
+  // Kotlin's primary constructor sits on the class node itself.
+  for (const c of namedChildren(cls)) if (c.type === 'primary_constructor') visitParams(namedChildren(c).find((n) => n.type === 'class_parameters') ?? c);
+  const body = namedChildren(cls).find((c) => CLASS_BODY_TYPES.has(c.type)) ?? cls.childForFieldName('body');
+  if (!body) return out;
+  for (const m of namedChildren(body)) {
+    switch (m.type) {
+      case 'public_field_definition':
+      case 'field_definition':
+        put(m.childForFieldName('name')?.text, typeText(m.childForFieldName('type')));
+        break;
+      case 'method_definition':
+        if (m.childForFieldName('name')?.text === 'constructor') visitParams(m.childForFieldName('parameters'));
+        break;
+      case 'field_declaration': {
+        // Java: `type` + `declarator`; C#: a `variable_declaration` inside.
+        const type = m.childForFieldName('type');
+        if (type) {
+          for (const d of namedChildren(m)) if (d.type === 'variable_declarator') put(d.childForFieldName('name')?.text, typeText(type));
+        } else {
+          const decl = namedChildren(m).find((c) => c.type === 'variable_declaration');
+          const t = decl?.childForFieldName('type');
+          for (const d of decl ? namedChildren(decl) : []) if (d.type === 'variable_declarator') put(d.childForFieldName('name')?.text, typeText(t));
+        }
+        break;
+      }
+      case 'property_declaration': {
+        // C#: `type` + `name`; Kotlin: `variable_declaration (name) (type)`.
+        const csType = m.childForFieldName('type');
+        if (csType) put(m.childForFieldName('name')?.text, typeText(csType));
+        else {
+          const decl = namedChildren(m).find((c) => c.type === 'variable_declaration');
+          const kids = decl ? namedChildren(decl) : [];
+          const name = kids.find((c) => c.type === 'simple_identifier');
+          const type = kids.find((c) => c.type === 'user_type' || c.type === 'nullable_type');
+          put(name?.text, typeText(type));
+        }
+        break;
+      }
+      case 'constructor_declaration':
+        visitParams(m.childForFieldName('parameters'));
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
 }

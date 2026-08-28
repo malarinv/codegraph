@@ -14,11 +14,16 @@ import type CodeGraph from '../../index';
 import type { Language } from '../../types';
 import {
   callArgumentsForFile,
+  callSitesForFile,
+  decoratorsForFile,
   guardLabel,
   guardsForFile,
+  memberTypesForFile,
   siteKey,
   supportsBranchGuards,
   triggersForFile,
+  type CallSiteText,
+  type DefinitionDecorators,
   type SiteTrigger,
 } from '../../graph/branch-guards';
 import { resolveProjectFile } from '../security';
@@ -96,6 +101,12 @@ export interface SiteReader {
   args(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string | null>;
   /** What fires the site — the JSX prop, `on*` option or runs-later call it is written under; null when nothing binds it. */
   trigger(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<SiteTrigger | null>;
+  /** The call as written (the whole member chain) and what it passes; null when unreadable. `callee` names the call when a position is shared. */
+  callSite(caller: { filePath: string; language: Language }, site: { line?: number; column?: number; callee?: string }): Promise<CallSiteText | null>;
+  /** The decorators / annotations / attributes on a definition, and on its class; null when unreadable. */
+  decorators(definition: { filePath: string; language: Language; startLine: number }): Promise<DefinitionDecorators | null>;
+  /** The declared types of the members of the class a definition belongs to, by member name; empty when unreadable. */
+  memberTypes(definition: { filePath: string; language: Language; startLine: number }): Promise<Map<string, string>>;
 }
 
 /**
@@ -150,6 +161,27 @@ export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 
       if (!file) return null;
       const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
       return (await triggersForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? null;
+    },
+    async callSite(caller, site) {
+      if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return null;
+      const file = resolve(caller);
+      if (!file) return null;
+      sites++;
+      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null, ...(site.callee ? { callee: site.callee } : {}) };
+      return (await callSitesForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? null;
+    },
+    async decorators(definition) {
+      // Not counted: one lookup per step, on a tree the walk has parsed anyway.
+      if (!definition.startLine || !supportsBranchGuards(definition.language)) return null;
+      const file = resolve(definition);
+      if (!file) return null;
+      return (await decoratorsForFile(file.abs, file.language, [definition.startLine])).get(definition.startLine) ?? null;
+    },
+    async memberTypes(definition) {
+      if (!definition.startLine || !supportsBranchGuards(definition.language)) return new Map();
+      const file = resolve(definition);
+      if (!file) return new Map();
+      return memberTypesForFile(file.abs, file.language, definition.startLine);
     },
   };
 }

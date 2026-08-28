@@ -712,17 +712,28 @@ export interface WireStepSite {
   when: string;
   /** What fires THIS site, when it differs from the link's first. */
   trigger?: WireStepTrigger;
+  /** For a response site: the status code it sends, when literal. */
+  status?: number;
 }
 
 /** What fires a step or a link: the event it is written under, and the function that writes it there. */
 export interface WireStepTrigger {
-  kind: 'prop' | 'option' | 'callback';
-  /** `onPress`, `onSubmit`, `useEffect`, `addListener`. */
+  /**
+   * `prop` / `option` / `callback`: a binding at the call site (JSX attribute,
+   * `on*` key, runs-later argument). `request`: the route a handler serves —
+   * `name` the verb, `of` the path. `decorator`: a decorator on the handler —
+   * `name` its name, `of` its literal argument (`@Process('email')`). `load`:
+   * a page's own load-time work — `of` the page path.
+   */
+  kind: 'prop' | 'option' | 'callback' | 'request' | 'decorator' | 'load';
+  /** `onPress`, `onSubmit`, `useEffect`, `addListener`, `POST`, `Process`. */
   name: string;
   /** `Button` for a prop, `useFormik` for an option, the first string argument for a callback; null when unknown. */
   of: string | null;
   /** The function the binding is written in. */
   in: string;
+  /** What runs before it fires: the middleware / guard chain, in order (`authenticate`, `validate(…)`). */
+  after?: string[];
 }
 
 export interface WireStep {
@@ -748,9 +759,27 @@ export interface WireStep {
   events?: string[];
   /** For a handler: what fires it. */
   trigger?: WireStepTrigger;
-  screen?: { path: string; component: WireNodeRef | null };
-  /** The calls one function makes into one category, and the function. */
-  effect?: { api: string; apis: string[]; category: string; by: WireNodeRef; line: number };
+  /**
+   * For a screen or an endpoint: its path and the symbol that serves it.
+   * `endpoint` when the route leads with an HTTP verb; `inline` when the
+   * handler is anonymous at the registration site (component is null).
+   */
+  screen?: { path: string; component: WireNodeRef | null; endpoint: boolean; inline: boolean };
+  /**
+   * The calls one function makes into one category, and the function. A
+   * database call names its model / table and read vs write when the call
+   * says; a response box lists the status codes its sites send.
+   */
+  effect?: {
+    api: string;
+    apis: string[];
+    category: string;
+    by: WireNodeRef;
+    line: number;
+    model?: string;
+    access?: 'read' | 'write';
+    statuses?: number[];
+  };
 }
 
 export interface WireStepLink {
@@ -775,6 +804,8 @@ export interface WireStepsPayload {
   anchor: WireNodeRef;
   /** Other symbols that share the anchor's name, when it was given by name. */
   ambiguous: WireNodeRef[];
+  /** An `app` of screens, an `api` of endpoints, or a `web` app with both — the viewer's words follow it. */
+  project: 'app' | 'api' | 'web';
   steps: WireStep[];
   links: WireStepLink[];
   depth: number;

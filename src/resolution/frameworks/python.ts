@@ -242,6 +242,22 @@ export const fastapiResolver: FrameworkResolver = {
       const content = context.readFile(file);
       if (content && content.includes('FastAPI(')) return true;
     }
+    // A service that is one directory of a monorepo (`backend/pyproject.toml`,
+    // `backend/app/main.py`): its manifest or its app object sits below the root.
+    let looked = 0;
+    for (const file of context.getAllFiles()) {
+      const norm = file.replace(/\\/g, '/');
+      const base = norm.slice(norm.lastIndexOf('/') + 1);
+      if (base === 'requirements.txt' || base === 'pyproject.toml' || base === 'requirements-dev.txt') {
+        const content = context.readFile(file);
+        if (content && /\bfastapi\b/i.test(content)) return true;
+        if (++looked >= 40) break;
+      } else if ((base === 'main.py' || base === 'app.py' || base === 'api.py') && norm.split('/').length <= 4) {
+        const content = context.readFile(file);
+        if (content && content.includes('FastAPI(')) return true;
+        if (++looked >= 40) break;
+      }
+    }
     return false;
   },
 

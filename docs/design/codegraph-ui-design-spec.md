@@ -482,6 +482,37 @@ hubs (fan-in ≥ 40) and shared chrome (a component rendered by ≥ 5 parents �
 attributes navigations rather than deciding what to walk into) are dead ends, counted in `truncated`. A step several
 events land on says `⇠ first +N` and lists them in the panel.
 
+**Servers (Express, NestJS, Fastify, Koa, Hono, FastAPI, Flask, Django, Spring, ASP.NET, Vapor, Gin).** The same picture over
+the same machinery; only the facts and the words change (`src/ui-server/api/route-roots.ts`, `effects.ts`,
+`docs/plans/2026-08-28-steps-and-screens-for-apis-and-web.md` §4). A route anchor's walk starts at the symbol the route runs —
+in order of evidence, the target of the route's `references` edge (the handler every server resolver names; a class for a
+ViewSet, whose methods the walk then enters), the component a screen file exports, or the route itself when the handler is
+an inline arrow (`inline handler · users.routes.ts` under the path) — and the box's second line is the handler's name. The
+anchor says what fires it: `FIRES FROM POST /users · after authenticate, validate(…)` — the middleware arguments at the
+registration site (Express, Koa, Hono, Fastify), the guard / interceptor / role decorators on the method and on its class
+(Nest, Spring, ASP.NET, Django), a FastAPI `dependencies=[…]`; a function anchored by name says the job, event, message or
+schedule written on it (`@Process('email')`, `@Scheduled(…)`, `@KafkaListener(…)`). Effects gain the categories a request
+sets in motion — `database` (with the model / table when the call names one and read vs write from the method:
+`database · user · write · createUser`), `response`, `queue`, `email`, `payments`, `cache`, `auth`, `process`, and `storage`
+grown to files and buckets — matched on the call **as written**, the whole member chain read from the source at request
+time (`prisma.article.findFirst`, `this.jwtService.signAsync`, `res.status(404).json`), because the index keeps only the
+last segment of a deep chain and a bare `create` matched by name is a guess; on the receiver's declared type when the call
+leaves the index through it (`OwnerRepository owners` in a Spring controller, `Repository<Cat>` in a Nest service — read
+from the class body, `graph/branch-guards.ts`'s `memberTypesInTree`, the index keeps none of it); and, in a project with
+endpoints, on a thrown web exception (`throw new NotFoundException(…)`, `raise HTTPException(…)`). The same declared type
+sends `this.usersService.findByEmail(…)` into the class the type names instead of the name-only guess the graph holds — the
+panel says `by the receiver's declared type` on that hop. A **response** box is the endpoint's contract as the code has it:
+its label is the status codes its sites send when they are literal (`201 · 404`, read out of `status(404)`,
+`HttpStatus.CREATED`, `http.StatusNotFound`, `status_code=422`, `NotFoundException`, `TypedResults.NoContent`, `.notFound`),
+and the panel prints one row per site — `WHEN NOT user → 404 · NotFoundException('no such user')`. The payload says what the
+index is a picture of (`project: 'app' | 'api' | 'web'`, from the routes: endpoints make an API, endpoints beside pages or
+navigation a web app) and the viewer's words follow it in one place (`kindWord` / `kindWords` in `steps-model.ts`):
+endpoint / page / screen, data call / store action, a call to another tier / to the server / a native call; a route that
+leads with a verb is an endpoint wherever it is. The legend re-words itself the same way; the bare tab lists an API's
+endpoints grouped by router file when there are no screens. A production walk never enters a test double (`isTestPath`),
+and a repository-shaped method the walk cannot enter (an interface's, the ORM's) is the database. Conditions and arguments
+are read for Python, Java, Kotlin, C#, Go and C as for JS and Swift (§3.14); a language without rules yields nothing.
+
 Rows = distance from the anchor as the server counted it (first discovery), anchor on top with the entry mark. Boxes:
 the §3.12 screen box for a screen or a handler; **bridge / event** add a 3px `--accent` left rule (the language
 changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits on `--paper-2`; **effect** is dashed
@@ -489,7 +520,9 @@ changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits
 pills, tooltip and the panel's hover contract are §3.12's verbatim; the panel adds *Start here →* (re-anchor) on any
 step with a symbol, *Open as a flow →* on any link whose ends are both symbols (`#/flow?from=&to=`), a depth `<select>`
 (4–12) that rewrites the URL, per-kind counts, and the `truncated` notes. The bare tab (`#/steps`) is a chooser: the
-project's screens by connectivity, or a hint to search. `Picture` (`screens-model.ts`) is the structural interface
+project's screens by connectivity, else its endpoints by router file, or a hint to search. A picture of at most 24 boxes
+is fitted to the right of the key (a per-side `fitView` padding) so its second row never sits under the legend; a larger
+one is fitted to the whole stage. `Picture` (`screens-model.ts`) is the structural interface
 the shared machinery works over; `steps-model.ts` builds one. Pure model tests: `ui-steps-model.test.ts`; the
 endpoint against a real RN + Expo fixture: `ui-steps-api.test.ts`.
 
@@ -546,11 +579,24 @@ the same question about the same graph.
   them. **Prepared, not published**: `"private": true` is the guard and `scripts/pack-npm.sh` only packs it under
   `CODEGRAPH_PACK_UI=1`.
 
+**Beyond the mobile app.** The Steps picture reaches the same bar on an HTTP API — Express, NestJS, FastAPI,
+Spring (Java / Kotlin), ASP.NET and the rest (§3.13, "Servers"); the Screens picture still rests on Expo Router's
+facts. What a web app (Next.js, React Router, SvelteKit) has instead, the cross-tier channels (client `fetch` → own
+route, queues, server actions) and the ordered plan for them are `docs/plans/2026-08-28-steps-and-screens-for-apis-and-web.md`
+(P3, P4 and the validation numbers open; P0, P1, P2, P5, P6 built).
+
 ### 3.14 Conditions, as a reader says them (`ui/src/lib/conditions.ts`)
 A `when` arrives from the graph as code joined by OUR operators — guards along a chain joined with ` && `, a negated
 guard wrapped `!(…)`, a link's several call sites joined with ` || ` — and those joins render as words: **WHEN**,
 **AND**, **OR**, **NOT**, set in capitals at weight 600 in the condition's own mono (no tracking — they are words in a
-sentence, not labels), so the joins read at a glance and the code between them reads as code. The code inside one
+sentence, not labels), so the joins read at a glance and the code between them reads as code. The rules behind them
+(`graph/branch-guards.ts`) cover JavaScript / TypeScript, Swift, Python, Java, Kotlin, C#, Go and C / C++: `if` /
+`elif` / `else`, `switch` / `when` / `match` / `select`, the ternary and Kotlin's `if` expression, `try` / `except` /
+`catch` (`on error`), `&&` / `||` / `and` / `or`, and the early exits before the site — a negated single comparison flips
+instead of wrapping (`if err != nil { return }` reads as `err == nil`, `if not item.title: raise` as `item.title`). The
+same trees answer what a call passes (`callSitesForFile`: Python `name=value`, C# `name: value`, a Go composite literal as
+`gin.H{…}`), the call as written (the whole member chain), the decorators / annotations / attributes on a definition and
+on its class, and the declared types of a class's members. The code inside one
 guard stays code (`isUploadInProgress || elapsed < 5000` is what the source
 says; a guard that is itself a disjunction keeps its parentheses, `graph/branch-guards.ts` adds them). A link with
 several call sites is several **scenarios**, never one long condition: the panel prints the clauses every site shares

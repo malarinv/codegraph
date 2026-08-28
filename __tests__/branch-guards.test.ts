@@ -203,8 +203,8 @@ func f() {
 
 describe('branch guards: unsupported', () => {
   it('reports no guards for a language without rules', async () => {
-    expect(supportsBranchGuards('python')).toBe(false);
-    expect(await guardsInSource('def f():\n  if x:\n    go()\n', 'python', 3, 4)).toEqual([]);
+    expect(supportsBranchGuards('ruby')).toBe(false);
+    expect(await guardsInSource('def f\n  if x\n    go()\n  end\nend\n', 'ruby', 3, 4)).toEqual([]);
   });
 });
 

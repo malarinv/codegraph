@@ -42,7 +42,11 @@ import type { Edge, Language, Node, UnresolvedReference } from '../../types';
 import { badRequest, intParam, notFound } from './respond';
 import { createSiteReader } from './when';
 import type { SiteTrigger } from '../../graph/branch-guards';
+import { classifyEffect, responseStatus, type Effect } from './effects';
+import { looksLikeComponent, routeRoots } from './route-roots';
+import { splitRouteName } from './routes';
 import { HUB_THRESHOLD, UNCERTAIN_BELOW, toNodeRef, type WireNodeRef } from './wire';
+import { isTestPath } from '../../search/query-utils';
 
 // =============================================================================
 // Wire shapes
@@ -73,6 +77,8 @@ export interface WireStepSite {
   when: string;
   /** What fires THIS site, when it differs from the link's first. */
   trigger?: WireStepTrigger;
+  /** For a response site: the status code it sends, when literal (`res.status(404)`, `throw new NotFoundException`). */
+  status?: number;
 }
 
 /** What fires a step or a link: the event it is written under, and the function that writes it there. */
@@ -107,13 +113,31 @@ export interface WireStep {
   events?: string[];
   /** For a handler: what fires it — the first binding the walk met. */
   trigger?: WireStepTrigger;
-  /** For a screen: its path and the component that renders it. */
-  screen?: { path: string; component: WireNodeRef | null };
+  /**
+   * For a screen or an endpoint: its path and the symbol that serves it — the
+   * component a screen renders, the handler an endpoint runs. `endpoint` when
+   * the route leads with an HTTP verb (`POST /users`); `inline` when the
+   * handler is an anonymous function at the registration site, so the route
+   * itself stands in for it and `component` is null.
+   */
+  screen?: { path: string; component: WireNodeRef | null; endpoint: boolean; inline: boolean };
   /**
    * For an effect: the calls one function makes into one category — `api` is
-   * the first, `apis` all of them — and the function that makes them.
+   * the first, `apis` all of them — and the function that makes them. A
+   * database call also says the model / table it touches when the call
+   * names one, and whether it reads or writes; a response box lists the
+   * status codes its sites send.
    */
-  effect?: { api: string; apis: string[]; category: string; by: WireNodeRef; line: number };
+  effect?: {
+    api: string;
+    apis: string[];
+    category: string;
+    by: WireNodeRef;
+    line: number;
+    model?: string;
+    access?: 'read' | 'write';
+    statuses?: number[];
+  };
 }
 
 export interface WireStepLink {
@@ -138,6 +162,12 @@ export interface WireStepsPayload {
   anchor: WireNodeRef;
   /** Other symbols that share the anchor's name, when it was given by name. */
   ambiguous: WireNodeRef[];
+  /**
+   * What the index is a picture of, decided from its routes: an `app` of
+   * screens, an `api` of endpoints, or a `web` app with both. The viewer's
+   * words (screen / endpoint, store action / data) follow it.
+   */
+  project: 'app' | 'api' | 'web';
   steps: WireStep[];
   links: WireStepLink[];
   depth: number;
@@ -174,6 +204,8 @@ const MAX_FANOUT = 80;
 const MAX_EFFECT_SCANS = 800;
 /** Call sites read for conditions and arguments per request. */
 const MAX_WHEN_SITES = 1600;
+/** Call sites read for the callee as written (effect classification) per request — lookups on trees the guards parsed anyway. */
+const MAX_CALL_SITES = 4000;
 /** Longest effect-box label before its argument list is cut. */
 const MAX_EFFECT_LABEL = 56;
 /**
@@ -214,33 +246,50 @@ export function isStoreFile(file: string): boolean {
 }
 
 /**
- * Calls that leave the index and change something outside the process. A
- * curated table, deliberately: "any call into a package" is every `Date` and
- * `Math.max`, and a box for each would bury the ones that matter. Matched on
- * the reference text as written at the call.
+ * What a call is when it leaves the index, by the reference text alone — the
+ * mobile app's table, kept for callers that have no language in hand. The
+ * Steps walk itself classifies on the call AS WRITTEN with the language and
+ * the project kind (`effects.ts`).
  */
-export const EFFECTS: ReadonlyArray<{ category: string; test: RegExp }> = [
-  {
-    category: 'network',
-    test: /^(?:fetch|axios|ky|got|superagent|XMLHttpRequest|WebSocket)$|^(?:axios|api|client|http|https|httpClient|apiClient|instance|request|agent|graphql|apollo|supabase)\.(?:get|post|put|patch|delete|head|request|query|mutate|rpc|invoke)$|^URLSession(?:\.|$)|^(?:Alamofire|AF)\.|\.(?:dataTask|uploadTask|downloadTask)$/,
-  },
-  {
-    category: 'storage',
-    test: /^(?:AsyncStorage|SecureStore|MMKV|localStorage|sessionStorage|indexedDB|UserDefaults|Keychain|KeychainAccess|FileSystem|RNFS|FileManager|fs|fsp)\b/,
-  },
-  {
-    category: 'device',
-    test: /^(?:Linking|Share|Clipboard|Notifications|Camera|ImagePicker|MediaLibrary|Haptics|Alert|Vibration|Location|Geolocation|Permissions|UIApplication|AVCaptureSession|AVAudioSession|CLLocationManager|UNUserNotificationCenter)\b/,
-  },
-  {
-    category: 'telemetry',
-    test: /^(?:DdRum|DdLogs|DdTrace|DdSdkReactNative|CustomerIO|Sentry|Bugsnag|analytics|Analytics|crashlytics|Crashlytics|mixpanel|Mixpanel|amplitude|Amplitude|posthog|PostHog|LDClient|ldClient)\b/,
-  },
-];
-
 export function effectCategory(referenceName: string): string | null {
-  for (const e of EFFECTS) if (e.test.test(referenceName)) return e.category;
-  return null;
+  return classifyEffect({ text: referenceName, kind: 'calls' })?.category ?? null;
+}
+
+/** A method of a repository / DAO / mapper, by the container's name — the ORM boundary in a project that types it. */
+const REPOSITORY_CONTAINER = /(?:Repository|Repositories|Repo|Dao|DAO|Mapper|Store|Datastore)$/;
+
+/** Decorators that gate a handler: guards, interceptors, pipes, roles, auth, validation, transactions, throttles. */
+const GUARD_DECORATOR =
+  /^(?:UseGuards|UseInterceptors|UsePipes|UseFilters|Roles|Auth|Public|Permissions|Throttle|SkipThrottle|Authorize|AllowAnonymous|PreAuthorize|PostAuthorize|Secured|RolesAllowed|PermitAll|DenyAll|Transactional|Validated|login_required|permission_required|user_passes_test|staff_member_required|require_http_methods|require_POST|require_GET|csrf_exempt|csrf_protect|ratelimit|throttle_classes|permission_classes|authentication_classes|cache_page|ValidateAntiForgeryToken|RequireAuthorization|RequireRole|RequireHttps|EnableCors|CrossOrigin|Cacheable|CacheEvict|CachePut|RateLimiter|CircuitBreaker|Retry|Timeout|Bulkhead|jwt_required|Security|ApiBearerAuth|ApiKeyAuth|BearerAuth|OAuth|Scopes|Roles|HasRole|HasPermission|Idempotent|Lock|Locked|Retryable|Recover)$|Guard|Interceptor|Pipe$|Filter$|Auth|Role|Permission|Throttle|Valid|Transaction|Csrf|Limit/i;
+/** Decorators that ARE the route, the DI wiring, or documentation — never a guard. */
+const NOT_A_GUARD =
+  /^(?:Get|Post|Put|Patch|Delete|Head|Options|All|Controller|RestController|Resolver|Query|Mutation|Subscription|Injectable|Module|Api\w*|Http(?:Get|Post|Put|Patch|Delete|Head|Options)|Route|RequestMapping|\w+Mapping|Component|Service|Repository|Bean|Autowired|Override|Inject|Param|Body|Res|Req|Headers|Ip|HostParam|Session|UploadedFiles?|HttpCode|Header|Redirect|Render|Version|SerializeOptions|ResponseBody|ResponseStatus|Produces|Consumes|FromBody|FromRoute|FromQuery|FromForm|FromHeader|FromServices|Path|PathVariable|RequestParam|RequestBody|RequestHeader|ModelAttribute|Valid|Args|Context|Parent|Info|Field|ObjectType|InputType|ArgsType|Entity|Column|PrimaryGeneratedColumn|OneToMany|ManyToOne|Prop|Schema|Type|Expose|Exclude|Transform|IsString|IsNumber|IsOptional|Length|Min|Max|Deprecated|SuppressWarnings|FunctionalInterface|Slf4j|Data|Builder|Getter|Setter|NoArgsConstructor|AllArgsConstructor|RequiredArgsConstructor|Value|ConfigurationProperties|Configuration|EnableScheduling|SpringBootApplication|Profile|Order|Primary|Qualifier|Lazy|Scope|JsonProperty|JsonIgnore|Nullable|NonNull|NotNull|Size|Pattern|Email|Positive|router\.\w+|app\.\w+|api\.\w+|bp\.\w+|blueprint\.\w+|\w+\.(?:route|get|post|put|patch|delete))$/;
+/** Decorators that fire a function from outside a request: a job, an event, a message, a schedule. */
+const CONSUMER_DECORATOR =
+  /^(?:Process|Processor|OnEvent|OnQueueEvent|OnWorkerEvent|OnGlobalQueueEvent|Cron|Interval|Timeout|MessagePattern|EventPattern|SubscribeMessage|Scheduled|Schedules?|KafkaListener|RabbitListener|RabbitSubscribe|RabbitRPC|JmsListener|SqsListener|SqsMessageHandler|EventListener|TransactionalEventListener|StreamListener|ServiceActivator|receiver|shared_task|task|periodic_task|app\.task|celery\.task|on|hears|command|event|listen|listener|Consume|Consumer|Subscribe|Subscriber|CapSubscribe|Function|FunctionName|TimerTrigger|QueueTrigger|ServiceBusTrigger|EventGridTrigger|BlobTrigger|CosmosDBTrigger|Job|job|Worker|worker|EventHandler|CommandHandler|QueryHandler|OnMessage|MessageHandler|GrpcMethod|GrpcStreamMethod|WebSocketGateway|dramatiq\.actor|actor|huey\.task|db_task|Signal|signal|hook|Hook|OnModuleInit|OnApplicationBootstrap|PostConstruct|PreDestroy|Bean|Startup|Shutdown)$/;
+
+/** The name of a decorator, before its arguments. */
+function decoratorName(text: string): string {
+  return text.replace(/\(.*$/s, '').trim();
+}
+
+/** The first string literal in a decorator's arguments — `'email'` of `@Process('email')`. */
+function decoratorLiteral(text: string): string | null {
+  const m = /\(\s*(['"`])((?:(?!\1).)*)\1/.exec(text);
+  return m ? `'${m[2]}'` : null;
+}
+
+function isGuardDecorator(text: string): boolean {
+  const name = decoratorName(text);
+  if (NOT_A_GUARD.test(name)) return false;
+  return GUARD_DECORATOR.test(name);
+}
+
+/** FastAPI: `dependencies=[Depends(auth), Depends(rate_limit)]` inside the route decorator. */
+function dependenciesIn(text: string): string[] {
+  const m = /dependencies\s*=\s*\[([^\]]*)\]/.exec(text);
+  if (!m) return [];
+  return m[1]!.split(/,(?![^()]*\))/).map((x) => x.trim()).filter(Boolean);
 }
 
 // =============================================================================
@@ -269,24 +318,149 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
   const { anchor, ambiguous } = resolveAnchor(cg, query);
 
-  // Route → the component it renders, and the routes by id.
+  // Route → where its code starts: the handler a resolver named, the page a
+  // screen file exports, or the route itself standing in for an inline
+  // handler (`route-roots.ts`) — and what kind of project this is, for the
+  // words the viewer uses.
   const routes = cg.getNodesByKind('route');
-  const renders = routes.length === 0 ? [] : cg.getOutgoingEdgesFrom(routes.map((r) => r.id), ['calls', 'instantiates']);
-  const componentOf = new Map<string, Node>();
-  if (renders.length > 0) {
-    const components = cg.getNodesByIds(renders.map((e) => e.target));
-    for (const edge of renders) {
-      const c = components.get(edge.target);
-      if (c && !componentOf.has(edge.source)) componentOf.set(edge.source, c);
-    }
-  }
+  const roots = routeRoots(cg, routes);
+  const project = projectKind(routes, stats.edgesByKind?.navigates ?? 0);
 
   const reader = createSiteReader(cg, projectRoot, MAX_WHEN_SITES);
+  const calls = createSiteReader(cg, projectRoot, MAX_CALL_SITES);
   const whenAt = (caller: Node, site: { line?: number; column?: number }) => reader.when(caller, site);
   const argsAt = (caller: Node, site: { line?: number; column?: number }) => reader.args(caller, site);
   const withArgs = async (site: WireStepSite, caller: Node, at: { line?: number; column?: number }): Promise<WireStepSite> => {
     const args = await argsAt(caller, at);
     return args === null ? site : { ...site, args };
+  };
+  /** The call as written at a site, and what it passes — one read for both. */
+  const callAt = (caller: Node, site: { line?: number; column?: number; callee?: string }) => calls.callSite(caller, site);
+
+  // The declared type of a receiver: `OwnerRepository owners` in a Spring
+  // controller makes `owners.save` the database; `private readonly
+  // usersService: UsersService` in a Nest controller says where
+  // `this.usersService.findByEmail` goes. The index keeps the first in a
+  // field's signature and nothing of the second, so the class body is read
+  // from the tree at request time, once per class.
+  const fileTypes = new Map<string, Map<string, string>>();
+  const classTypes = new Map<string, Map<string, string>>();
+  const receiverTypeFor = async (caller: Node, callee: string): Promise<string | null> => {
+    const first = callee.replace(/^(?:this|self)\./, '').split(/[.:(]/)[0] ?? '';
+    if (!first || /^[A-Z]/.test(first)) return null;
+    const declared = await memberTypesOf(caller);
+    const own = declared.get(first) ?? declared.get(first.replace(/^_/, '')) ?? null;
+    if (own) return own;
+    let types = fileTypes.get(caller.filePath);
+    if (!types) {
+      types = new Map();
+      for (const n of cg.getNodesInFile(caller.filePath)) {
+        if ((n.kind !== 'field' && n.kind !== 'property' && n.kind !== 'variable' && n.kind !== 'parameter') || !n.signature) continue;
+        const sig = n.signature.replace(/\s+/g, ' ').trim();
+        // `OwnerRepository owners`, `private final OwnerRepository owners`, `owners: OwnerRepository`, `val owners: OwnerRepository`.
+        const typed = new RegExp(`(?:^|\\s)([A-Z][\\w<>,?. ]*?)\\s+${n.name}\\b`).exec(sig) ?? new RegExp(`\\b${n.name}\\s*:\\s*([A-Z][\\w<>,?. ]*)`).exec(sig);
+        if (typed && !types.has(n.name)) types.set(n.name, typed[1]!.trim());
+      }
+      fileTypes.set(caller.filePath, types);
+    }
+    return types.get(first) ?? null;
+  };
+  const memberTypesOf = async (node: Node): Promise<Map<string, string>> => {
+    const key = `${node.filePath}:${node.startLine}`;
+    let types = classTypes.get(key);
+    if (!types) {
+      types = await calls.memberTypes(node);
+      classTypes.set(key, types);
+    }
+    return types;
+  };
+
+  // Where a member call really goes, by the receiver's declared type: the
+  // class named by the type, and its method of the call's name. Null when the
+  // type names nothing in the index (an ORM's `Repository<Cat>`) — then the
+  // call leaves the index, and the effect table says as what.
+  const classByName = new Map<string, Node | null>();
+  /** The class / interface / struct a declared type names in the index, or null for a library's. */
+  const classOfType = async (type: string): Promise<Node | null> => {
+    const typeName = type.replace(/<.*$/, '').replace(/^[*&]+/, '').replace(/[?!]$/, '').split(/[.:]/).pop()?.trim() ?? '';
+    if (!typeName || /^(?:string|number|boolean|any|unknown|object|void|String|Integer|Long|Boolean|int|long|bool|var|dynamic|Object|List|Map|Set|Array|Promise|Optional|Task|IEnumerable|Iterable)$/.test(typeName)) return null;
+    let cls = classByName.get(typeName);
+    if (cls === undefined) {
+      const found = cg.getNodesByName(typeName).filter((n) => n.kind === 'class' || n.kind === 'interface' || n.kind === 'struct');
+      cls = found.find((n) => !isTestPath(n.filePath)) ?? found[0] ?? null;
+      classByName.set(typeName, cls);
+    }
+    return cls;
+  };
+  const resolveByReceiver = async (caller: Node, callee: string): Promise<Node | null> => {
+    const segments = callee.replace(/\([^()]*\)/g, '').split(/[.:]+/).filter(Boolean);
+    if (segments.length < 2) return null;
+    const type = await receiverTypeFor(caller, callee);
+    if (!type) return null;
+    const cls = await classOfType(type);
+    if (!cls) return null;
+    const method = segments[segments.length - 1]!;
+    const members = cg.getNodesInFile(cls.filePath).filter((n) => (n.kind === 'method' || n.kind === 'function') && n.name === method && n.startLine >= cls!.startLine && n.endLine <= cls!.endLine);
+    return members[0] ?? null;
+  };
+
+  /** A method the walk cannot enter (an interface's, an ORM's) on a repository-shaped container. */
+  const repositoryMethod = (target: Node): boolean => {
+    if (target.kind !== 'method' && target.kind !== 'function') return false;
+    if (isTestPath(target.filePath)) return false;
+    const container = target.qualifiedName.replace(/[.:]+[^.:]*$/, '').split(/[.:]+/).pop() ?? '';
+    if (!REPOSITORY_CONTAINER.test(container) && !/(?:^|\/)(?:repositories|repository|dao|daos|mappers)\//i.test(posix(target.filePath))) return false;
+    return cg.getOutgoingEdgesFrom([target.id], WALK_KINDS).length === 0;
+  };
+
+  /** What runs before a route's handler: the middleware arguments at the registration, or the guard decorators on it. */
+  const chainFor = async (route: Node, root: Node | null): Promise<string[]> => {
+    const after: string[] = [];
+    if (JS_FAMILY.has(route.language)) {
+      const site = await calls.callSite(route, { line: route.startLine, column: 0 });
+      if (site && /\.(?:get|post|put|patch|delete|all|use|head|options|route)$/i.test(site.callee)) {
+        const args = site.argList.slice(1);
+        if (args.length > 0 && !/^\{/.test(args[args.length - 1]!)) args.pop();
+        for (const a of args) if (a && !/^\{ ?…? ?\}$/.test(a)) after.push(a);
+      }
+    }
+    if (root && root.id !== route.id) {
+      const decs = await calls.decorators(root);
+      if (decs) {
+        for (const d of [...decs.class, ...decs.own]) {
+          if (!JS_FAMILY.has(root.language) && !/^(?:python)$/.test(root.language)) {
+            if (isGuardDecorator(d)) after.push(d);
+            continue;
+          }
+          for (const dep of dependenciesIn(d)) after.push(dep);
+          if (isGuardDecorator(d)) after.push(d);
+        }
+      }
+    }
+    return [...new Set(after)];
+  };
+
+  /** The request a route's handler serves, as its trigger. */
+  const requestTrigger = async (route: Node, root: Node | null): Promise<WireStepTrigger | null> => {
+    const { method, path } = splitRouteName(route.name);
+    if (method === null) return null;
+    const after = await chainFor(route, root);
+    return { kind: 'request', name: method, of: path, in: basename(route.filePath), ...(after.length > 0 ? { after } : {}) };
+  };
+
+  /** A job, an event, a message or a schedule that fires a function, from its decorators. */
+  const consumerTrigger = async (node: Node): Promise<WireStepTrigger | null> => {
+    if (node.kind !== 'function' && node.kind !== 'method') return null;
+    const decs = await calls.decorators(node);
+    if (!decs) return null;
+    for (const d of decs.own) {
+      const name = decoratorName(d);
+      const last = name.split('.').pop() ?? name;
+      if (!CONSUMER_DECORATOR.test(name) && !CONSUMER_DECORATOR.test(last)) continue;
+      const guards = [...decs.class, ...decs.own].filter((x) => x !== d && isGuardDecorator(x));
+      return { kind: 'decorator', name, of: decoratorLiteral(d), in: basename(node.filePath), ...(guards.length > 0 ? { after: guards } : {}) };
+    }
+    return null;
   };
 
   const steps = new Map<string, StepRecord>();
@@ -318,20 +492,36 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       return null;
     }
     const isRoute = node.kind === 'route';
+    const routeRoot = isRoute ? (roots.get(node.id) ?? null) : null;
     const record: StepRecord = {
       id: node.id,
       kind: isRoute ? 'screen' : kind,
       anchor: false,
       node: toNodeRef(node),
-      label: isRoute ? node.name : node.name,
-      sub: isRoute ? (componentOf.get(node.id)?.name ?? posix(node.filePath)) : posix(node.filePath),
+      label: node.name,
+      // A screen says its component, an endpoint its handler; a route the
+      // graph bound to nothing says only where it is registered.
+      sub: isRoute
+        ? routeRoot === null
+          ? basename(node.filePath)
+          : routeRoot.inline
+            ? `inline handler · ${basename(node.filePath)}`
+            : routeRoot.node.name
+        : posix(node.filePath),
       depth,
       cut: null,
       ...extra,
-      root: isRoute ? (componentOf.get(node.id) ?? null) : node,
+      root: isRoute ? (routeRoot?.node ?? null) : node,
     };
     if (kind === 'event' && extra.event) record.events = [extra.event];
-    if (isRoute) record.screen = { path: node.name, component: componentOf.has(node.id) ? toNodeRef(componentOf.get(node.id)!) : null };
+    if (isRoute) {
+      record.screen = {
+        path: node.name,
+        component: routeRoot !== null && !routeRoot.inline ? toNodeRef(routeRoot.node) : null,
+        endpoint: splitRouteName(node.name).method !== null,
+        inline: routeRoot?.inline ?? false,
+      };
+    }
     steps.set(node.id, record);
     return record;
   };
@@ -339,35 +529,100 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   // One box per (function, category): `uploadARCapture` makes one network
   // call, three storage calls and three telemetry calls — three boxes, each
   // listing its calls, not seven.
-  const effectStep = (by: Node, ref: { referenceName: string; line: number }, category: string, depth: number): StepRecord | null => {
+  const effectSub = (e: NonNullable<WireStep['effect']>, by: Node): string =>
+    [e.category, e.model, e.access, by.name].filter((x): x is string => !!x).join(' · ');
+  const effectStep = (by: Node, ref: { referenceName: string; line: number }, effect: Effect, depth: number): StepRecord | null => {
+    const category = effect.category;
     const id = `effect:${by.id}:${category}`;
     const existing = steps.get(id);
     if (existing) {
-      const apis = existing.effect!.apis;
-      if (!apis.includes(ref.referenceName)) {
-        apis.push(ref.referenceName);
-        existing.label = `${apis[0]} +${apis.length - 1}`;
+      const e = existing.effect!;
+      if (!e.apis.includes(ref.referenceName)) {
+        e.apis.push(ref.referenceName);
+        existing.label = `${e.apis[0]} +${e.apis.length - 1}`;
       }
+      // Several models behind one box: list them; several accesses: say both.
+      if (effect.model && e.model !== effect.model) {
+        const models = new Set((e.model ?? '').split(', ').filter(Boolean));
+        models.add(effect.model);
+        e.model = [...models].slice(0, 3).join(', ') + (models.size > 3 ? ', …' : '');
+      }
+      if (effect.access && e.access && e.access !== effect.access) e.access = undefined;
+      existing.sub = effectSub(e, by);
       return existing;
     }
     if (steps.size >= limit) {
       truncated.steps++;
       return null;
     }
+    const e: NonNullable<WireStep['effect']> = {
+      api: ref.referenceName,
+      apis: [ref.referenceName],
+      category,
+      by: toNodeRef(by),
+      line: ref.line,
+      ...(effect.model ? { model: effect.model } : {}),
+      ...(effect.access ? { access: effect.access } : {}),
+    };
     const record: StepRecord = {
       id,
       kind: 'effect',
       anchor: false,
       node: null,
       label: ref.referenceName,
-      sub: `${category} · ${by.name}`,
+      sub: effectSub(e, by),
       depth,
       cut: null,
-      effect: { api: ref.referenceName, apis: [ref.referenceName], category, by: toNodeRef(by), line: ref.line },
+      effect: e,
       root: null,
     };
     steps.set(id, record);
     return record;
+  };
+
+  /** One effect site: the call as written, what it passes, when, what fires it, and — for a response — the status. */
+  const effectLink = async (
+    step: StepRecord,
+    fold: Fold,
+    ref: { referenceName: string; referenceKind: 'calls' | 'instantiates'; line: number; column?: number },
+    trigger: WireStepTrigger | null,
+    fallbackArgs: string | null = null,
+    requireReceiver = false
+  ): Promise<boolean> => {
+    const at = { line: ref.line, column: ref.column };
+    const site = await callAt(fold.node, { ...at, callee: ref.referenceName });
+    // The site read must be THIS call: its last segment is the reference's.
+    const last = (n: string) => n.replace(/\([^()]*\)/g, '').split(/[.:]/).pop() ?? n;
+    const usable = !!site && site.callee !== '' && last(site.callee) === last(ref.referenceName);
+    const text = usable ? site.callee : ref.referenceName;
+    if (requireReceiver && !/[.:>]/.test(text)) return false;
+    const args = usable ? site.args : fallbackArgs;
+    // The receiver's declared type counts only when the call leaves the
+    // index through it: a library's `Repository<Cat>`, or the project's own
+    // `OwnerRepository` interface whose `save` comes from Spring Data — never
+    // a project class that declares the method, which is a place to walk into.
+    const declared = await receiverTypeFor(fold.node, text);
+    const receiverType = declared && (await resolveByReceiver(fold.node, text)) === null ? declared : null;
+    const effect = classifyEffect({
+      text,
+      kind: ref.referenceKind,
+      language: fold.node.language,
+      project,
+      receiverType,
+      args,
+    });
+    if (effect === null) return false;
+    const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, step.depth + 1);
+    if (target === null) return true;
+    const when = await whenAt(fold.node, at);
+    const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
+    if (args !== null) wireSite.args = args;
+    if (effect.category === 'response') {
+      const status = responseStatus(text, args, ref.referenceKind);
+      if (status !== null) wireSite.status = status;
+    }
+    link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)));
+    return true;
   };
 
   const link = (
@@ -395,7 +650,13 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     if (existing) {
       if (structural(stamped) && existing.sites.some((s) => !structural(s))) return;
       if (!structural(stamped) && existing.sites.every(structural)) existing.sites.length = 0;
-      if (!existing.sites.some((s) => s.file === site.file && s.line === site.line)) existing.sites.push(stamped);
+      // One statement, two references (`res.status(201)` and its `.json(…)`):
+      // the outer call is the site, the inner one folds into it.
+      const sameLine = existing.sites.findIndex((s) => s.file === site.file && s.line === site.line);
+      if (sameLine < 0) existing.sites.push(stamped);
+      else if (stamped.text.startsWith(existing.sites[sameLine]!.text) && stamped.text.length > existing.sites[sameLine]!.text.length) {
+        existing.sites[sameLine] = stamped;
+      }
       if (!existing.trigger && trigger) existing.trigger = trigger;
       if (when !== existing.when) {
         if (!when || !existing.when) existing.when = '';
@@ -425,9 +686,18 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     return t ? { ...t, in: caller.name } : null;
   };
 
-  // The anchor: a screen keeps its kind and explores from its component.
+  // The anchor: a screen keeps its kind and explores from its component; an
+  // endpoint says the request that fires it and what runs before its handler;
+  // a function says the job, event or schedule written on it.
   const first = stepFor(anchor, 'anchor', 0)!;
   first.anchor = true;
+  if (anchor.kind === 'route') {
+    const t = await requestTrigger(anchor, first.root);
+    if (t) first.trigger = t;
+  } else {
+    const t = await consumerTrigger(anchor);
+    if (t) first.trigger = t;
+  }
   const queue: StepRecord[] = [first];
   /** Steps whose exploration has been queued — each is explored once, from the first row it appears on. */
   const explored = new Set<string>([first.id]);
@@ -500,14 +770,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           }
           for (const ref of [...refs].sort((a, b) => a.line - b.line || a.column - b.column)) {
             if (ref.referenceKind !== 'calls' && ref.referenceKind !== 'instantiates') continue;
-            const category = effectCategory(ref.referenceName);
-            if (category === null) continue;
-            const target = effectStep(fold.node, ref, category, step.depth + 1);
-            if (target === null) continue;
-            const at = { line: ref.line, column: ref.column };
-            const when = await whenAt(fold.node, at);
-            const site = await withArgs({ file: posix(fold.node.filePath), line: ref.line, text: ref.referenceName, when: '' }, fold.node, at);
-            link(step, target, 'effect', fold.chain, [...fold.whens, when], site, null, await triggerAt(fold.node, at));
+            await effectLink(step, fold, { referenceName: ref.referenceName, referenceKind: ref.referenceKind, line: ref.line, column: ref.column }, null);
           }
         }
 
@@ -516,8 +779,14 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const meta = (e.metadata ?? {}) as Record<string, unknown>;
           if (e.kind === 'references') return meta.fnRef === true;
           if (e.kind === 'contains') {
+            // A function's nested handlers; and, when the walk STARTS at a
+            // class (a ViewSet, a class-based view bound to a route), its
+            // methods — never a class met on the way, whose methods are not
+            // what the caller reached.
             const t = targets.get(e.target);
-            return (fold.node.kind === 'function' || fold.node.kind === 'method') && !!t && (t.kind === 'function' || t.kind === 'method');
+            const fromFunction = fold.node.kind === 'function' || fold.node.kind === 'method';
+            const fromRootClass = fold.node.kind === 'class' && fold.chain.length === 0 && fold.node.id === step.root?.id;
+            return (fromFunction || fromRootClass) && !!t && (t.kind === 'function' || t.kind === 'method');
           }
           return true;
         });
@@ -541,10 +810,55 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           trigger: WireStepTrigger | null;
         }
         const arrivals: Arrival[] = [];
+        const fromTest = isTestPath(fold.node.filePath);
         for (const e of edges) {
-          const target = targets.get(e.target);
-          if (!target || target.kind === 'file' || target.id === fold.node.id) continue;
+          const found = targets.get(e.target);
+          if (!found || found.kind === 'file') continue;
           const meta = (e.metadata ?? {}) as Record<string, unknown>;
+
+          // A member call the index kept only the last segment of (`create`
+          // for `prisma.user.create`) resolves by name alone — a guess, and
+          // often the wrong one. The call AS WRITTEN decides first: an effect
+          // is drawn as one and the guessed edge is not walked. A call through
+          // a project-made value (`client.post` on the axios instance) is the
+          // same case with the constant as the target.
+          let target = targets.get(e.target)!;
+          let retargeted = false;
+          if (e.kind === 'calls' && typeof meta.synthesizedBy !== 'string' && e.provenance !== 'heuristic') {
+            const refName = typeof meta.refName === 'string' ? meta.refName : target.name;
+            const bare = !refName.includes('.');
+            // A member call whose receiver is declared as a type the index
+            // holds no class for (`DataStore<UserPreferences>`) leaves the
+            // index too, whatever name-matched — an `updateData` on a test
+            // double, say.
+            let external = false;
+            if (!bare && target.kind !== 'constant' && target.kind !== 'variable') {
+              const declared = await receiverTypeFor(fold.node, refName);
+              external = !!declared && (await classOfType(declared)) === null;
+            }
+            if (bare || external || target.kind === 'constant' || target.kind === 'variable') {
+              const drawn = await effectLink(step, fold, { referenceName: refName, referenceKind: 'calls', line: e.line ?? fold.node.startLine, column: e.column }, null, null, true);
+              if (drawn) continue;
+              // Not an effect: does the receiver's declared type say where the
+              // call goes? A class in the index wins over the name-only guess.
+              if (bare) {
+                const written = await callAt(fold.node, { line: e.line, column: e.column, callee: refName });
+                if (written && /[.:]/.test(written.callee) && (written.callee.split(/[.:]/).pop() ?? '') === refName) {
+                  const real = await resolveByReceiver(fold.node, written.callee);
+                  if (real && real.id !== target.id) {
+                    target = real;
+                    retargeted = true;
+                  }
+                }
+              }
+            }
+          }
+          if (target.id === fold.node.id) continue;
+          // A production walk never enters a test double: an interface's
+          // dispatch into `TestUserDataRepository`, or a `DataStore` name-matched
+          // to the in-memory one, is the test suite's story. Judged after the
+          // call as written had its chance to be an effect.
+          if (!fromTest && isTestPath(target.filePath)) continue;
           const site: WireStepSite = {
             file: posix(fold.node.filePath),
             line: e.line ?? fold.node.startLine,
@@ -607,13 +921,19 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
               if (trigger) extra.trigger = trigger;
             }
           }
+          if (retargeted) meta.resolvedBy = 'receiver-type';
           arrivals.push({ e, target, meta, site, kind, linkKind, extra, trigger });
         }
 
         for (const a of arrivals) {
           if (a.kind === null) continue;
+          const fresh = !steps.has(a.target.id);
           const to = stepFor(a.target, a.kind, step.depth + 1, a.extra);
           if (to === null) continue;
+          if (fresh && !to.trigger) {
+            const t = a.target.kind === 'route' ? await requestTrigger(a.target, to.root) : await consumerTrigger(a.target);
+            if (t) to.trigger = t;
+          }
           const at = { line: a.e.line, column: a.e.column };
           const when = await whenAt(fold.node, at);
           // A call-shaped hop says what it passes; a navigation already says
@@ -635,18 +955,17 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           // `client` constant, not to anything outside the index. The call
           // text is the evidence: the call is the effect, the constant is not
           // a place to walk into.
-          if (e.kind === 'calls' && (target.kind === 'constant' || target.kind === 'variable')) {
-            const api = typeof meta.refName === 'string' ? meta.refName : null;
-            const category = api === null ? null : effectCategory(api);
-            if (api !== null && category !== null) {
-              const to = effectStep(fold.node, { referenceName: api, line: e.line ?? fold.node.startLine }, category, step.depth + 1);
-              if (to === null) continue;
-              const at = { line: e.line, column: e.column };
-              const when = await whenAt(fold.node, at);
-              const site = await withArgs({ file: posix(fold.node.filePath), line: e.line ?? fold.node.startLine, text: api, when: '' }, fold.node, at);
-              link(step, to, 'effect', fold.chain, [...fold.whens, when], site, null, a.trigger);
-              continue;
-            }
+          // A thrown exception the framework answers with (`throw new
+          // NotFoundException(…)` on a class the project defines) is a
+          // response, not a place to walk into; a repository's method the
+          // walk cannot enter (an interface's, the ORM's) is the database.
+          if (e.kind === 'instantiates' && target.kind === 'class') {
+            if (await effectLink(step, fold, { referenceName: target.name, referenceKind: 'instantiates', line: e.line ?? fold.node.startLine, column: e.column }, a.trigger)) continue;
+          }
+          if (e.kind === 'calls' && repositoryMethod(target)) {
+            const container = target.qualifiedName.replace(/[.:]+[^.:]*$/, '').split(/[.:]+/).pop() ?? '';
+            const api = typeof meta.refName === 'string' && meta.refName.includes('.') ? meta.refName : `${container}.${target.name}`;
+            if (await effectLink(step, fold, { referenceName: api, referenceKind: 'calls', line: e.line ?? fold.node.startLine, column: e.column }, a.trigger)) continue;
           }
 
           // Already a step, reached here by a plain call: a link, not a fold.
@@ -693,8 +1012,19 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     sitesByStep.set(l.to, list);
   }
   for (const step of steps.values()) {
-    if (step.kind !== 'effect' || !step.effect || step.effect.apis.length !== 1) continue;
+    if (step.kind !== 'effect' || !step.effect) continue;
     const sites = sitesByStep.get(step.id) ?? [];
+    // A response box is the endpoint's contract: the status codes it can
+    // send, when they are literal, are its label; the rows say when.
+    if (step.effect.category === 'response') {
+      const statuses = [...new Set(sites.map((s) => s.status).filter((x): x is number => typeof x === 'number'))].sort((a, b) => a - b);
+      if (statuses.length > 0) {
+        step.effect.statuses = statuses;
+        step.label = statuses.join(' · ');
+        continue;
+      }
+    }
+    if (step.effect.apis.length !== 1) continue;
     if (sites.length !== 1 || sites[0]!.args === undefined) continue;
     const label = `${step.effect.api}(${sites[0]!.args})`;
     step.label = label.length > MAX_EFFECT_LABEL ? `${label.slice(0, MAX_EFFECT_LABEL - 2)}…)` : label;
@@ -704,6 +1034,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   return {
     anchor: toNodeRef(anchor),
     ambiguous,
+    project,
     steps: ordered.map(({ root: _root, ...step }) => step),
     links: [...links.values()].sort((a, b) => a.id.localeCompare(b.id)),
     depth: depthCap,
@@ -763,11 +1094,25 @@ function isSharedChrome(cg: CodeGraph, component: Node, memo: Map<string, number
   return renderParents(cg, component, memo) >= SHARED_CHROME_MIN;
 }
 
-/** A React component, by the convention that names one: a PascalCase function in a JS-family file. */
-function looksLikeComponent(node: Node): boolean {
-  if (node.kind === 'component') return true;
-  if (node.kind !== 'function') return false;
-  return JS_FAMILY.has(node.language) && /^[A-Z]/.test(node.name);
+/**
+ * What kind of project the picture is of, by what its routes are: endpoints
+ * (`POST /users`) make an API; screens with navigation between them make an
+ * app; both — pages and the endpoints behind them — make a web app.
+ */
+export function projectKind(routes: readonly Node[], navigates: number): 'app' | 'api' | 'web' {
+  let endpoints = 0;
+  let pages = 0;
+  for (const r of routes) {
+    if (splitRouteName(r.name).method !== null) endpoints++;
+    else if (r.name.startsWith('/')) pages++;
+  }
+  if (endpoints === 0) return 'app';
+  return navigates > 0 || pages > 0 ? 'web' : 'api';
+}
+
+function basename(p: string): string {
+  const s = posix(p);
+  return s.slice(s.lastIndexOf('/') + 1);
 }
 
 /**
@@ -807,6 +1152,7 @@ function hopLabel(meta: Record<string, unknown>, synthesized: boolean): string {
   const parts: string[] = [];
   if (typeof meta.synthesizedBy === 'string') parts.push(`via ${meta.synthesizedBy}`);
   else if (synthesized) parts.push('inferred');
+  if (meta.resolvedBy === 'receiver-type') parts.push('by the receiver’s declared type');
   if (typeof meta.event === 'string') parts.push(`event ${meta.event}`);
   if (meta.bridge === 'react-native') parts.push(`React Native bridge${typeof meta.module === 'string' ? ` · ${meta.module}` : ''}`);
   if (typeof meta.registeredAt === 'string') parts.push(`registered at ${meta.registeredAt}`);

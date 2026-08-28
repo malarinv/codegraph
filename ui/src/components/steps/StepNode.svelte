@@ -14,7 +14,7 @@
    */
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
   import type { MapNodeLayout } from '../../lib/map-model';
-  import { kindWord, type StepNodeInfo } from '../../lib/steps-model';
+  import { kindWord, type ProjectKind, type StepNodeInfo } from '../../lib/steps-model';
 
   let { data }: NodeProps = $props();
 
@@ -22,6 +22,7 @@
     data as unknown as {
       layout: MapNodeLayout;
       info: StepNodeInfo;
+      project: ProjectKind;
       selected: boolean;
       dimmed: boolean;
       onSelect: (id: string) => void;
@@ -73,7 +74,7 @@
   style={`width:${layout.width}px;height:${layout.height}px`}
   onclick={() => node.onSelect(info.id)}
   aria-pressed={node.selected}
-  title={`${info.label} — ${step.anchor ? 'where this picture starts; ' : ''}${kindWord(step.kind)}. ${info.sub}.${cutNote}`}
+  title={`${info.label} — ${step.anchor ? 'where this picture starts; ' : ''}${kindWord(step.kind, node.project, step)}. ${info.sub}.${cutNote}`}
 >
   <span class="name"
     >{#if step.anchor}<span class="mark" aria-hidden="true">●</span>{/if}{info.label}{#if step.cut !== null}<span

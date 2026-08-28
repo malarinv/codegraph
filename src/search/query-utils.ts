@@ -338,7 +338,11 @@ export function isTestPath(filePath: string): boolean {
     // CamelCase test source-set dirs (Kotlin Multiplatform / Gradle / Xcode):
     // jvmTest/, commonTest/, androidTest/, iosTest/, integrationTest/. Capital-led
     // so "latest/" / "manifest/" are not matched.
-    /(?:^|\/)[A-Za-z0-9]*(?:Test|Tests|Spec)\//.test(filePath)
+    /(?:^|\/)[A-Za-z0-9]*(?:Test|Tests|Spec)\//.test(filePath) ||
+    // Test-support modules and doubles by directory name: Gradle's
+    // `core/data-test/`, `core/datastore-test/`, `:testing`; Go's `testdata/`;
+    // `testutil(s)/`, `test-utils/`, `fakes/`, `mocks/`, `__mocks__/`.
+    /(?:^|\/)(?:[\w.]+[-_]test(?:s|ing)?|testdata|testutils?|test[-_]utils?|fakes?|mocks?|__mocks__|stubs)\//.test(lower)
   ) {
     return true;
   }
@@ -355,8 +359,13 @@ function matchesNonProductionDir(lowerPath: string): boolean {
     'integration', 'sample', 'samples', 'example', 'examples',
     'fixture', 'fixtures', 'benchmark', 'benchmarks', 'demo', 'demos',
   ];
+  // Only the project layout above a `src/` counts, never the package path
+  // below it: `core/data/src/main/kotlin/com/google/samples/apps/…` is a
+  // Google sample by name and production code by layout.
+  const src = lowerPath.indexOf('/src/');
+  const scope = src >= 0 ? lowerPath.slice(0, src + 1) : lowerPath.startsWith('src/') ? '' : lowerPath;
   for (const dir of dirs) {
-    if (lowerPath.includes('/' + dir + '/') || lowerPath.startsWith(dir + '/')) {
+    if (scope.includes('/' + dir + '/') || scope.startsWith(dir + '/')) {
       return true;
     }
   }

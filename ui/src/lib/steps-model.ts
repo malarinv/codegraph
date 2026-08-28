@@ -63,36 +63,66 @@ const HIT_SAMPLES = 24;
 
 /* ---------------------------------------------------------------- words -- */
 
-/** A short word for a step's kind, as the panel and the legend say it. */
-export function kindWord(kind: WireStep['kind']): string {
+/** What the index is a picture of; the server decides it from the routes (`WireStepsPayload.project`). */
+export type ProjectKind = WireStepsPayload['project'];
+
+/**
+ * A short word for a step's kind, as the panel and the legend say it — in the
+ * project's own vocabulary. The same box is a screen in an app, a page in a
+ * web app and an endpoint in an API; a route that leads with an HTTP verb is
+ * an endpoint wherever it is. One place decides, so the legend, the panel
+ * and the tooltip never disagree.
+ */
+export function kindWord(kind: WireStep['kind'], project: ProjectKind = 'app', step?: WireStep): string {
+  return kindWords(kind, project, step)[0];
+}
+
+/** The singular and the plural, for counts: `1 endpoint`, `3 outside the index`. */
+export function kindWords(kind: WireStep['kind'], project: ProjectKind = 'app', step?: WireStep): [string, string] {
   switch (kind) {
     case 'screen':
-      return 'screen';
+      if (step?.screen?.endpoint) return ['endpoint', 'endpoints'];
+      return project === 'api' ? ['endpoint', 'endpoints'] : project === 'web' ? ['page', 'pages'] : ['screen', 'screens'];
     case 'trigger':
-      return 'handler';
+      return ['handler', 'handlers'];
     case 'bridge':
-      return 'native call';
+      return project === 'app' ? ['native call', 'native calls'] : project === 'web' ? ['call to the server', 'calls to the server'] : ['call to another tier', 'calls to another tier'];
     case 'event':
-      return 'native event';
+      return project === 'app' ? ['native event', 'native events'] : project === 'web' ? ['arrives from the server', 'arrive from the server'] : ['arrives from a queue or bus', 'arrive from a queue or bus'];
     case 'store':
-      return 'store action';
+      return project === 'api' ? ['data call', 'data calls'] : ['store action', 'store actions'];
     case 'effect':
-      return 'outside the index';
+      return ['outside the index', 'outside the index'];
     default:
-      return 'start';
+      return ['start', 'start'];
   }
+}
+
+/** `3 handlers`, `1 endpoint`, `11 outside the index`. */
+export function countWords(n: number, kind: WireStep['kind'], project: ProjectKind = 'app'): string {
+  const [one, many] = kindWords(kind, project);
+  return `${n} ${n === 1 ? one : many}`;
 }
 
 /**
  * What fires something, in a few characters: `onPress · <Button>`,
- * `onSubmit · useFormik(…)`, `addListener('onZipComplete')`, `useEffect`.
+ * `onSubmit · useFormik(…)`, `addListener('onZipComplete')`, `useEffect`;
+ * for a server, `POST /users · after authenticate, validate(…)`,
+ * `@Process('email')`, `page load · /blog/[slug]`.
  */
 export function triggerWords(t: WireStepTrigger): string {
+  const after = t.after && t.after.length > 0 ? ` · after ${t.after.join(', ')}` : '';
   switch (t.kind) {
     case 'prop':
       return t.of ? `${t.name} · <${t.of}>` : t.name;
     case 'option':
       return t.of ? `${t.name} · ${t.of}(…)` : t.name;
+    case 'request':
+      return `${t.name} ${t.of ?? ''}`.trim() + after;
+    case 'decorator':
+      return `@${t.name}(${t.of ?? ''})` + after;
+    case 'load':
+      return `page load · ${t.of ?? t.name}` + after;
     default:
       return t.of ? `${t.name}(${t.of})` : t.name;
   }
@@ -114,7 +144,7 @@ export function stepLabel(step: WireStep): string {
 }
 
 /** The second line: what the step is, then where it is. */
-export function stepSub(step: WireStep): string {
+export function stepSub(step: WireStep, project: ProjectKind = 'app'): string {
   const file = step.node ? step.node.file.slice(step.node.file.lastIndexOf('/') + 1) : '';
   switch (step.kind) {
     case 'screen':
@@ -123,15 +153,16 @@ export function stepSub(step: WireStep): string {
       // The event before the file: `onPress · <Button> · index.tsx`.
       return step.trigger ? `${triggerWords(step.trigger)} · ${file}` : `handler · ${file}`;
     case 'bridge':
-      return `native · ${file}`;
+      return `${project === 'app' ? 'native' : project === 'web' ? 'server' : 'another tier'} · ${file}`;
     case 'event':
       return `${step.label} · ${file}`;
     case 'store':
-      return `store · ${file}`;
+      return `${project === 'api' ? 'data' : 'store'} · ${file}`;
     case 'effect':
       return step.sub;
     default:
-      return step.sub;
+      // The anchor: its file, at the size of a box; the panel prints the whole path.
+      return step.node && step.sub === step.node.file ? file : step.sub;
   }
 }
 
@@ -156,7 +187,7 @@ export function buildStepsModel(payload: WireStepsPayload): StepsModel {
   }
   for (const step of payload.steps) {
     counts[step.kind]++;
-    const info: StepNodeInfo = { id: step.id, step, label: stepLabel(step), sub: stepSub(step) };
+    const info: StepNodeInfo = { id: step.id, step, label: stepLabel(step), sub: stepSub(step, payload.project) };
     nodes.set(step.id, info);
     modules.push({
       id: step.id,

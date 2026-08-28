@@ -21,8 +21,10 @@
   import KindGlyph from '../components/KindGlyph.svelte';
   import {
     canDrawSteps,
+    fetchRoutes,
     fetchScreens,
     fetchSteps,
+    type WireRoute,
     type WireScreen,
     type WireStepLink,
     type WireStepsPayload,
@@ -35,6 +37,7 @@
   import {
     buildStepsModel,
     kindWord,
+    kindWords,
     stepNeighbourhood,
     stepPairId,
     stepViaText,
@@ -62,8 +65,30 @@
   let viewport = $state<Viewport | undefined>(undefined);
   const HOVER_REACH = 10;
 
-  /** The chooser's list, when the view opens without an anchor. */
+  /** The chooser's lists, when the view opens without an anchor: the screens of an app, else the endpoints of an API. */
   let screens = $state<WireScreen[] | null>(null);
+  let routes = $state<WireRoute[] | null>(null);
+
+  /** What the chooser offers: null while reading. */
+  const chooser = $derived.by<'screens' | 'routes' | 'none' | null>(() => {
+    if (screens === null) return null;
+    if (screens.length > 0) return 'screens';
+    if (routes === null) return null;
+    return routes.length > 0 ? 'routes' : 'none';
+  });
+
+  /** Endpoints by the file they are registered in — the router file is how a reader groups them — biggest first, in registration order within. */
+  function routeGroups(list: WireRoute[]): Array<{ file: string; entries: WireRoute[] }> {
+    const byFile = new Map<string, WireRoute[]>();
+    for (const r of list) {
+      const group = byFile.get(r.routeFile) ?? [];
+      group.push(r);
+      byFile.set(r.routeFile, group);
+    }
+    return [...byFile]
+      .map(([file, entries]) => ({ file, entries: [...entries].sort((a, b) => a.routeLine - b.routeLine) }))
+      .sort((a, b) => b.entries.length - a.entries.length || a.file.localeCompare(b.file));
+  }
 
   const LEGEND_KEY = 'codegraph-ui:steps-legend';
   let legendOpen = $state(readLegendOpen());
@@ -82,7 +107,16 @@
     }
   });
 
-  const FIT = { fitViewOptions: { padding: 0.1, maxZoom: 1, minZoom: 0.4 } };
+  /**
+   * The fit. A picture of a few boxes is centred — and the key, bottom left,
+   * would sit on its second row; it is fitted to the right of the key instead.
+   * A picture of many boxes is fitted to the whole stage, as the Screens view's.
+   */
+  const fitOptions = $derived(
+    model !== null && model.layout.nodes.length <= 24 && legendOpen
+      ? { padding: { left: '440px', top: '32px', right: '32px', bottom: '32px' }, maxZoom: 1, minZoom: 0.4 }
+      : { padding: 0.1, maxZoom: 1, minZoom: 0.4 }
+  );
   const nodeTypes = { step: StepNode };
   const edgeTypes = { screen: ScreenEdge };
   const DEPTHS = [4, 6, 8, 10, 12];
@@ -107,11 +141,19 @@
       loading = false;
       error = null;
       fetchScreens(controller.signal)
-        .then((next) => {
+        .then(async (next) => {
           screens = next.routed ? next.screens : [];
+          // No screens: an API's endpoints are its places to start from.
+          if (next.routed) {
+            routes = [];
+            return;
+          }
+          const found = await fetchRoutes({ limit: 300 }, controller.signal);
+          routes = found.routed ? found.entries : [];
         })
         .catch(() => {
-          screens = [];
+          screens = screens ?? [];
+          routes = routes ?? [];
         });
       return () => controller.abort();
     }
@@ -162,6 +204,7 @@
       data: {
         layout: node,
         info: model.nodes.get(node.id)!,
+        project: payload?.project ?? 'app',
         selected: selected === node.id,
         dimmed: neighbours !== null && !neighbours.has(node.id),
         onSelect: (id: string) => {
@@ -333,20 +376,29 @@
     {:else if !asked}
       <div class="state chooser">
         <h2>What happens from where?</h2>
-        <p>
-          Pick a screen and this view draws everything it sets in motion — its handlers, the calls that
-          cross into native code, the events that come back, the state it writes, the requests that leave
-          the app — one box per step, an arrow for every way one leads to the next, and on each arrow the
-          condition under which it happens. Or search a symbol and choose <i>What happens from here</i>.
-        </p>
-        {#if screens === null}
-          <p class="dim">Reading screens…</p>
-        {:else if screens.length === 0}
-          <p class="dim">
-            No screens in this graph. Open a symbol from the search box and follow <i>What happens from here</i>,
-            or link here directly with <span class="mono">#/steps?symbol=&lt;name&gt;</span>.
+        {#if chooser === 'routes'}
+          <p>
+            Pick an endpoint and this view draws everything it sets in motion — its handler and what runs
+            before it, the calls into the database, a queue, another service, and every response it can
+            send — one box per step, an arrow for every way one leads to the next, and on each arrow the
+            condition under which it happens. Or search a symbol and choose <i>What happens from here</i>.
           </p>
         {:else}
+          <p>
+            Pick a screen and this view draws everything it sets in motion — its handlers, the calls that
+            cross into native code, the events that come back, the state it writes, the requests that leave
+            the app — one box per step, an arrow for every way one leads to the next, and on each arrow the
+            condition under which it happens. Or search a symbol and choose <i>What happens from here</i>.
+          </p>
+        {/if}
+        {#if chooser === null}
+          <p class="dim">Reading {screens === null ? 'screens' : 'endpoints'}…</p>
+        {:else if chooser === 'none'}
+          <p class="dim">
+            No screens or endpoints in this graph. Open a symbol from the search box and follow <i>What happens from here</i>,
+            or link here directly with <span class="mono">#/steps?symbol=&lt;name&gt;</span>.
+          </p>
+        {:else if chooser === 'screens' && screens !== null}
           <div class="chooser-list">
             {#each [...screens].sort((a, b) => b.outgoing + b.incoming - (a.outgoing + a.incoming) || a.path.localeCompare(b.path)) as screen (screen.id)}
               <a class="pick mono" href={stepsHref({ anchor: screen.id })}
@@ -354,6 +406,17 @@
               >
             {/each}
           </div>
+        {:else if routes !== null}
+          {#each routeGroups(routes) as group (group.file)}
+            <div class="group-h"><span class="mono">{group.file}</span><span class="dim">{group.entries.length}</span></div>
+            <div class="chooser-list">
+              {#each group.entries as route (route.routeId)}
+                <a class="pick mono" href={stepsHref({ anchor: route.routeId })}
+                  >{route.url} <span class="dim sans">{route.handler}</span></a
+                >
+              {/each}
+            </div>
+          {/each}
         {/if}
       </div>
     {:else if error !== null}
@@ -370,7 +433,7 @@
         {nodeTypes}
         {edgeTypes}
         fitView
-        {...FIT}
+        fitViewOptions={fitOptions}
         bind:viewport
         minZoom={0.2}
         maxZoom={3}
@@ -398,22 +461,58 @@
               <span class="k-box k-anchor mono"><span class="mark">●</span>start</span>
               <span>Where the picture starts; each row down is one more step away</span>
             </div>
-            <div class="lrow">
-              <span class="k-box mono">/path</span>
-              <span>A screen, or a handler — a function fired from a tap, an option, a listener; its line says the event</span>
-            </div>
-            <div class="lrow">
-              <span class="k-box k-cross mono">⇢ fn</span>
-              <span>The code crosses into native (⇢ a bridge call) or comes back from it (⇠ an event)</span>
-            </div>
-            <div class="lrow">
-              <span class="k-box k-store mono">set</span>
-              <span>A store action — a function in a store file</span>
-            </div>
-            <div class="lrow">
-              <span class="k-box k-effect mono">api</span>
-              <span>A call that leaves the index: the network, storage, the device, telemetry</span>
-            </div>
+            {#if payload.project === 'api'}
+              <div class="lrow">
+                <span class="k-box mono">POST /x</span>
+                <span>An endpoint — its verb and path — or a handler: a function a request, a job, an event or a schedule fires; its line says which</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-cross mono">⇢ fn</span>
+                <span>The code crosses a tier: a call into another service or a job put on a queue (⇢), or a job, an event, a message arriving (⇠)</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-store mono">set</span>
+                <span>A data call — a function in a store or state file</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-effect mono">db</span>
+                <span>A call that leaves the index: the database, the response, a queue, email, payments, a cache, auth, the network</span>
+              </div>
+            {:else if payload.project === 'web'}
+              <div class="lrow">
+                <span class="k-box mono">/path</span>
+                <span>A page, an endpoint, or a handler — a function an event, a request or a page load fires; its line says which</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-cross mono">⇢ fn</span>
+                <span>The code crosses to the server (⇢ a request, a server action) or comes back from it (⇠ a push, a stream)</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-store mono">set</span>
+                <span>A store action — a function in a store file</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-effect mono">api</span>
+                <span>A call that leaves the index: the network, the database, the response, storage, a queue, email</span>
+              </div>
+            {:else}
+              <div class="lrow">
+                <span class="k-box mono">/path</span>
+                <span>A screen, or a handler — a function fired from a tap, an option, a listener; its line says the event</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-cross mono">⇢ fn</span>
+                <span>The code crosses into native (⇢ a bridge call) or comes back from it (⇠ an event)</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-store mono">set</span>
+                <span>A store action — a function in a store file</span>
+              </div>
+              <div class="lrow">
+                <span class="k-box k-effect mono">api</span>
+                <span>A call that leaves the index: the network, storage, the device, telemetry</span>
+              </div>
+            {/if}
             <div class="lrow">
               <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line" /></svg>
               <span>Leads to — the plumbing between the two is folded into the line</span>
@@ -448,7 +547,7 @@
               {#if link.sites.length > 1}<span class="dim">{link.sites.length} ways</span>{/if}
               <span class="when">{@render words(conditionTokens(link.when))}</span>
               {#if link.label}<span class="dim">{link.label}</span>{/if}
-              {#if link.sites[0]}<span class="mono">{siteWords(link.sites[0])}</span>{/if}
+              {#if link.sites[0]}<span class="mono">{#if link.sites[0].status}<b class="status">{link.sites[0].status}</b> · {/if}{siteWords(link.sites[0])}</span>{/if}
             </div>
           {/each}
           {#if hoveredInfo.links.length > 5}<div class="dim">+{hoveredInfo.links.length - 5} more</div>{/if}
@@ -463,7 +562,7 @@
         <div class="head">
           <div>
             <div class="mono big">{selectedInfo.label}</div>
-            <div class="sub dim">{kindWord(selectedInfo.step.kind)}{#if selectedInfo.step.anchor} · where the picture starts{/if}</div>
+            <div class="sub dim">{kindWord(selectedInfo.step.kind, payload.project, selectedInfo.step)}{#if selectedInfo.step.anchor} · where the picture starts{/if}</div>
             {#if selectedInfo.step.trigger}
               <div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(selectedInfo.step.trigger)} <span class="dim">in {selectedInfo.step.trigger.in}</span></div>
             {/if}
@@ -494,7 +593,7 @@
           <button class="clear" onclick={() => (selected = null)}>clear</button>
         </div>
         {#if selectedInfo.step.cut === 'screen'}
-          <p class="dim note">Another screen — a chapter of its own. Start here to see what happens on it, or continue through screens from the summary.</p>
+          <p class="dim note">Another {kindWord('screen', payload.project, selectedInfo.step)} — a chapter of its own. Start here to see what happens on it, or continue through {kindWords('screen', payload.project)[1]} from the summary.</p>
         {:else if selectedInfo.step.cut === 'component'}
           <p class="dim note">The event lands in a component of another screen — a picture of its own. Start here to see it, or continue through screens from the summary.</p>
         {:else if selectedInfo.step.cut !== null}
@@ -510,6 +609,9 @@
         {/if}
         {#if selectedInfo.step.effect && selectedInfo.step.effect.apis.length > 1}
           <p class="dim note mono">{selectedInfo.step.effect.apis.join(' · ')}</p>
+        {/if}
+        {#if selectedInfo.step.effect?.category === 'response'}
+          <p class="dim note">The endpoint’s contract as the code has it: each row below is one way it answers, with the condition it answers under.</p>
         {/if}
         {#if selectedInfo.step.events && selectedInfo.step.events.length > 1}
           <p class="dim note mono">⇠ {selectedInfo.step.events.join(' · ')}</p>
@@ -551,9 +653,9 @@
                 {/if}
                 {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
                 {#if href}
-                  <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
+                  <a class="site" {href}>{#if row.site.status}<b class="status">{row.site.status}</b> · {/if}{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
                 {:else}
-                  <span class="site">{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
+                  <span class="site">{#if row.site.status}<b class="status">{row.site.status}</b> · {/if}{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
                 {/if}
               </div>
             {/each}
@@ -593,9 +695,9 @@
                 {/if}
                 {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
                 {#if href}
-                  <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
+                  <a class="site" {href}>{#if row.site.status}<b class="status">{row.site.status}</b> · {/if}{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
                 {:else}
-                  <span class="site">{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
+                  <span class="site">{#if row.site.status}<b class="status">{row.site.status}</b> · {/if}{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
                 {/if}
               </div>
             {/each}
@@ -638,14 +740,15 @@
         <p>
           <label class="opt">
             <input type="checkbox" checked={payload.through} onchange={(e) => navigate(rewrite({ through: (e.currentTarget as HTMLInputElement).checked }))} />
-            Continue through screens
+            Continue through {kindWords('screen', payload.project)[1]}
           </label>
-          <span class="dim">— otherwise another screen is drawn as a boundary, and is a click from being the next anchor.</span>
+          <span class="dim">— otherwise another {kindWord('screen', payload.project)} is drawn as a boundary, and is a click from being the next anchor.</span>
         </p>
         <p class="counts">
           {#each ['screen', 'trigger', 'bridge', 'event', 'store', 'effect'] as const as kind (kind)}
             {#if model.counts[kind] > 0}
-              <span><b>{model.counts[kind]}</b> {kindWord(kind)}{model.counts[kind] === 1 ? '' : 's'}</span>
+              {@const words = kindWords(kind, payload.project)}
+              <span><b>{model.counts[kind]}</b> {model.counts[kind] === 1 ? words[0] : words[1]}</span>
             {/if}
           {/each}
         </p>
@@ -665,7 +768,7 @@
         {/if}
         <h4>Most connected</h4>
         {#each [...payload.steps].sort((a, b) => (model.layout.nodes.find((n) => n.id === b.id)?.ports.top.length ?? 0) + (model.layout.nodes.find((n) => n.id === b.id)?.ports.bottom.length ?? 0) - ((model.layout.nodes.find((n) => n.id === a.id)?.ports.top.length ?? 0) + (model.layout.nodes.find((n) => n.id === a.id)?.ports.bottom.length ?? 0))).slice(0, 8) as step (step.id)}
-          <button class="peer mono" onclick={() => (selected = step.id)}>{model.nodes.get(step.id)?.label ?? step.label} <span class="dim sans">{kindWord(step.kind)}</span></button>
+          <button class="peer mono" onclick={() => (selected = step.id)}>{model.nodes.get(step.id)?.label ?? step.label} <span class="dim sans">{kindWord(step.kind, payload.project, step)}</span></button>
         {/each}
       {/if}
     </aside>
@@ -729,6 +832,19 @@
     gap: 0;
     margin-top: 12px;
     border-top: 1px solid var(--rule-soft);
+  }
+  /* A router file heading over its endpoints; the list under it keeps its own top rule. */
+  .group-h {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-top: 18px;
+    font-size: 11.5px;
+    color: var(--ink-2);
+  }
+  .group-h + .chooser-list {
+    margin-top: 6px;
   }
   .pick {
     display: block;
@@ -983,6 +1099,11 @@
     color: var(--ink-2);
     text-decoration: none;
     overflow-wrap: anywhere;
+  }
+  /* A response's status code leads its row: the number is the fact. */
+  .status {
+    color: var(--ink);
+    font-weight: 600;
   }
   a.site:hover {
     text-decoration: underline;
