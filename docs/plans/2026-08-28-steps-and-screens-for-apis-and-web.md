@@ -2,7 +2,8 @@
 
 **Status:** plan, written 2026-08-28 at the end of the session that built the Steps view and the
 readings it rests on (Expo + React Native app, `amniservices-mobile-app`). **Updated the same day, later
-sessions: P0–P6 are built** (see the per-item notes marked *Built*); P7's agent A/B numbers are open. Every claim about what a
+sessions: P0–P6 are built** (see the per-item notes marked *Built*); P7 has its first agent A/B (proshop, small) and
+the medium / large rows are open. Every claim about what a
 resolver emits *today* was verified against the source on this date — re-verify before building on it,
 the resolvers move. What was learned building it, beyond the plan: the index keeps only the LAST
 segment of a deep member call (`create` for `prisma.user.create`) and name-matches it — often to the
@@ -354,6 +355,8 @@ its `redirect` on the FILE node (Screens now re-attributes a file-scope navigati
 `useActionState(signIn, …)` leaves no function-as-value edge (a plain call argument — Screens now falls back to the
 functions that MENTION the value in the files importing it, read from the source; the principled fix is an extractor
 fnRef rule for `useActionState` / `useFormState` / `startTransition` arguments, with the Rust kernel twin).
+With both: 12 screens, 17 links, 8 origins — `/sign-in → /dashboard via Login > signIn WHEN userWithTeam.length !== 0 &&
+isPasswordValid && redirectTo !== 'checkout'`, `/dashboard/security → /sign-in via deleteAccount WHEN isPasswordValid`.
 
 *Where:* `resolution/frameworks/react.ts` (split a `nextjs.ts` out of it — the pages/app routing is
 already there), a `next-router-synthesizer.ts` modelled on `expo-router-synthesizer.ts`.
@@ -420,6 +423,18 @@ names and the frameworks detected, so the viewer does not guess).
   Entry points view is the honest list until then.
 
 ### P7 — Validation set and the numbers
+
+*First numbers* (2026-08-28, later session) — the deterministic half is in the playbook §6 rows (Next.js, MERN, Nest
+channels, FastAPI prefixed routers, ASP.NET endpoint groups: node counts, edge precision spot-checks, pictures). One agent
+A/B so far, `bradtraversy/proshop_mern` (small, Express + React), `scripts/agent-eval/run-all.sh`, Sonnet/high, 2 runs per
+arm, a daemon pre-warmed before each with-run, the CLI shim on (0 leaks): *"How does submitting the login form reach the
+database, and what does the API respond with when the password is wrong?"* — with codegraph 14s / 14s, 2 tool calls, 0 Read,
+0 Grep, 1–2 explores, the full path named (`submitHandler → login → POST /api/users/login → authUser → User.findOne →
+matchPassword → 401`); without 18s / 37s, 14 / 8 tool calls, 7 / 1 Read plus Bash `cat`s and a subagent. Tokens 153k/165k vs
+237k/369k. The pass bar (§4 of the playbook) holds on the small repo. **Still open:** the medium / large rows (Ghost,
+immich, cal.com / twenty), ≥3 prompts per framework, and a control repo. The driver lives in the session scratchpad
+(`ab-proshop.sh`: pre-warm `serve --mcp` with `CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS` high and `CODEGRAPH_WASM_RELAUNCHED=1`,
+then `run-all.sh` per run with its own `AGENT_EVAL_OUT`); re-create it from the memory note.
 
 Small fixtures live in the tests. For the real bar, index these and record the results in
 `docs/design/dynamic-dispatch-coverage-playbook.md` (new rows) exactly as the playbook asks
