@@ -11,6 +11,7 @@ import { laravelResolver } from './laravel';
 import { expressResolver } from './express';
 import { nestjsResolver } from './nestjs';
 import { reactResolver } from './react';
+import { nextjsResolver } from './nextjs';
 import { svelteResolver } from './svelte';
 import { vueResolver } from './vue';
 import { astroResolver } from './astro';
@@ -42,6 +43,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   expressResolver,
   nestjsResolver,
   reactResolver,
+  // Next.js — `app/**/page.tsx` + `pages/**` → route nodes; `route.ts` exports → endpoints; `router.push('/x')` / `redirect('/x')` → navigates edges
+  nextjsResolver,
   svelteResolver,
   vueResolver,
   astroResolver,

@@ -307,7 +307,7 @@ export function toHref(literal: string | null): HrefLiteral | null {
  * with a literal `pathname`, or a conditional whose two arms are each one of
  * those (`cond ? \`/x?id=${id}\` : '/x'`). Anything else is not static.
  */
-function parseHrefExpression(expr: string): HrefLiteral | null {
+export function parseHrefExpression(expr: string): HrefLiteral | null {
   // `expr as any` / `expr satisfies Href` — a cast says nothing about the value.
   let args = expr.trim().replace(/\s+(?:as|satisfies)\s+[\w$.<>[\]|&\s]+$/, '');
   // `(a ? b : c)` — unwrap one layer of grouping parens.
@@ -351,7 +351,7 @@ export function readHrefArgument(
 }
 
 /** The source text of the navigation call's first argument, or null when there is no call there. */
-function firstArgumentText(
+export function firstArgumentText(
   lines: readonly string[],
   line: number,
   column: number,
@@ -542,12 +542,22 @@ export function matchRoute(segs: string[], table: RouteTable): Node | null {
   return best && !tied ? best.node : null;
 }
 
+/** A route segment that takes a value: Expo's `[id]`, or the `:id` every other framework's routes use. */
+function isParamSegment(seg: string): boolean {
+  return (seg.startsWith('[') && seg.endsWith(']')) || (seg.startsWith(':') && !seg.endsWith('*'));
+}
+
+/** A route segment that takes the rest of the path: `[...slug]`, or `:slug*`. */
+function isCatchAllSegment(seg: string): boolean {
+  return (seg.startsWith('[...') && seg.endsWith(']')) || (seg.startsWith(':') && seg.endsWith('*'));
+}
+
 function scoreMatch(href: string[], route: string[]): number | null {
   let score = 0;
   let i = 0;
   for (let r = 0; r < route.length; r++) {
     const seg = route[r]!;
-    if (seg.startsWith('[...') && seg.endsWith(']')) {
+    if (isCatchAllSegment(seg)) {
       // Catch-all: needs at least one segment and takes the rest.
       if (i >= href.length) return null;
       score += href.length - i;
@@ -556,7 +566,7 @@ function scoreMatch(href: string[], route: string[]): number | null {
     }
     if (i >= href.length) return null;
     const h = href[i]!;
-    if (seg.startsWith('[') && seg.endsWith(']')) score += 2;
+    if (isParamSegment(seg)) score += 2;
     else if (h === seg) score += 3;
     else if (h === '*') score += 1;
     else return null;

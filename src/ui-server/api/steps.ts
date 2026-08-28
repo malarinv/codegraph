@@ -44,6 +44,7 @@ import { createSiteReader } from './when';
 import type { SiteTrigger } from '../../graph/branch-guards';
 import { classifyEffect, responseStatus, type Effect } from './effects';
 import { looksLikeComponent, routeRoots } from './route-roots';
+import { nextRouteForFile } from '../../resolution/frameworks/nextjs';
 import { splitRouteName } from './routes';
 import { HUB_THRESHOLD, UNCERTAIN_BELOW, toNodeRef, type WireNodeRef } from './wire';
 import { isTestPath } from '../../search/query-utils';
@@ -452,10 +453,13 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     return [...new Set(after)];
   };
 
-  /** The request a route's handler serves, as its trigger. */
+  /** The request a route's handler serves, as its trigger; a Next page's own work fires from its load. */
   const requestTrigger = async (route: Node, root: Node | null): Promise<WireStepTrigger | null> => {
     const { method, path } = splitRouteName(route.name);
-    if (method === null) return null;
+    if (method === null) {
+      if (nextRouteForFile(route.filePath)?.kind === 'page') return { kind: 'load', name: 'GET', of: path, in: basename(route.filePath) };
+      return null;
+    }
     const after = await chainFor(route, root);
     return { kind: 'request', name: method, of: path, in: basename(route.filePath), ...(after.length > 0 ? { after } : {}) };
   };
@@ -633,7 +637,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
     if (args !== null) wireSite.args = args;
     if (effect.category === 'response') {
-      const status = responseStatus(text, args, ref.referenceKind);
+      // `NextResponse.json(user, { status: 201 })`: the code sits in an object
+      // the abbreviation reduced to its keys; the site reader kept it.
+      const status = responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null);
       if (status !== null) wireSite.status = status;
     }
     link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)));
@@ -1180,7 +1186,11 @@ export function projectKind(routes: readonly Node[], navigates: number): 'app' |
   let pages = 0;
   for (const r of routes) {
     if (splitRouteName(r.name).method !== null) endpoints++;
-    else if (r.name.startsWith('/')) pages++;
+    else if (r.name.startsWith('/')) {
+      pages++;
+      // A Next page is a web page whatever else the index holds.
+      if (nextRouteForFile(r.filePath)?.kind === 'page') return 'web';
+    }
   }
   if (endpoints === 0) return 'app';
   return navigates > 0 || pages > 0 ? 'web' : 'api';

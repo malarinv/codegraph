@@ -85,6 +85,15 @@ the call at request time from the directive. Validated on `bradtraversy/proshop_
 all correct on inspection, after Express mounts + chained `router.route()` landed) and `nestjs/nest` (`sample/26-queues`,
 `sample/30-event-emitter`); test `__tests__/ui-steps-cross-tier.test.ts`.
 
+## Next.js links (`src/resolution/next-router-synthesizer.ts`, 2026-08-28)
+
+`<Link href="/x">`, `<Link href={`/users/${id}`}>`, `<Link href={{ pathname }}>` and an internal `<a href>` are JSX
+attributes — no reference is ever extracted for them — so this pass reads them from the source, attributes each to the
+component it is written in, matches the href against the Next page table (`frameworks/nextjs.ts`) and synthesizes a
+`navigates` edge (`synthesizedBy:'next-link'`, `href`, `navMethod: 'link' | 'a'`, `registeredAt` = the JSX site). Only files
+under a Next app's root, never test files; ≤ 24 links per component (a navigation menu is not a decision); an external `<a>`
+is nothing. The Screens view walks back from these edges exactly as from `router.push`; they draw dashed.
+
 ## The hole
 
 ```ts

@@ -2,8 +2,7 @@
 
 **Status:** plan, written 2026-08-28 at the end of the session that built the Steps view and the
 readings it rests on (Expo + React Native app, `amniservices-mobile-app`). **Updated the same day, later
-sessions: P0, P1, P2, P3, P5 and P6 are built** (see the per-item notes marked *Built*); P4 (Next.js as a
-Screens app) and P7's agent A/B numbers are open. Every claim about what a
+sessions: P0–P6 are built** (see the per-item notes marked *Built*); P7's agent A/B numbers are open. Every claim about what a
 resolver emits *today* was verified against the source on this date — re-verify before building on it,
 the resolvers move. What was learned building it, beyond the plan: the index keeps only the LAST
 segment of a deep member call (`create` for `prisma.user.create`) and name-matches it — often to the
@@ -334,6 +333,16 @@ the route with `through=1`.
 prisma.user.create → response`, dashed where synthesized, with `registeredAt` in the panel.
 
 ### P4 — Next.js as a Screens app
+
+*Built* (2026-08-28, later session) — `frameworks/nextjs.ts` split out of `react.ts` (App Router pages and `route.ts` handlers,
+Pages Router pages and `pages/api`, `(group)` stripped, `[slug]` → `:slug`, `[...all]` → `:all*`, parallel / intercepting
+routes skipped; a page's `calls` ref to its default export via `defaultExportName`; `resolve()` claiming `router.push|replace|
+prefetch`, `redirect`, `permanentRedirect`, `NextResponse.redirect(new URL(…))` through the Expo href readers — now exported —
+against a Next-only route table gated on the app's root), `next-router-synthesizer.ts` (`<Link href>`, internal `<a href>` →
+dashed `navigates` from the component), `scoreMatch` accepting `:param` / `:all*`, the `load` trigger and `project: 'web'` for a
+Next page in `steps.ts`, `{ status: 201 }` read off the call site for response rows. Test `__tests__/nextjs.test.ts`.
+Route-handler references resolve by name with the same-file preference (`GET` / `POST` are common names). **Not built:** `revalidatePath`
+as a refresh, `middleware.ts` `config.matcher` as a global guard, a helper's return value as a destination (Expo has it).
 
 *Where:* `resolution/frameworks/react.ts` (split a `nextjs.ts` out of it — the pages/app routing is
 already there), a `next-router-synthesizer.ts` modelled on `expo-router-synthesizer.ts`.

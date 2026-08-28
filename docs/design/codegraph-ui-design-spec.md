@@ -440,6 +440,18 @@ for a pair with several. Placement: at the FAR end of the line; first lane centr
 lane; never over a box; overflow counted in the panel. Panel row hover: that pill prints the whole condition (wraps at
 360px), its line at 1.0, the rest at 0.38; a hovered line tints its row `--press`. Legend bottom-left, remembered per browser.
 
+**Frameworks.** The picture is a pure function of `route` nodes bound to the component that renders them and `navigates` edges
+from the function that pushes a path to the route it names, so any framework that produces those facts lands here. Expo Router
+(`resolution/frameworks/expo-router.ts`): `app/**` screen files, `router.push` / `navigate` / `replace` and a helper's return value.
+Next.js (`frameworks/nextjs.ts`, `next-router-synthesizer.ts`): App Router `app/**/page.tsx` and Pages Router pages (`(group)`
+stripped, `[slug]` → `:slug`, `[...all]` → `:all*`; `@slot` and `(.)intercepting` routes not modelled), bound to the default export;
+`router.push` / `replace` / `prefetch`, `redirect` / `permanentRedirect`, `NextResponse.redirect(new URL(…))` read like an Expo href
+(string, template with holes, `{ pathname }`, a conditional whose arms agree, a local `const href`) and matched against the Next
+pages only, from files under a Next app's root; `<Link href>` and an internal `<a href>` are markup, not calls, so a synthesizer
+reads them and draws a dashed `navigates` edge from the component (`synthesizedBy: 'next-link'`, the site as `registeredAt`).
+`app/api/**/route.ts` exports and `pages/api/*` are endpoints, not screens (`POST /api/users`, `ANY /api/users`), so the same
+index is a web app: pages on this tab, endpoints in Entry points, and a page's Steps picture firing from its load.
+
 ### 3.13 Steps (`#/steps?anchor=<id>` | `?symbol=<name>`, `&depth=`)
 What happens from an anchor — a screen, a handler, any symbol — drawn with the Screens view's machinery (§3.12's
 layout, tracks, pills, nearest-line pointer, panel) over a different node universe. `/api/steps` walks FORWARD from

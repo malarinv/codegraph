@@ -29,6 +29,7 @@ import { stripCommentsForRegex } from './strip-comments';
 import { cFnPointerDispatchEdges } from './c-fnptr-synthesizer';
 import { goframeRouteEdges } from './goframe-synthesizer';
 import { expoRouterReturnEdges } from './expo-router-synthesizer';
+import { nextLinkEdges } from './next-router-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
 import { crossTierEdges } from './tier-synthesizer';
 import { enclosingFn, makeLineAt } from './synth-utils';
@@ -3601,6 +3602,8 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'goframeEdges', gate: (has) => has('go'), run: (_q, c, y) => goframeRouteEdges(c, y) },
   // `router.push(await helper())` — the helper's return literals are the screens.
   { name: 'expoRouterReturnEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => expoRouterReturnEdges(c, y) },
+  // `<Link href="/x">` / an internal `<a href>` — markup, not a call; the component navigates.
+  { name: 'nextLinkEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => nextLinkEdges(c, y) },
   { name: 'nixOptionEdges', gate: (has) => has('nix'), run: (q, _c, y) => nixOptionPathEdges(q, y) },
 ];
 

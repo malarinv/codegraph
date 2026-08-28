@@ -433,6 +433,26 @@ export interface CallSiteText {
   args: string;
   /** The same arguments one by one — a registration site's middleware chain is `argList.slice(1, -1)`. */
   argList: string[];
+  /** A status code written as an object property in the arguments (`{ status: 201 }`), which the abbreviation to keys would hide. */
+  status?: number;
+}
+
+const STATUS_KEY = /^(?:status|statusCode|status_code|code)$/;
+
+/** `{ status: 201 }` inside an argument — the literal an abbreviated object hides. */
+function statusPropertyIn(node: SyntaxNode, depth = 0): number | null {
+  if (depth > 2) return null;
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const c = node.namedChild(i)!;
+    if (c.type === 'pair' || c.type === 'keyword_argument' || c.type === 'named_argument' || c.type === 'property_assignment' || c.type === 'object_property') {
+      const key = c.childForFieldName('key') ?? c.childForFieldName('name') ?? c.namedChild(0);
+      const value = c.childForFieldName('value') ?? c.namedChild(c.namedChildCount - 1);
+      if (key && value && STATUS_KEY.test(key.text.replace(/['"]/g, '')) && /^[1-5]\d{2}$/.test(value.text)) return Number(value.text);
+    }
+    const inner = statusPropertyIn(c, depth + 1);
+    if (inner !== null) return inner;
+  }
+  return null;
 }
 
 /** Longest callee text kept before it is cut. */
@@ -473,13 +493,15 @@ export function callSiteInTree(root: SyntaxNode, source: string, line: number, c
   const callee = calleeChainText(call, container);
   if (container.type === 'lambda_literal') return { callee, args: '{ … }', argList: ['{ … }'] };
   const parts: string[] = [];
+  let status: number | null = null;
   for (let i = 0; i < container.namedChildCount; i++) {
     const c = container.namedChild(i);
     if (!c || c.type === 'comment') continue;
     parts.push(abbreviateArgument(c, source));
+    if (status === null && c.type !== 'comment') status = statusPropertyIn(c);
   }
   const text = parts.join(', ');
-  return { callee, args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text, argList: parts };
+  return { callee, args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text, argList: parts, ...(status !== null ? { status } : {}) };
 }
 
 /** The text of a call before its arguments, normalised to a member chain. */

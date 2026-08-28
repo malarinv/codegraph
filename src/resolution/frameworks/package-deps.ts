@@ -19,10 +19,19 @@ export function declaredDependencies(context: ResolutionContext): Set<string> {
   const cached = cache.get(context);
   if (cached) return cached;
   const names = new Set<string>();
-  const manifests = ['package.json'];
+  // The index lists source files, never manifests: the candidate directories
+  // are the first one or two segments of what IS indexed, probed on disk.
+  const dirs = new Set<string>();
   for (const file of context.getAllFiles()) {
+    const segs = file.split('/');
+    if (segs.length > 1) dirs.add(segs[0] + '/');
+    if (segs.length > 2) dirs.add(segs[0] + '/' + segs[1] + '/');
+    if (dirs.size > MAX_MANIFESTS * 8) break;
+  }
+  const manifests = ['package.json'];
+  for (const dir of dirs) {
     if (manifests.length > MAX_MANIFESTS) break;
-    if (/^(?:[^/]+\/){1,2}package\.json$/.test(file) && !file.includes('node_modules/')) manifests.push(file);
+    if (!dir.includes('node_modules') && context.fileExists(dir + 'package.json')) manifests.push(dir + 'package.json');
   }
   for (const manifest of manifests) {
     const content = context.readFile(manifest);

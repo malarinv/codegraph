@@ -1516,6 +1516,7 @@ app.get(
 });
 
 import { reactResolver } from '../src/resolution/frameworks/react';
+import { nextjsResolver } from '../src/resolution/frameworks/nextjs';
 import { svelteResolver } from '../src/resolution/frameworks/svelte';
 import { astroResolver } from '../src/resolution/frameworks/astro';
 
@@ -1555,13 +1556,14 @@ describe('reactResolver.extract — React Router', () => {
   });
 
   it('does not treat config files or a nextjs-pages dir as Next.js routes', () => {
-    const cfg = reactResolver.extract!('apps/nextjs-pages/next.config.mjs', 'export default {}');
+    const cfg = nextjsResolver.extract!('apps/nextjs-pages/next.config.mjs', 'export default {}');
     expect(cfg.nodes.filter((n) => n.kind === 'route')).toHaveLength(0);
-    const vite = reactResolver.extract!('src/pages/vite.config.ts', 'export default {}');
+    const vite = nextjsResolver.extract!('src/pages/vite.config.ts', 'export default {}');
     expect(vite.nodes.filter((n) => n.kind === 'route')).toHaveLength(0);
-    // a real page still works
-    const page = reactResolver.extract!('src/pages/about.tsx', 'export default function About(){return null}');
+    // a real page still works — and the React resolver leaves it to the Next one
+    const page = nextjsResolver.extract!('src/pages/about.tsx', 'export default function About(){return null}');
     expect(page.nodes.filter((n) => n.kind === 'route').map((n) => n.name)).toEqual(['/about']);
+    expect(reactResolver.extract!('src/pages/about.tsx', 'export default function About(){return null}').nodes).toHaveLength(0);
   });
 });
 
