@@ -126,7 +126,7 @@ All three are **JS-family only** (`supportsBranchGuards`), Swift for guards. Pyt
 | **Next.js** (`frameworks/react.ts`) | `pages/**` and `app/**` files with `export default` → a route named by path (`/blog/:slug`) | none (the page component is the default export in the same file, not linked from the route) | none — no `navigates` for `<Link href>`, `router.push`, `redirect()` | `app/api/**/route.ts` handlers (`export async function GET`) are **not** routes; server actions (`'use server'`) unknown; `middleware.ts` unknown |
 | **React Router** | `<Route path component={C}/>` / `element={<C/>}`, object data-router (literal form) | `references` to the component | none | |
 | **SvelteKit / Vue / Nuxt / Astro** | file routes | `svelteKitLoadEdges`, `vueTemplateEdges`, Pinia/Vuex channels | none | |
-| **FastAPI / Django / Flask / Spring / Laravel / Rails / Gin / Axum** | routes + handler edges (resolvers) | yes | — | **no WHEN / arguments / triggers** (language rules missing) |
+| **FastAPI / Django / Flask / Spring / Laravel / Rails / Gin / Axum** | routes + handler edges (resolvers); FastAPI `APIRouter(prefix=)` + literal `include_router(prefix=)` composed since 2026-08-28 (`python.ts` `postExtract`) | yes | — | WHEN / arguments / triggers built for Python, Java, Kotlin, C#, Go, C (P5) |
 
 What the viewer does with that today: **Entry points** lists every route with its handler (this is the
 "Screens" of an API today); **Screens** answers "no screen navigation" for all of them; **Steps**
@@ -286,7 +286,11 @@ reading `tier` / `channel`, an endpoint reached across a tier drawn as a bridge 
 call never also an effect, a top-level `new Worker` landing on its constant with the file-scope calls lent to it; Express mounts
 (`app.use('/api', router)`, nested, by import or `require`) composed onto route names in `postExtract`, and the chained
 `router.route('/x').get(h).put(h2)` form extracted; `e2e/` counts as a test directory. Test: `__tests__/ui-steps-cross-tier.test.ts`.
-Verified on `bradtraversy/proshop_mern` (30 routes, 23 client→route edges, every one correct on inspection; `login` reads
+Later the same day: FastAPI `APIRouter(prefix=)` + literal `include_router(prefix=)` composed (`python.ts` `postExtract`;
+`fastapi/full-stack-fastapi-template` 23 routes now read `GET /items/{id}` instead of `GET /`; its `settings.API_V1_STR`
+mount is skipped, not guessed) and the ASP.NET endpoint-group form (`csharp.ts`: `groupBuilder.MapPost(Handler[, "path"])`
+under the class, the app's `$"/api/{groupName}"` head read in `postExtract`, `RoutePrefix` honoured — the
+`jasontaylordev/CleanArchitecture` shape). Verified on `bradtraversy/proshop_mern` (30 routes, 23 client→route edges, every one correct on inspection; `login` reads
 `login → ⇢ POST /api/users/login (authUser) → User.findOne({ email }) → 401 rows → jwt.sign via generateToken`, which needed
 `routeRoots` to accept a function-valued constant — `const authUser = asyncHandler(async (req, res) => …)` — and the walk to lend
 such a value the file-scope calls and unresolved refs within its lines; and framework detection to read a workspace's
@@ -343,6 +347,13 @@ dashed `navigates` from the component), `scoreMatch` accepting `:param` / `:all*
 Next page in `steps.ts`, `{ status: 201 }` read off the call site for response rows. Test `__tests__/nextjs.test.ts`.
 Route-handler references resolve by name with the same-file preference (`GET` / `POST` are common names). **Not built:** `revalidatePath`
 as a refresh, `middleware.ts` `config.matcher` as a global guard, a helper's return value as a destination (Expo has it).
+**Verified on `leerob/next-saas-starter`:** 8 pages + 4 endpoints, Screens routed (12 screens, 15 links), `<Link>`s in the
+layout, `redirect()` in the actions, `NextResponse.redirect` in the middleware and the checkout handler all bound. Two
+gaps it showed, both the wrapped-arrow idiom: `export const signIn = validatedAction(schema, async (data) => { … })` holds
+its `redirect` on the FILE node (Screens now re-attributes a file-scope navigation to the value spanning it), and
+`useActionState(signIn, …)` leaves no function-as-value edge (a plain call argument — Screens now falls back to the
+functions that MENTION the value in the files importing it, read from the source; the principled fix is an extractor
+fnRef rule for `useActionState` / `useFormState` / `startTransition` arguments, with the Rust kernel twin).
 
 *Where:* `resolution/frameworks/react.ts` (split a `nextjs.ts` out of it — the pages/app routing is
 already there), a `next-router-synthesizer.ts` modelled on `expo-router-synthesizer.ts`.

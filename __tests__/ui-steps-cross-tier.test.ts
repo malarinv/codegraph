@@ -167,12 +167,14 @@ beforeAll(async () => {
   write(
     'apps/web/components/orders.tsx',
     "'use client'\n" +
+      "import useSWR from 'swr'\n" +
       'export function Orders() {\n' +
+      "  const { data } = useSWR<Order[]>('/api/v1/orders', fetcher)\n" +
       '  async function loadOrders() {\n' +
       "    const res = await fetch('/api/v1/orders')\n" +
       '    return res.json()\n' +
       '  }\n' +
-      '  return null\n' +
+      '  return data\n' +
       '}\n'
   );
   write(
@@ -345,6 +347,11 @@ describe('express mounts: a mounted router’s routes are named by the path a re
     expect(edges).toHaveLength(1);
     expect(edges[0]!.target).toBe(route('GET /api/v1/orders').id);
     expect((edges[0]!.metadata as Record<string, unknown>).registeredAt).toBe('apps/api/src/orders.routes.ts:4');
+    // `useSWR<Order[]>('/api/v1/orders')` — a type argument between the name and the call.
+    const hook = synthesized(sym('Orders'), 'http-client');
+    expect(hook).toHaveLength(1);
+    expect(hook[0]!.target).toBe(route('GET /api/v1/orders').id);
+    expect((hook[0]!.metadata as Record<string, unknown>).callee).toBe('useSWR');
   });
 });
 

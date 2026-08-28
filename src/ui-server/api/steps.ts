@@ -1215,8 +1215,8 @@ function fileScopeEdgesWithin(cg: CodeGraph, node: Node, memo: Map<string, Edge[
     const file = cg.getNodesInFile(node.filePath).find((n) => n.kind === 'file');
     refs = file
       ? cg
-          .getOutgoingEdgesFrom([file.id], ['references', 'calls'])
-          .filter((e) => e.kind === 'calls' || (e.metadata as Record<string, unknown> | undefined)?.fnRef === true)
+          .getOutgoingEdgesFrom([file.id], ['references', 'calls', 'navigates'])
+          .filter((e) => e.kind !== 'references' || (e.metadata as Record<string, unknown> | undefined)?.fnRef === true)
       : [];
     memo.set(node.filePath, refs);
   }

@@ -27,9 +27,12 @@
  * hundred guarded call sites resolve in tens of milliseconds.
  */
 
+import * as fs from 'fs';
 import type CodeGraph from '../../index';
 import type { Edge, Node } from '../../types';
 import { routeRoots } from './route-roots';
+import { resolveProjectFile } from '../security';
+import { findIndexedFile, hasDriftedOnDisk } from './source';
 import { createWhenReader } from './when';
 import { toNodeRef, type WireNodeRef } from './wire';
 
@@ -133,6 +136,10 @@ const MAX_CALLERS_PER_NODE = 30;
 const MAX_VISITED = 800;
 /** Call sites labelled with conditions per request. */
 const MAX_WHEN_SITES = 600;
+/** Importing files read for mentions of a value nothing calls, and mentions taken, per navigation. */
+const MAX_MENTION_FILES = 6;
+const MAX_MENTIONS = 8;
+const MAX_MENTION_FILE_BYTES = 256 * 1024;
 
 /**
  * Edges walked backwards from a navigation call. `contains` because a handler
@@ -199,10 +206,21 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
   };
   let dropped = 0;
 
+  const valuesByFile = new Map<string, Node[]>();
   for (const nav of navEdges) {
-    const holder = nodesById.get(nav.source);
+    let holder = nodesById.get(nav.source);
     const target = routeById.get(nav.target);
     if (!holder || !target) continue;
+    // A navigation the file scope holds — `redirect('/dashboard')` inside
+    // `export const signIn = validatedAction(schema, async (data) => { … })`,
+    // whose arrow is no node of its own — belongs to the value that spans it:
+    // the action every form passes, and the way back to its page.
+    if (holder.kind === 'file' && typeof nav.line === 'number') {
+      const value = valueSpanning(cg, holder.filePath, nav.line, valuesByFile);
+      if (!value) continue;
+      holder = value;
+      nodesById.set(value.id, value);
+    }
     const meta = (nav.metadata ?? {}) as Record<string, unknown>;
     const site: WireScreenSite = {
       file: toPosix(holder.filePath),
@@ -212,7 +230,7 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
       when: nav.provenance === 'heuristic' ? '' : await whenAt(holder, nav),
     };
 
-    let starts = await attribute(cg, holder, screenOfComponent, routeByFile, nodesById);
+    let starts = await attribute(cg, projectRoot, holder, screenOfComponent, routeByFile, nodesById);
     if (starts === null) {
       dropped++;
       continue;
@@ -332,6 +350,7 @@ interface Attribution {
  */
 async function attribute(
   cg: CodeGraph,
+  projectRoot: string,
   holder: Node,
   screenOfComponent: Map<string, string>,
   routeByFile: Map<string, string>,
@@ -356,6 +375,20 @@ async function attribute(
       const list = byTarget.get(e.target) ?? [];
       list.push(e);
       byTarget.set(e.target, list);
+    }
+    // A value nothing calls — `export const signIn = validatedAction(schema,
+    // async (data) => { … redirect('/dashboard') })`, handed to
+    // `useActionState(signIn, …)` as a plain argument the graph keeps no
+    // function-as-value edge for — is used wherever a function in a file that
+    // imports it names it. Those mentions are its callers, read from the source.
+    for (const id of frontier) {
+      const value = nodes.get(id);
+      if (!value || (value.kind !== 'constant' && value.kind !== 'variable')) continue;
+      // The file that declares the value `contains` it; that is not a caller.
+      const callers = (byTarget.get(id) ?? []).filter((e) => e.kind !== 'contains');
+      if (callers.length > 0) continue;
+      const mentions = mentionsOf(cg, projectRoot, value);
+      if (mentions.length > 0) byTarget.set(id, [...callers, ...mentions]);
     }
     const nextIds: string[] = [];
     const wanted = new Set<string>();
@@ -434,6 +467,63 @@ function collapseSharedChrome(starts: Attribution[], origins: Map<string, WireSc
   }
   for (const s of starts) if (!collapsed.has(s)) out.push(s);
   return out;
+}
+
+/**
+ * Synthetic `references` edges from the functions that mention `value` by
+ * name in the files importing it (the import line itself excepted), read from
+ * the source at request time. Bounded: a handful of files, a handful of hits.
+ */
+function mentionsOf(cg: CodeGraph, projectRoot: string, value: Node): Edge[] {
+  const out: Edge[] = [];
+  const importers = cg
+    .getIncomingEdgesTo([value.id], ['imports'])
+    .map((e) => e.source)
+    .filter((id, i, all) => all.indexOf(id) === i)
+    .slice(0, MAX_MENTION_FILES);
+  if (importers.length === 0) return out;
+  const files = cg.getNodesByIds(importers);
+  const word = new RegExp(`(?<![\\w$.])${value.name.replace(/\$/g, '\\$')}(?![\\w$])`);
+  for (const file of files.values()) {
+    if (file.kind !== 'file') continue;
+    const found = findIndexedFile(cg, file.filePath.replace(/\\/g, '/'));
+    if (!found || hasDriftedOnDisk(projectRoot, found.storedPath, found.record)) continue;
+    let text: string;
+    try {
+      const abs = resolveProjectFile(projectRoot, found.storedPath);
+      if (fs.statSync(abs).size > MAX_MENTION_FILE_BYTES) continue;
+      text = fs.readFileSync(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    const functions = cg.getNodesInFile(file.filePath).filter((n) => n.kind === 'function' || n.kind === 'method' || n.kind === 'component');
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length && out.length < MAX_MENTIONS; i++) {
+      const line = lines[i]!;
+      if (!word.test(line) || /^\s*import\b|^\s*export\s*\{/.test(line)) continue;
+      let best: Node | null = null;
+      for (const fn of functions) {
+        if (fn.startLine <= i + 1 && fn.endLine >= i + 1 && (!best || fn.startLine >= best.startLine)) best = fn;
+      }
+      if (!best || best.id === value.id) continue;
+      out.push({ source: best.id, target: value.id, kind: 'references', line: i + 1, provenance: 'heuristic', metadata: { fnRef: true, mention: true } });
+    }
+  }
+  return out;
+}
+
+/** The smallest constant / variable of a file whose lines contain `line`, or null. */
+function valueSpanning(cg: CodeGraph, filePath: string, line: number, memo: Map<string, Node[]>): Node | null {
+  let values = memo.get(filePath);
+  if (!values) {
+    values = cg.getNodesInFile(filePath).filter((n) => n.kind === 'constant' || n.kind === 'variable');
+    memo.set(filePath, values);
+  }
+  let best: Node | null = null;
+  for (const v of values) {
+    if (v.startLine <= line && v.endLine >= line && (!best || v.startLine >= best.startLine)) best = v;
+  }
+  return best;
 }
 
 /** The chain from `start` down to the holder, following `prev` links. */

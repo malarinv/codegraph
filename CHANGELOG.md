@@ -36,6 +36,14 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A framework declared in a workspace's `package.json` is detected.** React, Next.js, Expo Router, Express and NestJS are found when their dependency lives in `frontend/`, `backend/`, `apps/web/` or `packages/api/` rather than at the repository root, so a monorepo's pages and endpoints exist in the index.
 
+- **FastAPI routes are named by the path a request takes.** `APIRouter(prefix="/items")` and a literal `app.include_router(router, prefix="/api/v1")` — nested through an aggregate router, through a module import or an alias — now compose onto the route names (`GET /api/v1/items/{id}` instead of `GET /{id}`); a prefix that is a setting rather than a string leaves that mount alone rather than guessing.
+
+- **A client call with a type argument binds too.** `useSWR<Team>('/api/team', fetcher)` and `ky.get<User>('/api/users/1')` reach their routes like the untyped forms.
+
+- **ASP.NET Minimal API endpoint groups are routes.** The handler-first form — `groupBuilder.MapPost(CreateTodoItem)`, `MapPut(UpdateTodoItem, "{id}")` inside an `IEndpointGroup` / `EndpointGroupBase` class (the Clean Architecture template and its descendants) — now registers `POST /api/TodoItems` and `PUT /api/TodoItems/{id}`, with the `/api/` head read from the app's own `MapGroup($"/api/{groupName}")` and a class's `RoutePrefix` honoured, each bound to its handler so the Steps tab starts there and lists its `TypedResults` replies by status code.
+
+- **A server action written through a wrapper starts its transition on the right page.** `export const signIn = validatedAction(schema, async (data) => { … redirect('/dashboard') })` — the arrow inside is no symbol of its own — now belongs to `signIn` on the Screens tab, and `signIn` is attributed to the page whose component hands it to `useActionState(signIn, …)`, read from the source when the graph holds no such edge.
+
 - **Files under an `e2e/` directory count as tests.** Their calls no longer appear as production callers in Steps, dead-code and test badges.
 
 - **Production code under a `samples` or `examples` package path is no longer treated as test code.** A Kotlin or Java project whose package path runs through `com/google/samples/…` (Now in Android, for one) had nearly every file counted as a fixture, so the Map opened on `build-logic`, the entry points hid the app, and dead-code and test badges were wrong. Only the project layout above a `src/` folder decides now; the package path below it never does.

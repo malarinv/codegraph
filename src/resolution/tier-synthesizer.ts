@@ -345,8 +345,13 @@ const CLIENT_NAMES =
   /^(?:axios|ky|got|superagent|http|https|httpClient|httpService|api|apiClient|client|restClient|request|agent|fetcher|instance|\$api|\$http|\$axios|axiosInstance|Axios|HttpClient|backend|server)$/;
 /** A receiver that registers routes, never a client — unless it was made by a client factory. */
 const SERVER_NAMES = /^(?:app|router|route|routes|express|fastify|koa|hono|elysia|apiRouter|v1|v2|r)$/;
-const BARE_CLIENT_CALL = /(?:(?:window|globalThis|global)\s*\.\s*)?\b(fetch|\$fetch|ofetch|axios|ky|got|useFetch|useSWR)\s*\(/g;
-const MEMBER_CLIENT_CALL = /((?:this\s*\.\s*)?[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\.\s*(get|post|put|patch|delete|head|options|request|\$get|\$post|\$put|\$patch|\$delete)\s*\(/g;
+/** A type argument between the callee and its `(` — `useSWR<TeamData>('/api/team')`, `ky.get<User>('/x')`. */
+const GENERIC = String.raw`(?:<[^()<>]*(?:<[^()<>]*>[^()<>]*)*>)?`;
+const BARE_CLIENT_CALL = new RegExp(String.raw`(?:(?:window|globalThis|global)\s*\.\s*)?\b(fetch|\$fetch|ofetch|axios|ky|got|useFetch|useSWR)\s*${GENERIC}\s*\(`, 'g');
+const MEMBER_CLIENT_CALL = new RegExp(
+  String.raw`((?:this\s*\.\s*)?[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\.\s*(get|post|put|patch|delete|head|options|request|\$get|\$post|\$put|\$patch|\$delete)\s*${GENERIC}\s*\(`,
+  'g'
+);
 
 interface HttpRoute {
   node: Node;
@@ -506,7 +511,7 @@ function collectHttpSites(ctx: ResolutionContext, facts: FileFacts, sites: HttpS
   const { safe, nodes, lineOf } = facts;
   const add = (index: number, open: number, verb: string | null, baseURL: string | null): void => {
     const line = lineOf(index);
-    const callee = safe.slice(index, open).replace(/\s+/g, '');
+    const callee = safe.slice(index, open).replace(/\s+/g, '').replace(/<.*>$/, '');
     if (facts.routeLines.has(line)) return; // a registration the resolver already read
     const fn = enclosingFn(nodes, line);
     if (!fn) return;
@@ -871,7 +876,7 @@ function pairEvents(dispatches: readonly Dispatch[], handlers: readonly Handler[
 // The pass
 // =============================================================================
 
-const HTTP_GATE = /\b(?:fetch|\$fetch|ofetch|axios|ky|got|useFetch|useSWR)\s*\(|\.\s*(?:get|post|put|patch|delete|head|options|request|\$get|\$post)\s*\(/;
+const HTTP_GATE = /\b(?:fetch|\$fetch|ofetch|axios|ky|got|useFetch|useSWR)\b|\.\s*(?:get|post|put|patch|delete|head|options|request|\$get|\$post)\s*[<(]/;
 const QUEUE_GATE = /\.\s*add\s*\(|@Processor\s*\(|\bnew\s+Worker\s*[<(]|\.\s*process\s*\(/;
 const EVENT_GATE = /\.\s*(?:emit|emitAsync|on|once)\s*\(|@OnEvent\s*\(|@SubscribeMessage\s*\(/;
 

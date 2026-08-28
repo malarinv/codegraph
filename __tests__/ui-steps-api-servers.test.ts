@@ -159,7 +159,27 @@ beforeAll(async () => {
   write('api/deps.py', 'def get_current_user():\n    return None\n\nSessionDep = None\n');
   write('api/models.py', 'class Item:\n    pass\n\nclass ItemCreate:\n    pass\n');
   write('api/tasks.py', 'from celery import shared_task\n\n@shared_task\ndef send_welcome(item_id):\n    return item_id\n');
-  write('api/main.py', 'from fastapi import FastAPI\nfrom .items import router\napp = FastAPI()\napp.include_router(router)\n');
+  // A router with its own prefix, included by an aggregate router, mounted at a literal prefix — and one at a computed one.
+  write(
+    'api/orders.py',
+    'from fastapi import APIRouter\n' +
+      '\n' +
+      'router = APIRouter(prefix="/orders", tags=["orders"])\n' +
+      '\n' +
+      '@router.get("/")\n' +
+      'def list_orders():\n' +
+      '    return []\n' +
+      '\n' +
+      '@router.get("/{order_id}")\n' +
+      'def get_order(order_id: int):\n' +
+      '    return order_id\n'
+  );
+  write('api/v1.py', 'from fastapi import APIRouter\nfrom .orders import router as orders_router\napi_router = APIRouter()\napi_router.include_router(orders_router)\n');
+  write(
+    'api/main.py',
+    'from fastapi import FastAPI\nfrom .items import router\nfrom .v1 import api_router\nfrom .config import settings\napp = FastAPI()\napp.include_router(router)\napp.include_router(api_router, prefix="/api/v1")\napp.include_router(api_router, prefix=settings.LEGACY)\n'
+  );
+  write('api/config.py', 'settings = None\n');
   write('requirements.txt', 'fastapi\nsqlmodel\ncelery\n');
   // ---- Spring: a repository typed on a field, ResponseEntity replies, a guard annotation.
   write(
@@ -188,6 +208,48 @@ beforeAll(async () => {
     'package demo;\nimport org.springframework.data.jpa.repository.JpaRepository;\npublic interface OwnerRepository extends JpaRepository<Owner, Integer> {\n}\n'
   );
   write('src/main/java/demo/Owner.java', 'package demo;\npublic class Owner {\n  private String name;\n  public String getName() { return name; }\n}\n');
+  // ---- ASP.NET Minimal API, endpoint-group style: the class is the group,
+  // the handler is the first argument, the app's extension supplies `/api/`.
+  write(
+    'src/Web/Endpoints/TodoItems.cs',
+    'using Microsoft.AspNetCore.Http.HttpResults;\n' +
+      'namespace Demo.Web.Endpoints;\n' +
+      'public class TodoItems : IEndpointGroup\n' +
+      '{\n' +
+      '    public static void Map(RouteGroupBuilder groupBuilder)\n' +
+      '    {\n' +
+      '        groupBuilder.RequireAuthorization();\n' +
+      '        groupBuilder.MapPost(CreateTodoItem);\n' +
+      '        groupBuilder.MapPut(UpdateTodoItem, "{id}");\n' +
+      '    }\n' +
+      '    public static async Task<Created<int>> CreateTodoItem(ISender sender, CreateTodoItemCommand command)\n' +
+      '    {\n' +
+      '        var id = await sender.Send(command);\n' +
+      '        return TypedResults.Created($"/{nameof(TodoItems)}/{id}", id);\n' +
+      '    }\n' +
+      '    public static async Task<Results<NoContent, BadRequest>> UpdateTodoItem(ISender sender, int id, UpdateTodoItemCommand command)\n' +
+      '    {\n' +
+      '        if (id != command.Id)\n' +
+      '            return TypedResults.BadRequest();\n' +
+      '        await sender.Send(command);\n' +
+      '        return TypedResults.NoContent();\n' +
+      '    }\n' +
+      '}\n'
+  );
+  write(
+    'src/Web/Infrastructure/WebApplicationExtensions.cs',
+    'using Microsoft.AspNetCore.Builder;\n' +
+      'namespace Demo.Web.Infrastructure;\n' +
+      'public static class WebApplicationExtensions\n' +
+      '{\n' +
+      '    public static WebApplication MapEndpoints(this WebApplication app)\n' +
+      '    {\n' +
+      '        var groupName = "x";\n' +
+      '        var group = app.MapGroup($"/api/{groupName}").WithTags(groupName);\n' +
+      '        return app;\n' +
+      '    }\n' +
+      '}\n'
+  );
   cg = CodeGraph.initSync(tmpDir);
   await cg.indexAll();
 });
@@ -303,6 +365,14 @@ describe('NestJS', () => {
 });
 
 describe('FastAPI', () => {
+  it('names a mounted router’s routes by the path a request takes — the include prefix, then the router’s own', () => {
+    const names = cg.getNodesByKind('route').map((r) => r.name);
+    expect(names).toContain('GET /api/v1/orders');
+    expect(names).toContain('GET /api/v1/orders/{order_id}');
+    expect(names).toContain('POST /items');
+    expect(names).not.toContain('GET /');
+  });
+
   it('reads the dependency on the route, the session writes, the 422 and the Celery task', async () => {
     const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /items').id }));
     const anchor = p.steps.find((s) => s.anchor)!;
@@ -317,6 +387,25 @@ describe('FastAPI', () => {
     expect(resLink.sites[0]).toMatchObject({ text: 'HTTPException', args: 'status_code=422, detail="bad price"', status: 422, when: 'item.price < 0' });
     const queue = effect(p, 'queue')!;
     expect(queue.label).toBe('send_welcome.delay(item.id)');
+  });
+});
+
+describe('ASP.NET endpoint groups', () => {
+  it('names the group’s routes under the app’s /api/ head and starts the walk at the handler, with its replies', async () => {
+    const names = cg.getNodesByKind('route').map((r) => r.name);
+    expect(names).toContain('POST /api/TodoItems');
+    expect(names).toContain('PUT /api/TodoItems/{id}');
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('PUT /api/TodoItems/{id}').id }));
+    const anchor = p.steps.find((s) => s.anchor)!;
+    expect(anchor.sub).toBe('UpdateTodoItem');
+    expect(anchor.trigger).toMatchObject({ kind: 'request', name: 'PUT', of: '/api/TodoItems/{id}' });
+    const res = effect(p, 'response')!;
+    expect(res.label).toBe('204 · 400');
+    const rows = p.links.find((l) => l.to === res.id)!.sites.map((s) => [s.status, s.when]);
+    expect(rows).toEqual([
+      [400, 'id != command.Id'],
+      [204, 'id == command.Id'],
+    ]);
   });
 });
 

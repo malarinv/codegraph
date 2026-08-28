@@ -1424,6 +1424,42 @@ public IActionResult ListUsers()
     expect(nodes[0].name).toBe('GET /users');
     expect(references[0].referenceName).toBe('ListUsers');
   });
+
+  it('extracts the handler-first endpoint-group form under the class, with the optional path', () => {
+    const src = `
+public class TodoItems : IEndpointGroup
+{
+    public static void Map(RouteGroupBuilder groupBuilder)
+    {
+        groupBuilder.RequireAuthorization();
+        groupBuilder.MapPost(CreateTodoItem);
+        groupBuilder.MapPut(UpdateTodoItem, "{id}");
+        groupBuilder.MapDelete(DeleteTodoItem, "{id}");
+    }
+    public static async Task<Created<int>> CreateTodoItem(ISender sender, CreateTodoItemCommand command) { }
+}
+`;
+    const { nodes, references } = aspnetResolver.extract!('Web/Endpoints/TodoItems.cs', src);
+    expect(nodes.map((n) => n.name)).toEqual(['POST /TodoItems', 'PUT /TodoItems/{id}', 'DELETE /TodoItems/{id}']);
+    expect(nodes.map((n) => n.startLine)).toEqual([7, 8, 9]);
+    expect(references.map((r) => r.referenceName)).toEqual(['CreateTodoItem', 'UpdateTodoItem', 'DeleteTodoItem']);
+    expect(nodes[0]!.qualifiedName).toBe('Web/Endpoints/TodoItems.cs::group:TodoItems:POST:');
+  });
+
+  it('a class with its own RoutePrefix literal names its routes under it', () => {
+    const src = `
+public class TodoLists : IEndpointGroup
+{
+    public static string RoutePrefix => "/api/todo-lists";
+    public static void Map(RouteGroupBuilder group)
+    {
+        group.MapGet(GetTodoLists);
+    }
+}
+`;
+    const { nodes } = aspnetResolver.extract!('TodoLists.cs', src);
+    expect(nodes.map((n) => n.name)).toEqual(['GET /api/todo-lists']);
+  });
 });
 
 import { vaporResolver } from '../src/resolution/frameworks/swift';
