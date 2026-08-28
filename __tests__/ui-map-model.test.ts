@@ -24,6 +24,7 @@ import {
   linkId,
   moduleMetaLabel,
   nodeWidth,
+  portPoint,
   strokeWidthFor,
   LAYER_GAP,
   MIN_WEIGHT,
@@ -397,5 +398,78 @@ describe('empty and degenerate inputs', () => {
     const layout = buildMapLayout({ modules: [mod('src/only')], links: [] }, OPTS);
     expect(layout.layers).toHaveLength(1);
     expect(layout.layers[0]!.label).toBeNull();
+  });
+});
+
+describe('directional ports and room', () => {
+  const modules = [mod('src/a'), mod('src/b')];
+
+  it('draws the Map exactly as before: bottoms leave, tops arrive, every link runs down', () => {
+    const layout = buildMapLayout(
+      { modules: [mod('src/bin'), mod('src/core'), mod('src/db')], links: [link('src/bin', 'src/core', 10), link('src/core', 'src/db', 10)] },
+      OPTS
+    );
+    for (const node of layout.nodes) {
+      expect(node.ports.bottom.map((p) => p.id)).toEqual(node.sourceHandles);
+      expect(node.ports.top.map((p) => p.id)).toEqual(node.targetHandles);
+      expect(node.ports.bottom.every((p) => p.type === 'source')).toBe(true);
+      expect(node.ports.top.every((p) => p.type === 'target')).toBe(true);
+    }
+    expect(layout.edges.every((e) => e.route === 'down')).toBe(true);
+  });
+
+  it('keeps a back-edge bottom-to-top under layered ports, and top-to-bottom under directional ones', () => {
+    const payload = { modules, links: [link('src/a', 'src/b', 10), link('src/b', 'src/a', 2)] };
+    const layered = buildMapLayout(payload, OPTS);
+    const directional = buildMapLayout(payload, { ...OPTS, ports: 'directional' });
+    for (const layout of [layered, directional]) {
+      const back = layout.edges.find((e) => e.source === 'src/b')!;
+      expect(back.route).toBe('up');
+      expect(back.back).toBe(true);
+    }
+    const a = (l: MapLayout) => l.nodes.find((n) => n.id === 'src/a')!;
+    const b = (l: MapLayout) => l.nodes.find((n) => n.id === 'src/b')!;
+    const id = linkId({ source: 'src/b', target: 'src/a' });
+    // The Map: leaves b's bottom, arrives at a's top — through both boxes, as it always has.
+    expect(portPoint(b(layered), id, 'source').y).toBe(b(layered).y + NODE_HEIGHT);
+    expect(portPoint(a(layered), id, 'target').y).toBe(a(layered).y);
+    // Directional: leaves b's top, arrives at a's bottom — around them.
+    expect(portPoint(b(directional), id, 'source').y).toBe(b(directional).y);
+    expect(portPoint(a(directional), id, 'target').y).toBe(a(directional).y + NODE_HEIGHT);
+  });
+
+  it('joins two modules on one layer over the top, under directional ports', () => {
+    const layout = buildMapLayout(
+      { modules, links: [link('src/a', 'src/b', 10)] },
+      { ...OPTS, ports: 'directional', layering: (ids) => new Map(ids.map((id) => [id, 0])) }
+    );
+    const edge = layout.edges[0]!;
+    expect(edge.route).toBe('level');
+    const a = layout.nodes.find((n) => n.id === 'src/a')!;
+    const b = layout.nodes.find((n) => n.id === 'src/b')!;
+    expect(portPoint(a, edge.id, 'source').y).toBe(a.y);
+    expect(portPoint(b, edge.id, 'target').y).toBe(b.y);
+  });
+
+  it('widens a box to keep its ports apart, and only then', () => {
+    const leaves = Array.from({ length: 20 }, (_, i) => mod(`src/leaf${i}`));
+    const payload = { modules: [mod('src/hub'), ...leaves], links: leaves.map((l) => link('src/hub', l.id, 5)) };
+    const plain = buildMapLayout(payload, OPTS).nodes.find((n) => n.id === 'src/hub')!;
+    const pitched = buildMapLayout(payload, { ...OPTS, portPitch: 12 }).nodes.find((n) => n.id === 'src/hub')!;
+    // Nothing depends on the hub, so its second line is the island's.
+    expect(plain.width).toBe(nodeWidth('src/hub', moduleMetaLabel(mod('src/hub'), true)));
+    expect(pitched.width).toBe(Math.max(plain.width, 21 * 12));
+    expect(pitched.width).toBeGreaterThan(plain.width);
+  });
+
+  it('spaces layers by the gap a view asks for', () => {
+    const payload = { modules, links: [link('src/a', 'src/b', 10)] };
+    const wide = buildMapLayout(payload, { ...OPTS, layerGap: 116 });
+    const a = wide.nodes.find((n) => n.id === 'src/a')!;
+    const b = wide.nodes.find((n) => n.id === 'src/b')!;
+    expect(b.y - a.y).toBe(NODE_HEIGHT + 116);
+    expect(wide.height).toBe(buildMapLayout(payload, OPTS).height + (116 - LAYER_GAP));
+    // Layer 0 is the bottom, so it has the larger y.
+    expect(wide.layers[0]!.y - wide.layers[1]!.y).toBe(NODE_HEIGHT + 116);
   });
 });

@@ -32,6 +32,14 @@
  * no declared edge behind it — is marked `back` and drawn only when a module it
  * touches is selected. Drawing it downward would be a lie about the direction
  * of the dependency; hiding it entirely would be a lie about its existence.
+ *
+ * The Screens view runs the same pipeline with three options the Map leaves at
+ * their defaults: its own layering (distance from the entry screen), a wider
+ * layer gap (its edges carry labels), and `directional` ports — a link that
+ * points up the layering leaves the TOP of its source and arrives at the
+ * BOTTOM of its target, so a return trip is drawn around the boxes instead of
+ * through them. In a screens graph a cycle is the normal case, not the
+ * exception the Map hides at rest.
  */
 
 import type { WireMapLink, WireMapModule, WireMapPayload } from './api';
@@ -43,6 +51,12 @@ export const NODE_GAP = 34;
 export const PADDING = 44;
 /** Least horizontal room a layer gets per module, so a sparse row still spreads. */
 const MIN_SLOT = 230;
+/**
+ * Room between two ports on one side of a box, when a view asks for it
+ * (`portPitch`). Fifteen lines leaving a 110px box are 7px apart and read as
+ * one; at 12px they are a fan a reader can follow back to its box.
+ */
+export const PORT_PITCH = 12;
 const MIN_NODE_WIDTH = 110;
 /**
  * IBM Plex Mono's real advance at 13px (0.6em), not the spec's 7.3 estimate.
@@ -111,6 +125,12 @@ export function moduleMetaLabel(module: WireMapModule, island = false): string {
   return `${symbols} · ${files}`;
 }
 
+/** One port on a box's edge: the link it belongs to, and which end of it this is. */
+export interface PortRef {
+  id: string;
+  type: 'source' | 'target';
+}
+
 export interface MapNodeLayout {
   id: string;
   module: WireMapModule;
@@ -129,10 +149,19 @@ export interface MapNodeLayout {
   y: number;
   width: number;
   height: number;
-  /** Link ids leaving this node, left to right — one hidden handle each. */
+  /** Link ids leaving from the BOTTOM of this node, left to right — one hidden handle each. */
   sourceHandles: string[];
-  /** Link ids arriving at this node, left to right. */
+  /** Link ids arriving at the TOP of this node, left to right. */
   targetHandles: string[];
+  /**
+   * Every port on the box, by side, left to right — what a node component
+   * draws its handles from. Under the Map's `layered` ports this is exactly
+   * `targetHandles` on top and `sourceHandles` below. Under `directional`
+   * ports a side mixes the two: an edge routed `up` leaves the top of its
+   * source and arrives at the bottom of its target, and a `level` edge leaves
+   * and arrives at the top, arching over the row.
+   */
+  ports: { top: PortRef[]; bottom: PortRef[] };
 }
 
 export interface MapEdgeLayout {
@@ -148,7 +177,15 @@ export interface MapEdgeLayout {
   back: boolean;
   /** Below the weight threshold — drawn only when a touching module is selected. */
   thin: boolean;
+  /**
+   * Which way the link runs through the layering: `down` to a lower layer,
+   * `up` to a higher one, `level` along its own. Under `directional` ports
+   * this decides the sides the edge uses and the curve it draws.
+   */
+  route: EdgeRoute;
 }
+
+export type EdgeRoute = 'down' | 'up' | 'level';
 
 export interface MapLayerLayout {
   index: number;
@@ -202,6 +239,22 @@ export interface MapLayoutOptions {
    * longest chain of screens above the login page.
    */
   layering?: (ids: string[], links: ReadonlyArray<{ source: string; target: string }>) => Map<string, number>;
+  /**
+   * Vertical room between two layers; {@link LAYER_GAP} unless a view says
+   * otherwise. The Screens view widens it because its edges carry labels, and
+   * a label needs a lane the Map's hairlines never did.
+   */
+  layerGap?: number;
+  /**
+   * Least distance between two ports on one side of a box; a box widens to
+   * keep it. 0 (the default) sizes a box by its text alone.
+   */
+  portPitch?: number;
+  /**
+   * `layered` (the default): every link leaves a bottom and arrives at a top,
+   * whichever way it points. `directional`: see {@link MapNodeLayout.ports}.
+   */
+  ports?: 'layered' | 'directional';
 }
 
 export function strokeWidthFor(count: number): number {
@@ -229,6 +282,9 @@ export function buildMapLayout(
   const depended = new Set(payload.links.map((l) => l.target));
   const links = payload.links.filter((l) => present.has(l.source) && present.has(l.target));
   const minWeight = options.minWeight ?? (options.includeTests ? MIN_WEIGHT_WITH_TESTS : MIN_WEIGHT);
+  const layerGap = options.layerGap ?? LAYER_GAP;
+  const portPitch = options.portPitch ?? 0;
+  const directional = options.ports === 'directional';
 
   const declaredLinks = links.filter((l) => l.declared > 0);
   const useDeclared =
@@ -301,12 +357,37 @@ export function buildMapLayout(
   }
 
   // --- placement -----------------------------------------------------------
+  // Which side of each box a link's two ports land on is settled by the
+  // layers alone, so it is known before any box has a width — and a view
+  // that asked for a port pitch needs it now: a hub with nineteen lines
+  // leaving its bottom edge is widened to hold them.
+  const routeOf = (link: { source: string; target: string }): EdgeRoute => {
+    const from = layer.get(link.source) ?? 0;
+    const to = layer.get(link.target) ?? 0;
+    return from > to ? 'down' : from < to ? 'up' : 'level';
+  };
+  const sidesOf = (route: EdgeRoute): { source: 'top' | 'bottom'; target: 'top' | 'bottom' } => {
+    if (!directional || route === 'down') return { source: 'bottom', target: 'top' };
+    if (route === 'up') return { source: 'top', target: 'bottom' };
+    return { source: 'top', target: 'top' };
+  };
+  const portCount = new Map<string, { top: number; bottom: number }>(
+    modules.map((m) => [m.id, { top: 0, bottom: 0 }])
+  );
+  for (const link of links) {
+    const sides = sidesOf(routeOf(link));
+    portCount.get(link.source)![sides.source] += 1;
+    portCount.get(link.target)![sides.target] += 1;
+  }
+
   const islands = new Set(modules.filter((m) => !depended.has(m.id)).map((m) => m.id));
   const widths = new Map(
     modules.map((m) => {
       const island = islands.has(m.id);
       const lines = options.sizing?.(m, island) ?? { label: m.id, meta: moduleMetaLabel(m, island) };
-      return [m.id, nodeWidth(lines.label, lines.meta)];
+      const count = portCount.get(m.id) ?? { top: 0, bottom: 0 };
+      const forPorts = (Math.max(count.top, count.bottom) + 1) * portPitch;
+      return [m.id, Math.max(nodeWidth(lines.label, lines.meta), forPorts)];
     })
   );
   const rowSums = rows.map((row) => row.reduce((sum, id) => sum + (widths.get(id) ?? 0), 0));
@@ -322,7 +403,7 @@ export function buildMapLayout(
     Math.min(contentWidth, Math.max(naturalSpans[i] ?? 0, row.length * MIN_SLOT))
   );
   const width = contentWidth + PADDING * 2;
-  const height = layerCount * (NODE_HEIGHT + LAYER_GAP) - LAYER_GAP + PADDING * 2;
+  const height = layerCount * (NODE_HEIGHT + layerGap) - layerGap + PADDING * 2;
 
   const nodesById = new Map<string, MapNodeLayout>();
   const byId = new Map(modules.map((m) => [m.id, m]));
@@ -333,7 +414,7 @@ export function buildMapLayout(
     // A single box centres in the content width instead of clinging to the
     // left edge — the common case for the entry point at the top.
     let x = PADDING + (contentWidth - span) / 2 + (row.length === 1 ? (span - sum) / 2 : 0);
-    const y = PADDING + (layerCount - 1 - index) * (NODE_HEIGHT + LAYER_GAP);
+    const y = PADDING + (layerCount - 1 - index) * (NODE_HEIGHT + layerGap);
     for (const id of row) {
       const w = widths.get(id) ?? MIN_NODE_WIDTH;
       const module = byId.get(id)!;
@@ -351,6 +432,7 @@ export function buildMapLayout(
         height: NODE_HEIGHT,
         sourceHandles: [],
         targetHandles: [],
+        ports: { top: [], bottom: [] },
       });
       x += w + gap;
     }
@@ -361,13 +443,14 @@ export function buildMapLayout(
   // that survives the filter exists in the code, and the map's job is to say
   // where it goes, not to pretend it is absent.
   const edges: MapEdgeLayout[] = [];
-  const outgoing = new Map<string, MapEdgeLayout[]>();
-  const incoming = new Map<string, MapEdgeLayout[]>();
+  // Every port, by box and side, with the x of the link's other end.
+  const sidePorts = new Map<string, { top: SidePort[]; bottom: SidePort[] }>();
   for (const link of links) {
     const from = nodesById.get(link.source);
     const to = nodesById.get(link.target);
     if (!from || !to) continue;
     const id = linkId(link);
+    const route = routeOf(link);
     const edge: MapEdgeLayout = {
       id,
       source: link.source,
@@ -378,27 +461,40 @@ export function buildMapLayout(
       width: strokeWidthFor(link.count),
       back: from.layer <= to.layer,
       thin: link.count < minWeight,
+      route,
     };
     edges.push(edge);
-    (outgoing.get(link.source) ?? setDefault(outgoing, link.source)).push(edge);
-    (incoming.get(link.target) ?? setDefault(incoming, link.target)).push(edge);
+    const sides = sidesOf(route);
+    (sidePorts.get(link.source) ?? setDefault(sidePorts, link.source))[sides.source].push({
+      id,
+      type: 'source',
+      other: xOf(nodesById, link.target),
+    });
+    (sidePorts.get(link.target) ?? setDefault(sidePorts, link.target))[sides.target].push({
+      id,
+      type: 'target',
+      other: xOf(nodesById, link.source),
+    });
   }
   // Ports spread in the order the other end appears left-to-right, so bundles
   // between two layers stay untangled instead of crossing inside the gap.
-  for (const [id, list] of outgoing) {
-    list.sort((a, b) => xOf(nodesById, a.target) - xOf(nodesById, b.target) || a.id.localeCompare(b.id));
+  const byOther = (a: SidePort, b: SidePort) => a.other - b.other || a.id.localeCompare(b.id);
+  for (const [id, sides] of sidePorts) {
     const node = nodesById.get(id);
-    if (node) node.sourceHandles = list.map((e) => e.id);
-  }
-  for (const [id, list] of incoming) {
-    list.sort((a, b) => xOf(nodesById, a.source) - xOf(nodesById, b.source) || a.id.localeCompare(b.id));
-    const node = nodesById.get(id);
-    if (node) node.targetHandles = list.map((e) => e.id);
+    if (!node) continue;
+    sides.top.sort(byOther);
+    sides.bottom.sort(byOther);
+    node.ports = {
+      top: sides.top.map((p) => ({ id: p.id, type: p.type })),
+      bottom: sides.bottom.map((p) => ({ id: p.id, type: p.type })),
+    };
+    node.sourceHandles = sides.bottom.filter((p) => p.type === 'source').map((p) => p.id);
+    node.targetHandles = sides.top.filter((p) => p.type === 'target').map((p) => p.id);
   }
 
   const layers: MapLayerLayout[] = rows.map((_, index) => ({
     index,
-    y: PADDING + (layerCount - 1 - index) * (NODE_HEIGHT + LAYER_GAP) + NODE_HEIGHT / 2,
+    y: PADDING + (layerCount - 1 - index) * (NODE_HEIGHT + layerGap) + NODE_HEIGHT / 2,
     label:
       layerCount === 1
         ? null
@@ -439,10 +535,38 @@ export function isEdgeVisible(edge: MapEdgeLayout, selected: string | null): boo
   return !edge.thin && !edge.back;
 }
 
-function setDefault(map: Map<string, MapEdgeLayout[]>, key: string): MapEdgeLayout[] {
-  const list: MapEdgeLayout[] = [];
-  map.set(key, list);
-  return list;
+/**
+ * Where a link's port sits on a box: `x = left + width x (i+1)/(n+1)` along
+ * the side that holds it, at the top or bottom edge. The same arithmetic the
+ * node components place their hidden handles with, so a view that needs the
+ * point before anything is rendered — to put a label on the curve — gets the
+ * one the browser will measure.
+ */
+export function portPoint(node: MapNodeLayout, id: string, type: 'source' | 'target'): { x: number; y: number } {
+  const top = node.ports.top.findIndex((p) => p.id === id && p.type === type);
+  if (top >= 0) return { x: node.x + (node.width * (top + 1)) / (node.ports.top.length + 1), y: node.y };
+  const bottom = node.ports.bottom.findIndex((p) => p.id === id && p.type === type);
+  if (bottom >= 0) {
+    return {
+      x: node.x + (node.width * (bottom + 1)) / (node.ports.bottom.length + 1),
+      y: node.y + node.height,
+    };
+  }
+  return { x: node.x + node.width / 2, y: type === 'source' ? node.y + node.height : node.y };
+}
+
+interface SidePort extends PortRef {
+  /** Centre x of the link's other end — the sort key along the side. */
+  other: number;
+}
+
+function setDefault(
+  map: Map<string, { top: SidePort[]; bottom: SidePort[] }>,
+  key: string
+): { top: SidePort[]; bottom: SidePort[] } {
+  const sides = { top: [], bottom: [] };
+  map.set(key, sides);
+  return sides;
 }
 
 function xOf(nodes: Map<string, MapNodeLayout>, id: string): number {

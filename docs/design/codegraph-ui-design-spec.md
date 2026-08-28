@@ -418,6 +418,28 @@ keeps its `createdAt`.
 CORS preflight this server answers none of. `--read-only` refuses both and the screens say so in the answering side's own
 words instead of showing a Save that fails.
 
+### 3.13 Screens (`#/screens`)
+Grid: canvas `minmax(600px,1fr)` | side panel **340px**. The Map's layout (§3.6) with three options: **layering** = BFS
+distance from the entry screen over every transition (entry on top; shared chrome one row above the shallowest screen it
+opens; whatever nothing reaches in a band at the bottom, one empty row below); `layerGap` **116** (five label lanes);
+`portPitch` **12** (a box is at least `(ports on its busier side + 1) × 12` wide); `ports: 'directional'` — down:
+bottom → top; up: **top → bottom**; level: **top → top**, an arch whose control points sit `0.66 × layerGap` above the row.
+**Tracks:** a line's control-point height is `y_hub + gap × (k+1)/(n+1)` for the k-th of the n lines in its fan (one side
+of one box, one direction), ranked by reach, farthest first, measured towards the hub's row; a line spanning several rows keeps
+its track in the gap beside its fan; level arches rise `gap × (0.66 − 0.26 × k/(n−1))`. Hover: the curve nearest the pointer,
+sampled at 24 points, within **10** screen px; no hit paths. Zoom **0.2–3**.
+Nodes as §3.6, sized for the screen's path (13px mono) over its component (11px sans); entry mark `●` in `--accent`;
+origins dashed `--ink-3`; unreached `--ink-4` stroke. Edges: the §3.6 cubic, `stroke-width = min(3, §3.6 width)`,
+`--ink` 0.32 (hot 0.95; soft 0.38 while another of the selected screen's lines is in focus; focus 1.0; dimmed 0.06);
+synthesized dasharray `5 3`; back `--accent` 0.6 dashed `4 3` (hot 0.85). Pills, on the selected screen's edges and the
+hovered one only: 10.5px mono on `--paper`, 1px `--rule` border (hot `--ink-3`; focus `--ink` + 0 2px 8px shadow), **17px**
+tall, width `chars × 6.3 + 12`; text = the innermost top-level `&&` clause of the condition, ≤ **36** chars, `…` prefix
+when outer guards precede it, `→` / `←` prefix for leaving / arriving at the selected screen, or "N ways · M conditional"
+for a pair with several. Placement: at the FAR end of the line; first lane centred **13px** outside the far box, lanes
+**21px** apart, at most 5 within the gap; each pill centred on its own curve at that height; laid left to right, first free
+lane; never over a box; overflow counted in the panel. Panel row hover: that pill prints the whole condition (wraps at
+360px), its line at 1.0, the rest at 0.38; a hovered line tints its row `--press`. Legend bottom-left, remembered per browser.
+
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,
   hidden handles for port spreading, local selection state — the pattern in docker-app's `StackGraph.svelte`); `@dagrejs/dagre` only as a

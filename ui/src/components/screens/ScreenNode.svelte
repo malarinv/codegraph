@@ -5,8 +5,12 @@
    * store action after login) — draws dashed, so it reads as a trigger rather
    * than a place. The entry screen (`/`) carries a mark.
    *
-   * Hidden handles along the top and bottom, one per link, exactly as the
-   * Map's module box does: the layout decided the ports, this only draws them.
+   * Hidden handles along the top and bottom, one per port, exactly as the
+   * Map's module box does — except that here a side may hold both kinds. The
+   * layout routed every transition (`directional` ports): a return trip
+   * leaves the TOP of this box and arrives at the BOTTOM of the screen it
+   * returns to, so the line runs around the boxes instead of through them.
+   * This only draws the ports the layout decided.
    */
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
   import type { MapNodeLayout } from '../../lib/map-model';
@@ -31,12 +35,12 @@
   }
 </script>
 
-{#each layout.targetHandles as handle, i (handle)}
+{#each layout.ports.top as port, i (`${port.type}:${port.id}`)}
   <Handle
-    type="target"
-    id={`t:${handle}`}
+    type={port.type}
+    id={`${port.type === 'source' ? 's' : 't'}:${port.id}`}
     position={Position.Top}
-    style={portStyle(i, layout.targetHandles.length)}
+    style={portStyle(i, layout.ports.top.length)}
     isConnectable={false}
   />
 {/each}
@@ -61,12 +65,12 @@
   <span class="sub">{info.sub}</span>
 </button>
 
-{#each layout.sourceHandles as handle, i (handle)}
+{#each layout.ports.bottom as port, i (`${port.type}:${port.id}`)}
   <Handle
-    type="source"
-    id={`s:${handle}`}
+    type={port.type}
+    id={`${port.type === 'source' ? 's' : 't'}:${port.id}`}
     position={Position.Bottom}
-    style={portStyle(i, layout.sourceHandles.length)}
+    style={portStyle(i, layout.ports.bottom.length)}
     isConnectable={false}
   />
 {/each}

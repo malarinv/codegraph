@@ -186,11 +186,12 @@ src/
   lib/flow-model.ts       the Flow strip's card/link geometry + the end cap — a DAG (pure)
   lib/filecode-model.ts   the whole-file view: fixed line height, arcs, paging (pure)
   lib/entry-model.ts      the entry-points panel: rows, file groups, flow arming (pure)
+  lib/screens-model.ts    the Screens view: layering by distance from the entry, edge labels, pill lanes (pure)
   lib/export-svg.ts       the Flow strip and the Map as a standalone SVG (pure)
   lib/export-image.ts     rasterising that SVG to PNG, clipboard and download
   lib/live.svelte.ts      /api/events: two counters every screen refreshes from
   lib/toast.svelte.ts     the one transient note ("Index updated · reloaded")
-  components/             TopBar, TrailBar, SavedTrails, KindGlyph, DriftBanner, Toast, ExportButtons, map/, flow/, symbol/, file/, entry/
+  components/             TopBar, TrailBar, SavedTrails, KindGlyph, DriftBanner, Toast, ExportButtons, map/, flow/, symbol/, file/, entry/, screens/
   views/                  one component per route
 ```
 
@@ -232,6 +233,7 @@ Mono, so the code grid survives and only the letterforms change.
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
 | `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |
 | `#/entry` | entry points — routes, files that run something, tests, hubs |
+| `#/screens` | screens — the app's screens and the transitions between them |
 
 ## Entry points
 
@@ -254,6 +256,64 @@ not accidents:
 
 `buildEntryPanel` is pure and keeps `panel.rows` exactly equal to the sections it
 draws, the same identity the search palette rests its keyboard on.
+
+## Screens
+
+`#/screens` draws `/api/screens` — the app as its user meets it: one box per
+screen, an arrow for every way of getting from one to another, and on each
+arrow the condition under which it happens. The canvas is the Map's layout
+engine (`buildMapLayout`) driven by `screens-model.ts` with three options the
+Map never sets, because a screens graph differs from a module graph in one way
+that shapes the whole picture: it is full of cycles. Every screen returns to
+Home.
+
+- **Layering is distance from the entry screen**, measured over every
+  transition — not longest path over a two-cycle-broken set. Shared chrome (a
+  top bar rendered on ten screens) hangs one row above the shallowest screen it
+  opens, so what it opens is placed by the entry and never dragged up beside
+  Home; what only chrome reaches is seeded from the chrome. Whatever nothing
+  reaches sits in a band at the bottom, one empty row below the rest.
+- **Ports are directional.** A transition down the picture leaves the bottom
+  of its box and arrives at the top of the other, as on the Map; a return
+  leaves the **top** of its source and arrives at the **bottom** of its target,
+  so it is drawn around the boxes rather than through them; a transition
+  between two screens on one row arches over the row, top to top. A hub widens
+  so its ports are at least 12px apart (`portPitch`), and rows are 116px apart
+  instead of the Map's 74 (`layerGap`), because the edges here carry labels.
+- **Lines fan out instead of stacking.** Drawn through one midpoint, every
+  line between two rows crosses that height at its middle, and a line to a
+  screen far to the side is nearly horizontal there — a hub's lines run stacked
+  within a few pixels for hundreds, and no pointer can pick one.
+  `trackedCurves` gives each line in a fan (the lines leaving one side of one
+  box towards one side) a track of its own: the farthest-reaching runs nearest
+  the hub's row, the next a track further out, nested in port order so no two
+  lines of a fan cross; a line spanning several rows keeps its track beside
+  its fan and drops the rest of the way vertically; a wider level arch rises
+  higher than a narrower one. There are no hit paths: hovering the canvas
+  means the line **nearest** the pointer (`nearestEdge`, within 10 screen
+  pixels), so moving a few pixels moves to the next line, predictably. Zoom
+  runs to 3× — the honest spacing control, since it scales lines and text
+  together.
+- **Labels are placed by the model, at the far end.** At rest the picture is
+  boxes and lines. Selecting a screen labels each of its transitions with the
+  innermost condition — the clause decided at the navigation call
+  (`…guide.dontShowAgain.captureGuide`); the first thirty characters of the
+  whole chain are usually shared with a sibling — prefixed `→` leaving the
+  selected screen or `←` arriving at it. `placeLabels` puts every pill beside
+  the screen at the *other* end of its line, where the lines are apart (beside
+  the selected screen fifteen of them share one box's width), in the first of
+  five lanes walking away from that box in which it overlaps nothing, centred
+  on its own curve at that height. A pill that fits nowhere is counted and the
+  panel says so. Pills are HTML in Svelte Flow's edge-label layer, above every
+  stroke; the selection alone decides where they go, so hovering never reflows
+  them.
+- **The panel and the picture point at each other.** A row under the pointer
+  lights its line and prints the whole condition on it; a line under the
+  pointer tints its row.
+
+The geometry — ports, curves, pill lanes — is arithmetic in `screens-model.ts`
+and `map-model.ts`, tested without a browser in
+`__tests__/ui-screens-model.test.ts`.
 
 ## Where the graph stops
 

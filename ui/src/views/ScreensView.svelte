@@ -8,9 +8,16 @@
   render/call chain to the screen a transition starts on, and branch guards
   read from the source. The canvas is the Map's machinery with different
   words (see `screens-model.ts`); the side panel is where the sentences are.
+
+  At rest the picture is boxes and lines. Selecting a screen labels its
+  transitions — each pill at the FAR end of its line, beside the other screen,
+  in a lane the model chose so that no two overlap — and lists them in the
+  panel; the panel and the picture point at each other, so a row under the
+  pointer lights its line and prints its whole condition on it. On the canvas
+  the pointer means the line NEAREST it, not the one drawn last under it.
 -->
 <script lang="ts">
-  import { SvelteFlow, Controls, type Node, type Edge } from '@xyflow/svelte';
+  import { SvelteFlow, Controls, type Node, type Edge, type Viewport } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import ScreenNode from '../components/screens/ScreenNode.svelte';
   import ScreenEdge from '../components/screens/ScreenEdge.svelte';
@@ -19,14 +26,29 @@
   import { live } from '../lib/live.svelte';
   import { symbolHref, fileHref } from '../lib/navigation';
   import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
-  import { buildScreensModel, neighbourhood, viaText, type ScreensModel } from '../lib/screens-model';
+  import {
+    buildScreensModel,
+    hoverPill,
+    nearestEdge,
+    neighbourhood,
+    pairId,
+    placeLabels,
+    viaText,
+    type ScreensModel,
+  } from '../lib/screens-model';
 
   let payload = $state<WireScreensPayload | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(true);
   let selected = $state<string | null>(null);
   let hovered = $state<{ edge: MapEdgeLayout; x: number; y: number } | null>(null);
+  /** The panel row under the pointer: its edge on the canvas, and the one transition it names. */
+  let panelHot = $state<{ edge: string; link: WireScreenLink } | null>(null);
   let stage = $state<HTMLDivElement | null>(null);
+  /** Svelte Flow's pan and zoom, for turning a pointer position into a point on the canvas. */
+  let viewport = $state<Viewport | undefined>(undefined);
+  /** How close, in screen pixels, the pointer must be to a line to mean it. */
+  const HOVER_REACH = 10;
 
   // The key stays open until the reader closes it; the choice survives a
   // reload but is per browser — a preference, not a fact about the project.
@@ -83,6 +105,18 @@
     return set;
   });
 
+  // The labels move with the selection and with nothing else: hovering a
+  // line or a row must not reflow the pills the reader is looking at.
+  const pills = $derived(model === null ? null : placeLabels(model, selected));
+  /** The edge in focus: under the pointer on the canvas, or its row in the panel. */
+  const focusId = $derived(hovered?.edge.id ?? panelHot?.edge ?? null);
+  /** A pill for the focused edge when the selection gave it none. */
+  const focusPill = $derived.by(() => {
+    if (model === null || focusId === null || pills?.pills.has(focusId)) return null;
+    const full = panelHot?.edge === focusId ? fullText(panelHot.link) : undefined;
+    return hoverPill(model, focusId, selected, full, pills ?? undefined);
+  });
+
   const nodes = $derived.by<Node[]>(() => {
     if (model === null) return [];
     return model.layout.nodes.map((node) => ({
@@ -100,6 +134,7 @@
         onSelect: (id: string) => {
           selected = selected === id ? null : id;
           hovered = null;
+          panelHot = null;
         },
       },
     }));
@@ -107,31 +142,39 @@
 
   const edges = $derived.by<Edge[]>(() => {
     if (model === null) return [];
+    const focus = focusId;
     return model.layout.edges
       .filter((edge) => isEdgeVisible(edge, selected))
-      .map((edge) => ({
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: edge.sourceHandle,
-        targetHandle: edge.targetHandle,
-        type: 'screen',
-        selectable: false,
-        deletable: false,
-        data: {
-          edge,
-          info: model.edges.get(edge.id)!,
-          hot: hovered?.edge.id === edge.id || (selected !== null && (edge.source === selected || edge.target === selected)),
-          dimmed: selected !== null && edge.source !== selected && edge.target !== selected,
-          // A label only where it can be read as belonging to one line: the
-          // selected screen's own edges (near that screen) and the hovered
-          // edge (near its source). Unselected, the picture is lines and
-          // boxes; the conditions are one click away.
-          labelled: hovered?.edge.id === edge.id || (selected !== null && (edge.source === selected || edge.target === selected)),
-          labelAt: selected !== null && edge.target === selected && edge.source !== selected ? 0.72 : 0.28,
-          onHover: onEdgeHover,
-        },
-      }));
+      .map((edge) => {
+        const touches = selected !== null && (edge.source === selected || edge.target === selected);
+        const isFocus = focus === edge.id;
+        const hot = isFocus || touches;
+        return {
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+          type: 'screen',
+          selectable: false,
+          deletable: false,
+          // The line in focus, and its pill, over the others; the selected
+          // screen's over the rest.
+          zIndex: isFocus ? 3 : hot ? 2 : 1,
+          data: {
+            edge,
+            info: model.edges.get(edge.id)!,
+            curve: model.curves.get(edge.id)!,
+            hot,
+            soft: hot && focus !== null && !isFocus,
+            focus: isFocus,
+            dimmed: selected !== null && !touches,
+            pill: pills?.pills.get(edge.id) ?? (isFocus ? focusPill : null),
+            full: panelHot?.edge === edge.id ? fullText(panelHot.link) : null,
+            onHover: onEdgeHover,
+          },
+        };
+      });
   });
 
   const selectedInfo = $derived(selected === null || model === null ? null : (model.nodes.get(selected) ?? null));
@@ -139,6 +182,11 @@
     selected === null || payload === null ? null : neighbourhood(payload, selected)
   );
   const hoveredInfo = $derived(hovered === null || model === null ? null : (model.edges.get(hovered.edge.id) ?? null));
+
+  const edgeById = $derived(
+    model === null ? new Map<string, MapEdgeLayout>() : new Map(model.layout.edges.map((e) => [e.id, e]))
+  );
+  const visibleIds = $derived(new Set(edges.map((e) => e.id)));
 
   function onEdgeHover(edge: MapEdgeLayout | null, event: MouseEvent | null): void {
     if (edge === null || event === null || stage === null) {
@@ -153,6 +201,62 @@
     };
   }
 
+  /**
+   * The pointer on the canvas means the line nearest it. A pill speaks for
+   * its own line; over a box, the key or the tooltip there is no line.
+   */
+  function onStageMove(event: MouseEvent): void {
+    if (model === null || stage === null) return;
+    const target = event.target as Element | null;
+    if (target?.closest('.spill')) return;
+    if (target?.closest('.snode, .legend, .tip, .svelte-flow__controls')) {
+      hovered = null;
+      return;
+    }
+    const view = viewport ?? readViewport();
+    if (!view) return;
+    const box = stage.getBoundingClientRect();
+    const point = {
+      x: (event.clientX - box.left - view.x) / view.zoom,
+      y: (event.clientY - box.top - view.y) / view.zoom,
+    };
+    const hit = nearestEdge(model, point, visibleIds, HOVER_REACH / view.zoom);
+    const edge = hit === null ? undefined : edgeById.get(hit.id);
+    if (!edge) {
+      hovered = null;
+      return;
+    }
+    hovered = {
+      edge,
+      x: Math.min(event.clientX - box.left + 14, box.width - 360),
+      y: event.clientY - box.top + 14,
+    };
+  }
+
+  /** The transform Svelte Flow applied, for the moment before the binding has a value. */
+  function readViewport(): Viewport | null {
+    const el = stage?.querySelector<HTMLElement>('.svelte-flow__viewport');
+    const m = el?.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/);
+    return m ? { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) } : null;
+  }
+
+  /** The row under the pointer: light its line, and say the whole condition on it. */
+  function onRowHover(link: WireScreenLink | null): void {
+    const edge = link === null ? null : pairId(link);
+    panelHot = link === null || edge === null ? null : { edge, link };
+  }
+
+  /** The words a panel row puts on its line: the arrow, and the whole condition. */
+  function fullText(link: WireScreenLink): string {
+    const arriving = selected !== null && link.to === selected && link.from !== selected;
+    return `${arriving ? '←' : '→'} ${link.when || 'always'}`;
+  }
+
+  function rowHot(link: WireScreenLink): boolean {
+    if (panelHot !== null) return panelHot.link.id === link.id;
+    return hovered !== null && pairId(link) === hovered.edge.id;
+  }
+
   function nameOf(id: string): string {
     return model?.nodes.get(id)?.label ?? id;
   }
@@ -165,7 +269,7 @@
 </script>
 
 <div class="screens">
-  <div class="stage" bind:this={stage}>
+  <div class="stage" bind:this={stage} role="presentation" onmousemove={onStageMove} onmouseleave={() => (hovered = null)}>
     {#if error !== null}
       <div class="state">
         <h2>The screens could not be read</h2>
@@ -191,8 +295,9 @@
         {edgeTypes}
         fitView
         {...FIT}
+        bind:viewport
         minZoom={0.2}
-        maxZoom={1.6}
+        maxZoom={3}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
@@ -201,6 +306,7 @@
         onpaneclick={() => {
           selected = null;
           hovered = null;
+          panelHot = null;
         }}
       >
         <Controls position="bottom-right" showLock={false} />
@@ -225,11 +331,14 @@
             </div>
             <div class="lrow">
               <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-back" /></svg>
-              <span>Goes back up the picture (returning)</span>
+              <span>Goes back up the picture (returning) — leaves the top of its box, arrives at the bottom of the other</span>
             </div>
             <div class="lrow">
-              <span class="k-label mono">when x</span>
-              <span>Runs only under that condition (shown on the selected screen's lines); none = always</span>
+              <span class="k-label mono">→ …x</span>
+              <span>
+                The last condition checked before the transition, beside the screen at the other end of
+                the selected screen's line; ← when it arrives there. None = always
+              </span>
             </div>
             <div class="lrow">
               <span class="k-box mono">/path</span>
@@ -241,7 +350,7 @@
             </div>
             <div class="lrow">
               <span class="k-box k-origin mono">fn()</span>
-              <span>Not a screen: shared chrome, or a trigger no screen reaches</span>
+              <span>Not a screen: shared chrome, or a trigger no screen reaches — a row above what it opens</span>
             </div>
             <div class="lrow">
               <span class="k-box k-unreached mono">/path</span>
@@ -286,6 +395,12 @@
           </div>
           <button class="clear" onclick={() => (selected = null)}>clear</button>
         </div>
+        {#if pills !== null && pills.hidden > 0}
+          <p class="dim note">
+            {pills.hidden} condition{pills.hidden === 1 ? '' : 's'} not drawn on the picture for want of
+            room — hover a row below to see {pills.hidden === 1 ? 'it' : 'each'} on its line.
+          </p>
+        {/if}
 
         <h4>Opens from <span class="dim">{lists.opensFrom.length}</span></h4>
         {#if lists.opensFrom.length === 0}
@@ -294,7 +409,15 @@
           </p>
         {/if}
         {#each lists.opensFrom as link (link.id)}
-          <div class="row">
+          <div
+            class="row"
+            class:hot={rowHot(link)}
+            role="presentation"
+            onmouseenter={() => onRowHover(link)}
+            onmouseleave={() => onRowHover(null)}
+            onfocusin={() => onRowHover(link)}
+            onfocusout={() => onRowHover(null)}
+          >
             <button class="peer mono" onclick={() => (selected = link.from)}>{sentence(link, 'from')}</button>
             {#if link.when}<div class="when">when {link.when}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
@@ -309,7 +432,15 @@
         <h4>Goes to <span class="dim">{lists.goesTo.length}</span></h4>
         {#if lists.goesTo.length === 0}<p class="dim">No navigation leaves this screen.</p>{/if}
         {#each lists.goesTo as link (link.id)}
-          <div class="row">
+          <div
+            class="row"
+            class:hot={rowHot(link)}
+            role="presentation"
+            onmouseenter={() => onRowHover(link)}
+            onmouseleave={() => onRowHover(null)}
+            onfocusin={() => onRowHover(link)}
+            onfocusout={() => onRowHover(null)}
+          >
             <button class="peer mono" onclick={() => (selected = link.to)}>{sentence(link, 'to')}</button>
             {#if link.when}<div class="when">when {link.when}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
@@ -330,15 +461,16 @@
         </p>
         <p class="dim">
           <span class="mark">●</span> The entry screen is at the top; each row down is one more
-          transition away from it. An arrow's label is the condition under which that transition
-          happens, read from the code around the navigation call; hover it for the chain the call
-          travels through, click a screen for everything in and out of it.
+          transition away from it. Click a screen and each of its transitions is labelled at the far
+          end of its line — beside the screen it leads to or comes from — with the last condition
+          checked before it happens; hover the line, or its row here, for the whole chain and the
+          calls it travels through.
         </p>
         <p class="dim">
           Solid: the destination is written at the call. Dashed grey: it comes back from a
           helper's return value (inferred). Dashed accent: a transition back up the picture
-          (returning). Dashed box: a trigger that is not a screen — shared chrome, or code no
-          screen's render chain reaches.
+          (returning), drawn around the boxes rather than through them. Dashed box: a trigger that
+          is not a screen — shared chrome, or code no screen's render chain reaches.
         </p>
         {#if model.unreached > 0}
           <p class="dim">
@@ -383,6 +515,11 @@
     min-width: 0;
     min-height: 0;
     border: 0;
+    pointer-events: none;
+  }
+  /* The label layer covers the canvas; only the pills in it take the pointer,
+     never the empty paper between them — the lines underneath do. */
+  .stage :global(.svelte-flow__edge-labels) {
     pointer-events: none;
   }
   .stage :global(.svelte-flow__controls-button) {
@@ -536,13 +673,25 @@
     padding: 1px 7px;
     cursor: pointer;
   }
+  .note {
+    margin: 0 0 6px;
+  }
   h4 {
     margin: 16px 0 6px;
     font: 600 12.5px var(--sans);
   }
+  /* A row is also a pointer at its line: hovering it lights the line and
+     prints the whole condition on it, and the line under the pointer on the
+     canvas tints its row here. Bled to the panel's edges so the tint reads
+     as a row, not a box inside one. */
   .row {
-    padding: 7px 0;
+    padding: 7px 8px;
+    margin: 0 -8px;
     border-top: 1px solid var(--rule-soft);
+    transition: background 90ms linear;
+  }
+  .row.hot {
+    background: var(--press);
   }
   .peer {
     display: block;
