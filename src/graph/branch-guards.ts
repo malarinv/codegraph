@@ -520,38 +520,49 @@ export function triggerInTree(root: SyntaxNode, source: string, line: number, co
   const col = column ?? firstNonBlankColumn(source, row);
   let node: SyntaxNode | null = innermostAt(root, row, col);
   let prev: SyntaxNode | null = null;
+  // Whether the climb crossed an inline function: `onPress={() => go()}`
+  // fires later, `behavior={isAndroid() ? 'a' : 'b'}` runs at render.
+  let deferred = false;
   for (let up = 0; node && up < MAX_TRIGGER_CLIMB; up++, prev = node, node = node.parent) {
     const type = node.type;
     if (TRIGGER_BOUNDARIES.has(type)) return null;
     // A named handler is its own story: `const handleX = useCallback(() => …)`
     // binds a name, and whoever uses the name is the trigger of what is inside.
-    if ((type === 'arrow_function' || type === 'function_expression') && node.parent) {
+    if (type === 'arrow_function' || type === 'function_expression') {
       const p = node.parent;
-      if (p.type === 'variable_declarator') return null;
-      if (p.type === 'arguments' && p.parent) {
-        const callee = calleeName(p.parent);
+      if (p?.type === 'variable_declarator') return null;
+      if (p?.type === 'arguments' && p.parent) {
+        const callee = lastSegment(calleeText(p.parent));
         if (callee === 'useCallback' || callee === 'useMemo' || callee === 'useEffectEvent' || callee === 'useEvent') return null;
       }
+      deferred = true;
     }
     if (type === 'jsx_attribute') {
       const name = node.namedChild(0);
+      const propName = name ? name.text : 'prop';
+      // An event prop, or any prop given a function: fired later. A value
+      // computed in the attribute (`behavior={isAndroid() ? …}`) is not.
+      if (!deferred && !/^on[A-Z]/.test(propName)) return null;
       const element = node.parent;
       const tag = element ? element.childForFieldName('name') : null;
-      return { kind: 'prop', name: name ? name.text : 'prop', of: tag ? collapseText(tag.text) : null };
+      return { kind: 'prop', name: propName, of: tag ? collapseText(tag.text) : null };
     }
     if (type === 'pair') {
       const key = node.childForFieldName('key');
       const keyText = key ? key.text.replace(/^['"`]|['"`]$/g, '') : '';
       if (/^on[A-Z]\w*$/.test(keyText)) {
-        // `useFormik({ onSubmit: … })`: the object is an argument of a call.
-        const object = node.parent;
-        const args = object?.parent;
-        const call = args?.type === 'arguments' ? args.parent : null;
-        return { kind: 'option', name: keyText, of: call && CALL_TYPES.has(call.type) ? calleeName(call) : null };
+        // `useFormik({ onSubmit: … })`, `Alert.alert(t, m, [{ onPress: … }])`:
+        // the object — possibly inside an array — is an argument of a call.
+        let holder: SyntaxNode | null = node.parent;
+        for (let hop = 0; holder && hop < 4 && (holder.type === 'object' || holder.type === 'array' || holder.type === 'pair'); hop++) {
+          holder = holder.parent;
+        }
+        const call = holder?.type === 'arguments' ? holder.parent : null;
+        return { kind: 'option', name: keyText, of: call && CALL_TYPES.has(call.type) ? calleeText(call) : null };
       }
     }
     if (type === 'arguments' && node.parent && CALL_TYPES.has(node.parent.type) && prev !== null) {
-      const callee = calleeName(node.parent);
+      const callee = lastSegment(calleeText(node.parent));
       if (callee !== null && LATER_CALLEES.has(callee)) {
         const first = node.namedChild(0);
         const of = first && STRING_TYPES.has(first.type) ? cut(collapseText(first.text), MAX_ARG_TEXT) : null;
@@ -562,11 +573,15 @@ export function triggerInTree(root: SyntaxNode, source: string, line: number, co
   return null;
 }
 
-/** The last segment of a call's callee: `nativeEmitter.addListener` → `addListener`. */
-function calleeName(call: SyntaxNode): string | null {
+/** A call's callee as written: `nativeEmitter.addListener`, `Alert.alert`, `useFormik`. */
+function calleeText(call: SyntaxNode): string | null {
   const callee = call.childForFieldName('function') ?? call.childForFieldName('constructor');
-  if (!callee) return null;
-  const text = collapseText(callee.text);
+  return callee ? cut(collapseText(callee.text), 40) : null;
+}
+
+/** The last segment of a callee: `nativeEmitter.addListener` → `addListener`. */
+function lastSegment(text: string | null): string | null {
+  if (text === null) return null;
   const m = text.match(/([A-Za-z_$][\w$]*)\s*$/);
   return m ? m[1]! : text;
 }

@@ -466,7 +466,17 @@ guards: string literals and names whole, an object as its keys (`{ email, passwo
 `() => …`, nested calls `f(…)`, Swift labels kept (`withName: "onZipComplete"`), ≤ 96 chars — printed on the panel's
 site rows (`SecureStore.setItemAsync('userEmail', values.email) · index.tsx:226`) and in the tooltip, and an effect
 box with exactly one call behind it wears it as its label (`axios.post('/auth/login', { email, password })`, ≤ 56).
-The conditions say when a step runs; the arguments say with what. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
+The conditions say when a step runs; the arguments say with what; a **trigger** says what fires it. Read at the
+site the same way (`triggersForFile`): climb from the call through inline arrows to the first thing that binds it —
+a JSX attribute (`onPress` of `<Button>`), an `on*` option key (`onSubmit` of `useFormik({…})`), or an argument of a
+runs-later call (`useEffect`, `setTimeout`, `addListener('onZipComplete')`, `.then`); a named handler (`const
+handleX = useCallback(…)`) is a boundary, its own story. A function called from under such a binding is a
+**handler step** even though nothing passed it as a value (`onPress={() => handleLogin(values)}` — the common
+case, and the Formik case), and every call-shaped link carries its trigger: a store action or an effect fired
+straight from a tap says so. The pill on a handler link says the event (`onPress · <Button>`,
+`onSubmit · useFormik(…)`), not the conditions; the box's second line says it before the file; the panel prints
+`FIRES FROM onPress · <Button> in LoginButton` above the `via` chain, which is set in `--ink-2` at the
+condition's size — it is the answer to "where on the screen", not an afterthought. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
 at, drawn with `name …`), fan-out per node (80), folded nodes per step (300), steps per picture (120 default, ≤ 400);
 hubs (fan-in ≥ 40) and shared chrome (a component rendered by ≥ 5 parents — higher than the Screens view's 3, which
 attributes navigations rather than deciding what to walk into) are dead ends, counted in `truncated`. A step several

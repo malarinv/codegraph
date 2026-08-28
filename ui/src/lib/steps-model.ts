@@ -12,7 +12,7 @@
  * are the links into and out of the selected step.
  */
 
-import type { WireMapLink, WireMapModule, WireStep, WireStepLink, WireStepsPayload } from './wire';
+import type { WireMapLink, WireMapModule, WireStep, WireStepLink, WireStepTrigger, WireStepsPayload } from './wire';
 import { buildMapLayout, linkId, PORT_PITCH, type MapLayout } from './map-model';
 import {
   edgeLabel,
@@ -83,6 +83,21 @@ export function kindWord(kind: WireStep['kind']): string {
   }
 }
 
+/**
+ * What fires something, in a few characters: `onPress · <Button>`,
+ * `onSubmit · useFormik(…)`, `addListener('onZipComplete')`, `useEffect`.
+ */
+export function triggerWords(t: WireStepTrigger): string {
+  switch (t.kind) {
+    case 'prop':
+      return t.of ? `${t.name} · <${t.of}>` : t.name;
+    case 'option':
+      return t.of ? `${t.name} · ${t.of}(…)` : t.name;
+    default:
+      return t.of ? `${t.name}(${t.of})` : t.name;
+  }
+}
+
 /** The first line of a step's box. Boundary crossings carry an arrow for which way the code goes. */
 export function stepLabel(step: WireStep): string {
   switch (step.kind) {
@@ -105,7 +120,8 @@ export function stepSub(step: WireStep): string {
     case 'screen':
       return step.sub;
     case 'trigger':
-      return `handler · ${file}`;
+      // The event before the file: `onPress · <Button> · index.tsx`.
+      return step.trigger ? `${triggerWords(step.trigger)} · ${file}` : `handler · ${file}`;
     case 'bridge':
       return `native · ${file}`;
     case 'event':
@@ -177,12 +193,16 @@ export function buildStepsModel(payload: WireStepsPayload): StepsModel {
       byKind: [{ kind: 'calls', count: group.length }],
       topPairs: [],
     });
+    // A link into a handler says the EVENT — `onPress · <Button>` — not the
+    // conditions; those are one hover away, and the event is what a reader
+    // asking "at what point does this run" came for.
+    const trigger = group.length === 1 && first.kind === 'handler' && first.trigger ? first.trigger : null;
     edges.set(key, {
       id: key,
       from: first.from,
       to: first.to,
       links: group,
-      label: edgeLabel(group),
+      label: trigger ? triggerWords(trigger) : edgeLabel(group),
       synthesized: group.every((l) => l.synthesized),
       kind: group.every((l) => l.kind === first.kind) ? first.kind : 'calls',
     });

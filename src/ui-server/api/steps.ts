@@ -71,6 +71,8 @@ export interface WireStepSite {
    * summary of all of them.
    */
   when: string;
+  /** What fires THIS site, when it differs from the link's first. */
+  trigger?: WireStepTrigger;
 }
 
 /** What fires a step or a link: the event it is written under, and the function that writes it there. */
@@ -385,9 +387,14 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const viaKey = via.map((v) => v.id).join('>');
     const id = `${from.id} ${to.id} ${viaKey}`;
     const when = whens.filter((w, i) => w && whens.indexOf(w) === i).join(' && ');
-    const stamped: WireStepSite = { ...site, when };
+    const stamped: WireStepSite = { ...site, when, ...(trigger ? { trigger } : {}) };
+    // A `contains` edge is how a nested handler is FOUND, not a place it is
+    // called from: its row stays only while no call site has been seen.
+    const structural = (s: WireStepSite) => s.text.startsWith('defines ');
     const existing = links.get(id);
     if (existing) {
+      if (structural(stamped) && existing.sites.some((s) => !structural(s))) return;
+      if (!structural(stamped) && existing.sites.every(structural)) existing.sites.length = 0;
       if (!existing.sites.some((s) => s.file === site.file && s.line === site.line)) existing.sites.push(stamped);
       if (!existing.trigger && trigger) existing.trigger = trigger;
       if (when !== existing.when) {

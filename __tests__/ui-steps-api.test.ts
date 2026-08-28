@@ -80,6 +80,10 @@ beforeAll(async () => {
       "    const sub = nativeEmitter.addListener('onZipComplete', handleZipComplete)\n" +
       '    return () => sub.remove()\n' +
       '  }, [handleZipComplete])\n' +
+      '  const form = useForm({ onSubmit: () => handleSubmit() })\n' +
+      '  function handleSubmit() {\n' +
+      '    captureView.finalizeCaptureSession()\n' +
+      '  }\n' +
       '  return <Button onPress={handleApprove} />\n' +
       '}\n'
   );
@@ -91,7 +95,7 @@ beforeAll(async () => {
       '  const handleOpen = useCallback(() => {\n' +
       '    captureView.finalizeCaptureSession()\n' +
       '  }, [])\n' +
-      '  return <Button onPress={handleOpen} />\n' +
+      '  return <Button onPress={() => handleOpen()} />\n' +
       '}\n' +
       'const MemoizedCaptureComponent = memo(CaptureComponent)\n' +
       'export default function CapturePage() {\n' +
@@ -194,7 +198,18 @@ describe('buildSteps', () => {
     const link = (from: string, to: string) =>
       payload.links.find((l) => l.from === byLabel.get(from)!.id && l.to === byLabel.get(to)!.id);
     const req = link('handleZipComplete', 'client.post +1');
-    expect(link('/capture/review', 'handleApprove')?.kind).toBe('handler');
+    const tap = link('/capture/review', 'handleApprove');
+    expect(tap?.kind).toBe('handler');
+    // What fires it — read at the site: the JSX prop and its element, and the
+    // function that writes the binding.
+    expect(tap?.trigger).toEqual({ kind: 'prop', name: 'onPress', of: 'Button', in: 'ReviewScreen' });
+    expect(byLabel.get('handleApprove')?.trigger).toEqual({ kind: 'prop', name: 'onPress', of: 'Button', in: 'ReviewScreen' });
+    // A function called from under an `on*` option is a handler too — the
+    // Formik shape — and the option names what fires it.
+    expect(kinds['handleSubmit']).toBe('trigger');
+    expect(link('/capture/review', 'handleSubmit')?.trigger).toEqual({ kind: 'option', name: 'onSubmit', of: 'useForm', in: 'ReviewScreen' });
+    // The listener registration is a callback binding on the handler link.
+    expect(link('/capture/review', 'handleZipComplete')?.trigger).toEqual({ kind: 'callback', name: 'addListener', of: "'onZipComplete'", in: 'ReviewScreen' });
     expect(link('handleApprove', 'finalizeCaptureSession')?.kind).toBe('bridge');
     const evt = link('finalizeCaptureSession', 'handleZipComplete');
     expect(evt?.kind).toBe('event');
@@ -245,11 +260,13 @@ describe('buildSteps', () => {
     const payload = await buildSteps(cg, tmpDir, q({ anchor: capture.id }));
     const kinds = Object.fromEntries(payload.steps.map((s) => [s.label, s.kind]));
     // The wrapper and the component are render hops, folded into the link;
-    // the handler is the first box, the native call the next.
+    // the handler — called from an inline arrow under `onPress` — is the
+    // first box, the native call the next.
     expect(kinds['handleOpen']).toBe('trigger');
     expect(kinds['finalizeCaptureSession']).toBe('bridge');
     const toHandler = payload.links.find((l) => l.to === payload.steps.find((s) => s.label === 'handleOpen')!.id)!;
     expect(toHandler.via.map((v) => v.name)).toEqual(['MemoizedCaptureComponent', 'CaptureComponent']);
+    expect(toHandler.trigger).toEqual({ kind: 'prop', name: 'onPress', of: 'Button', in: 'CaptureComponent' });
     expect(payload.steps.map((s) => s.label)).not.toContain('CaptureComponent');
   });
 

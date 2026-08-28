@@ -38,6 +38,7 @@
     stepNeighbourhood,
     stepPairId,
     stepViaText,
+    triggerWords,
     type StepsModel,
   } from '../lib/steps-model';
 
@@ -234,7 +235,7 @@
     const box = stage.getBoundingClientRect();
     hovered = {
       edge,
-      x: Math.min(event.clientX - box.left + 14, box.width - 360),
+      x: Math.min(event.clientX - box.left + 14, box.width - 420),
       y: event.clientY - box.top + 14,
     };
   }
@@ -262,7 +263,7 @@
     }
     hovered = {
       edge,
-      x: Math.min(event.clientX - box.left + 14, box.width - 360),
+      x: Math.min(event.clientX - box.left + 14, box.width - 420),
       y: event.clientY - box.top + 14,
     };
   }
@@ -399,7 +400,7 @@
             </div>
             <div class="lrow">
               <span class="k-box mono">/path</span>
-              <span>A screen, or a handler — a function wired to a tap or a listener</span>
+              <span>A screen, or a handler — a function fired from a tap, an option, a listener; its line says the event</span>
             </div>
             <div class="lrow">
               <span class="k-box k-cross mono">⇢ fn</span>
@@ -442,9 +443,10 @@
           <div class="mono"><b>{nameOf(hoveredInfo.from)}</b> → {nameOf(hoveredInfo.to)}</div>
           {#each hoveredInfo.links.slice(0, 5) as link (link.id)}
             <div class="tiprow">
+              {#if link.trigger}<span class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></span>{/if}
+              {#if link.via.length > 0}<span class="via">via {stepViaText(link)}</span>{/if}
               {#if link.sites.length > 1}<span class="dim">{link.sites.length} ways</span>{/if}
               <span class="when">{@render words(conditionTokens(link.when))}</span>
-              {#if link.via.length > 0}<span class="mono dim">via {stepViaText(link)}</span>{/if}
               {#if link.label}<span class="dim">{link.label}</span>{/if}
               {#if link.sites[0]}<span class="mono">{siteWords(link.sites[0])}</span>{/if}
             </div>
@@ -462,6 +464,9 @@
           <div>
             <div class="mono big">{selectedInfo.label}</div>
             <div class="sub dim">{kindWord(selectedInfo.step.kind)}{#if selectedInfo.step.anchor} · where the picture starts{/if}</div>
+            {#if selectedInfo.step.trigger}
+              <div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(selectedInfo.step.trigger)} <span class="dim">in {selectedInfo.step.trigger.in}</span></div>
+            {/if}
             {#if selectedInfo.step.screen?.component}
               <a class="sub" href={symbolHref(selectedInfo.step.screen.component.id)}>
                 <KindGlyph kind={selectedInfo.step.screen.component.kind} />
@@ -533,13 +538,17 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.from)}>{nameOf(link.from)}</button>
+            {#if link.trigger}<div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></div>{/if}
+            {#if link.via.length > 0}<div class="via">via {stepViaText(link)}</div>{/if}
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
-            {#if link.via.length > 0}<div class="via dim">via {stepViaText(link)}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
             {#each sc.rows as row (row.site.file + row.site.line)}
               {@const href = siteHref(link, row.site, fallback)}
               <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if row.site.trigger && triggerWords(row.site.trigger) !== (link.trigger ? triggerWords(link.trigger) : '')}
+                  <div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(row.site.trigger)}</div>
+                {/if}
                 {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
                 {#if href}
                   <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
@@ -571,13 +580,17 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.to)}>{nameOf(link.to)}</button>
+            {#if link.trigger}<div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></div>{/if}
+            {#if link.via.length > 0}<div class="via">via {stepViaText(link)}</div>{/if}
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
-            {#if link.via.length > 0}<div class="via dim">via {stepViaText(link)}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
             {#each sc.rows as row (row.site.file + row.site.line)}
               {@const href = siteHref(link, row.site, fallback)}
               <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if row.site.trigger && triggerWords(row.site.trigger) !== (link.trigger ? triggerWords(link.trigger) : '')}
+                  <div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(row.site.trigger)}</div>
+                {/if}
                 {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
                 {#if href}
                   <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
@@ -809,13 +822,21 @@
   .tip {
     position: absolute;
     z-index: 5;
-    width: 340px;
+    width: 400px;
     padding: 8px 10px;
     border: 1px solid var(--ink);
     background: var(--paper);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
     font-size: 12px;
     pointer-events: none;
+    /* A call with its arguments is one long token: it wraps inside the box. */
+    overflow-wrap: anywhere;
+  }
+  .tip .mono,
+  .tip .when,
+  .tip .via,
+  .tip .fires {
+    overflow-wrap: anywhere;
   }
   .tiprow {
     display: flex;
@@ -930,8 +951,19 @@
   .kw {
     font-weight: 600;
   }
+  /* The chain a hop travels through — the answer to "where on the screen": read, not dim. */
   .via {
-    font: 400 11px var(--mono);
+    color: var(--ink-2);
+    font: 400 11.5px var(--mono);
+    margin-top: 2px;
+  }
+  .via.dim {
+    color: var(--ink-3);
+    font-size: 11px;
+  }
+  .fires {
+    color: var(--ink);
+    font: 400 11.5px var(--mono);
     margin-top: 2px;
   }
   .ways {

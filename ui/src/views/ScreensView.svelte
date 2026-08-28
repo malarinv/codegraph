@@ -428,7 +428,7 @@
           >
             <button class="peer mono" onclick={() => (selected = link.from)}>{sentence(link, 'from')}</button>
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
-            {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
+            {#if link.via.length > 0}<div class="via">via {viaText(link)}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
             {#each sc.rows as row (row.site.file + row.site.line)}
               <div class="scenario" class:many={sc.rows.length > 1}>
@@ -456,7 +456,7 @@
           >
             <button class="peer mono" onclick={() => (selected = link.to)}>{sentence(link, 'to')}</button>
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
-            {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
+            {#if link.via.length > 0}<div class="via">via {viaText(link)}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
             {#each sc.rows as row (row.site.file + row.site.line)}
               <div class="scenario" class:many={sc.rows.length > 1}>
@@ -644,6 +644,8 @@
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
     font-size: 12px;
     pointer-events: none;
+    /* A long via chain or condition wraps inside the box. */
+    overflow-wrap: anywhere;
   }
   .tiprow {
     display: flex;
@@ -736,8 +738,10 @@
   .kw {
     font-weight: 600;
   }
+  /* The chain a transition travels through — the answer to "where on the screen": read, not dim. */
   .via {
-    font: 400 11px var(--mono);
+    color: var(--ink-2);
+    font: 400 11.5px var(--mono);
     margin-top: 2px;
   }
   .ways {

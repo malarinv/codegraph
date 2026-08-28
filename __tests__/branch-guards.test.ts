@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph } from '../src';
 import { initGrammars } from '../src/extraction/grammars';
-import { callArgumentsInSource, guardsInSource, guardLabel, supportsBranchGuards } from '../src/graph/branch-guards';
+import { callArgumentsInSource, guardsInSource, guardLabel, supportsBranchGuards, triggerInSource } from '../src/graph/branch-guards';
 import { buildNode } from '../src/ui-server/api/node';
 import { buildFlow } from '../src/ui-server/api/flow';
 
@@ -305,5 +305,83 @@ class CaptureEvents {
     expect(await argsAt(src, 'sendEvent(', 'swift')).toBe('withName: "onZipComplete", body: […]');
     expect(await argsAt(src, 'tracker.setup(', 'swift')).toBe('side: side, angle: 45');
     expect(await argsAt(src, 'DispatchQueue.main.async', 'swift')).toBe('{ … }');
+  });
+});
+
+
+// =============================================================================
+// Triggers — what fires a site
+// =============================================================================
+
+async function triggerAt(src: string, needle: string, language: 'tsx' | 'typescript' | 'swift' = 'tsx') {
+  const line = lineOf(src, needle);
+  const column = src.split('\n')[line - 1]!.indexOf(needle);
+  return triggerInSource(src, language, line, column);
+}
+
+describe('triggers', () => {
+  const login = `
+function LoginButton({ values }) {
+  const formik = useFormik({
+    initialValues: values,
+    onSubmit: (v) => {
+      handleLogin(v.email, v.password)
+    },
+  })
+  useEffect(() => {
+    warmUp()
+  }, [])
+  useEffect(() => {
+    const sub = nativeEmitter.addListener('onZipComplete', (data) => { finish(data) })
+    return () => sub.remove()
+  }, [])
+  const handleRemove = useCallback(() => {
+    removeCredential(values.email)
+  }, [values])
+  fetchThing().then(() => done())
+  return (
+    <View>
+      <Button onPress={formik.submitForm} />
+      <TouchableOpacity onPress={() => handleSelectAccount(account)} />
+      <Pressable onPress={handleRemove} />
+      <Row.Item onLongPress={() => { if (ok) confirm() }} />
+      <KeyboardAvoidingView behavior={isAndroid() ? 'height' : 'padding'} />
+      <FlatList renderItem={({ item }) => renderRow(item)} keyExtractor={keyOf} />
+    </View>
+  )
+}
+function warn() {
+  Alert.alert('Remove?', 'Sure?', [{ text: 'OK', onPress: () => removeAll() }], { cancelable: true })
+}
+`;
+
+  it('a call under a JSX prop: the prop and the element', async () => {
+    expect(await triggerAt(login, 'handleSelectAccount(')).toEqual({ kind: 'prop', name: 'onPress', of: 'TouchableOpacity' });
+    expect(await triggerAt(login, 'confirm()')).toEqual({ kind: 'prop', name: 'onLongPress', of: 'Row.Item' });
+    // A handler passed as a value: the site IS the attribute.
+    expect(await triggerAt(login, 'handleRemove} />')).toEqual({ kind: 'prop', name: 'onPress', of: 'Pressable' });
+    // A function under any prop fires later; a value computed in a prop runs at render.
+    expect(await triggerAt(login, 'renderRow(item)')).toEqual({ kind: 'prop', name: 'renderItem', of: 'FlatList' });
+    expect(await triggerAt(login, 'isAndroid()')).toBeNull();
+    expect(await triggerAt(login, 'keyOf}')).toBeNull();
+  });
+
+  it('a call under an on* option: the key and the call it configures', async () => {
+    expect(await triggerAt(login, 'handleLogin(')).toEqual({ kind: 'option', name: 'onSubmit', of: 'useFormik' });
+    // The option's object inside an array argument: still the call it configures.
+    expect(await triggerAt(login, 'removeAll()')).toEqual({ kind: 'option', name: 'onPress', of: 'Alert.alert' });
+  });
+
+  it('a call inside a runs-later callback: the callee and its first literal', async () => {
+    expect(await triggerAt(login, 'warmUp()')).toEqual({ kind: 'callback', name: 'useEffect', of: null });
+    expect(await triggerAt(login, 'finish(data)')).toEqual({ kind: 'callback', name: 'addListener', of: "'onZipComplete'" });
+    expect(await triggerAt(login, 'done()')).toEqual({ kind: 'callback', name: 'then', of: null });
+  });
+
+  it('a named handler is its own story: nothing fires the call inside it, from here', async () => {
+    expect(await triggerAt(login, 'removeCredential(')).toBeNull();
+    // A plain call in a component body is fired by nothing in particular.
+    expect(await triggerAt(login, 'fetchThing()')).toBeNull();
+    expect(await triggerAt(login, 'handleLogin(', 'swift')).toBeNull();
   });
 });

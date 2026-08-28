@@ -4,7 +4,7 @@
  * rule, and the panel's two lists.
  */
 import { describe, it, expect } from 'vitest';
-import { buildStepsModel, kindWord, stepLabel, stepNeighbourhood, stepSub, stepViaText } from '../ui/src/lib/steps-model';
+import { buildStepsModel, kindWord, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
 import { placeLabels } from '../ui/src/lib/screens-model';
 import type { WireNodeRef, WireStep, WireStepLink, WireStepsPayload } from '../ui/src/lib/wire';
 
@@ -45,7 +45,7 @@ describe('steps model', () => {
   const store = step('setZipUri', 'store', 4, { node: ref('setZipUri', 'src/storage/capture.storage.ts') });
   const home = step('/', 'screen', 4, { screen: { path: '/', component: null } });
   const links = [
-    link(screen, handler, { kind: 'handler' }),
+    link(screen, handler, { kind: 'handler', trigger: { kind: 'prop', name: 'onPress', of: 'Button', in: 'ReviewScreen' } }),
     link(handler, bridge, { kind: 'bridge', when: '!busy' }),
     link(bridge, event, { kind: 'event', synthesized: true, via: [ref('emitZipComplete', 'ios/CaptureEvents.swift', 'swift')], when: 'result', label: 'via rn-event-channel · event onZipComplete' }),
     link(event, effect, { kind: 'effect', via: [ref('uploadARCapture')] }),
@@ -69,6 +69,9 @@ describe('steps model', () => {
   it('one edge per pair, labelled with the innermost condition or a count', () => {
     const edges = [...model.edges.values()];
     expect(edges).toHaveLength(6);
+    // A link into a handler says the event, not the conditions.
+    const toHandler = edges.find((e) => e.to === handler.id)!;
+    expect(toHandler.label).toBe('onPress · <Button>');
     const toBridge = edges.find((e) => e.to === bridge.id)!;
     expect(toBridge.label).toBe('NOT busy');
     expect(toBridge.kind).toBe('bridge');
@@ -95,6 +98,10 @@ describe('steps model', () => {
     expect(stepSub(store)).toBe('store · capture.storage.ts');
     expect(stepSub(effect)).toBe('network · uploadARCapture');
     expect(kindWord('effect')).toBe('outside the index');
+    expect(triggerWords({ kind: 'option', name: 'onSubmit', of: 'useFormik', in: 'LoginButton' })).toBe('onSubmit · useFormik(…)');
+    expect(triggerWords({ kind: 'callback', name: 'addListener', of: "'onZipComplete'", in: 'X' })).toBe("addListener('onZipComplete')");
+    expect(triggerWords({ kind: 'callback', name: 'useEffect', of: null, in: 'X' })).toBe('useEffect');
+    expect(stepSub({ ...handler, trigger: { kind: 'prop', name: 'onPress', of: 'Button', in: 'ReviewScreen' } })).toBe('onPress · <Button> · a.tsx');
     expect(stepViaText(links[2]!)).toBe('emitZipComplete');
   });
 

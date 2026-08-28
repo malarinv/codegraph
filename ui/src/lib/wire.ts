@@ -710,6 +710,19 @@ export interface WireStepSite {
   args?: string;
   /** The conditions THIS site runs under (the whole chain's); '' when unconditional. */
   when: string;
+  /** What fires THIS site, when it differs from the link's first. */
+  trigger?: WireStepTrigger;
+}
+
+/** What fires a step or a link: the event it is written under, and the function that writes it there. */
+export interface WireStepTrigger {
+  kind: 'prop' | 'option' | 'callback';
+  /** `onPress`, `onSubmit`, `useEffect`, `addListener`. */
+  name: string;
+  /** `Button` for a prop, `useFormik` for an option, the first string argument for a callback; null when unknown. */
+  of: string | null;
+  /** The function the binding is written in. */
+  in: string;
 }
 
 export interface WireStep {
@@ -733,6 +746,8 @@ export interface WireStep {
   event?: string;
   /** Every event that lands on this step. */
   events?: string[];
+  /** For a handler: what fires it. */
+  trigger?: WireStepTrigger;
   screen?: { path: string; component: WireNodeRef | null };
   /** The calls one function makes into one category, and the function. */
   effect?: { api: string; apis: string[]; category: string; by: WireNodeRef; line: number };
@@ -752,6 +767,8 @@ export interface WireStepLink {
   synthesized: boolean;
   uncertain: boolean;
   sites: WireStepSite[];
+  /** What fires the first site, when something binds it to an event. */
+  trigger?: WireStepTrigger;
 }
 
 export interface WireStepsPayload {
