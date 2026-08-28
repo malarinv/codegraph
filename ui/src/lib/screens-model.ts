@@ -29,6 +29,7 @@
  */
 
 import type { WireMapLink, WireMapModule, WireScreen, WireScreenLink, WireScreensPayload } from './wire';
+import { clauseWords, clauses } from './conditions';
 import {
   buildMapLayout,
   linkId,
@@ -72,9 +73,10 @@ const BAND_MARGIN = 2;
 /**
  * The longest label a pill prints before an ellipsis; the tooltip and the
  * panel have the rest. Sized so the innermost clause of a typical guard
- * (`guide.dontShowAgain.captureGuide`, 32 characters) fits whole.
+ * (`guide.dontShowAgain.captureGuide`, 32 characters) fits whole even as
+ * `…not guide.dontShowAgain.captureGuide` — the negation is a word now.
  */
-export const EDGE_LABEL_MAX = 36;
+export const EDGE_LABEL_MAX = 40;
 
 /* ---------------------------------------------------------------- model -- */
 
@@ -246,48 +248,7 @@ export function entryLayering(
 
 /* --------------------------------------------------------------- labels -- */
 
-/**
- * The top-level `&&` terms of a condition, in the order they were tested —
- * the outermost guard first, the one decided at the navigation call last.
- * Brackets and strings are respected; a condition joined by a top-level `||`
- * (two transitions between one pair that merged) has no innermost term and
- * comes back whole.
- */
-export function clauses(when: string): string[] {
-  const out: string[] = [];
-  let depth = 0;
-  let quote: string | null = null;
-  let start = 0;
-  for (let i = 0; i < when.length; i++) {
-    const ch = when[i]!;
-    if (quote !== null) {
-      if (ch === '\\') i++;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      quote = ch;
-      continue;
-    }
-    if (ch === '(' || ch === '[' || ch === '{') {
-      depth++;
-      continue;
-    }
-    if (ch === ')' || ch === ']' || ch === '}') {
-      depth = Math.max(0, depth - 1);
-      continue;
-    }
-    if (depth !== 0) continue;
-    if (when.startsWith(' || ', i)) return [when.trim()];
-    if (when.startsWith(' && ', i)) {
-      out.push(when.slice(start, i).trim());
-      start = i + 4;
-      i += 3;
-    }
-  }
-  out.push(when.slice(start).trim());
-  return out.filter((c) => c.length > 0);
-}
+export { clauses } from './conditions';
 
 /**
  * What the connector says. Empty when unconditional and single.
@@ -299,17 +260,19 @@ export function clauses(when: string): string[] {
  * …` on both arms of a fork); the last clause is the one that tells the two
  * apart, and the full text is a hover away.
  */
-export function edgeLabel(links: ReadonlyArray<{ when: string }>): string {
-  if (links.length === 1) {
-    const when = links[0]!.when;
+export function edgeLabel(links: ReadonlyArray<{ when: string; sites?: ReadonlyArray<{ when: string }> }>): string {
+  // A link with several call sites is several scenarios: count them as ways.
+  const ways = links.flatMap((l) => (l.sites && l.sites.length > 1 ? l.sites.map((s) => s.when) : [l.when]));
+  if (ways.length === 1) {
+    const when = ways[0]!;
     if (!when) return '';
     const parts = clauses(when);
-    const last = parts[parts.length - 1] ?? when;
+    const last = clauseWords(parts[parts.length - 1] ?? when);
     const text = parts.length > 1 ? `…${last}` : last;
     return text.length > EDGE_LABEL_MAX ? `${text.slice(0, EDGE_LABEL_MAX - 1)}…` : text;
   }
-  const conditional = links.filter((l) => l.when).length;
-  return conditional > 0 ? `${links.length} ways · ${conditional} conditional` : `${links.length} ways`;
+  const conditional = ways.filter((w) => w).length;
+  return conditional > 0 ? `${ways.length} ways · ${conditional} conditional` : `${ways.length} ways`;
 }
 
 /* ---------------------------------------------------------------- build -- */

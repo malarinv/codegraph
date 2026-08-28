@@ -12,7 +12,15 @@
 
 import type CodeGraph from '../../index';
 import type { Language } from '../../types';
-import { guardLabel, guardsForFile, siteKey, supportsBranchGuards } from '../../graph/branch-guards';
+import {
+  callArgumentsForFile,
+  guardLabel,
+  guardsForFile,
+  siteKey,
+  supportsBranchGuards,
+  triggersForFile,
+  type SiteTrigger,
+} from '../../graph/branch-guards';
 import { resolveProjectFile } from '../security';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
 import type { WireEdge } from './wire';
@@ -81,15 +89,25 @@ export async function annotateWhen(cg: CodeGraph, projectRoot: string, batches: 
  * files yield no label, and the count of sites labelled is bounded so a wide
  * walk cannot turn one request into a parse of the repository.
  */
-export function createWhenReader(
-  cg: CodeGraph,
-  projectRoot: string,
-  maxSites = 600
-): (caller: { filePath: string; language: Language }, site: { line?: number; column?: number }) => Promise<string> {
+export interface SiteReader {
+  /** The conditions the site runs under, joined; '' when unconditional or unreadable. */
+  when(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string>;
+  /** What the site passes, abbreviated (`'userEmail', values.email`); null when unreadable. '' for an empty list. */
+  args(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string | null>;
+  /** What fires the site — the JSX prop, `on*` option or runs-later call it is written under; null when nothing binds it. */
+  trigger(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<SiteTrigger | null>;
+}
+
+/**
+ * Both readings of one call site — WHEN it runs and WITH WHAT — for the
+ * endpoints that walk chains (Screens, Steps). One file resolution and one
+ * parsed tree serve both; drifted files yield nothing; one site budget bounds
+ * the whole pass.
+ */
+export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 600): SiteReader {
   const files = new Map<string, { abs: string; language: Language } | null>();
   let sites = 0;
-  return async (caller, site): Promise<string> => {
-    if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return '';
+  const resolve = (caller: { filePath: string; language: Language }): { abs: string; language: Language } | null => {
     const posix = caller.filePath.replace(/\\/g, '/');
     let file = files.get(posix);
     if (file === undefined) {
@@ -104,10 +122,43 @@ export function createWhenReader(
       }
       files.set(posix, file);
     }
-    if (!file) return '';
-    sites++;
-    const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
-    const g = (await guardsForFile(file.abs, file.language, [key])).get(siteKey(key));
-    return g ? guardLabel(g) : '';
+    return file;
   };
+  return {
+    async when(caller, site) {
+      if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return '';
+      const file = resolve(caller);
+      if (!file) return '';
+      sites++;
+      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+      const g = (await guardsForFile(file.abs, file.language, [key])).get(siteKey(key));
+      return g ? guardLabel(g) : '';
+    },
+    async args(caller, site) {
+      if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return null;
+      const file = resolve(caller);
+      if (!file) return null;
+      sites++;
+      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+      return (await callArgumentsForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? null;
+    },
+    async trigger(caller, site) {
+      // Not counted against the budget: the tree is already parsed for the
+      // site's guards, and a trigger lookup is a walk up from one node.
+      if (!site.line || !supportsBranchGuards(caller.language)) return null;
+      const file = resolve(caller);
+      if (!file) return null;
+      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+      return (await triggersForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? null;
+    },
+  };
+}
+
+/** The `when` half of {@link createSiteReader}, for callers that read nothing else. */
+export function createWhenReader(
+  cg: CodeGraph,
+  projectRoot: string,
+  maxSites = 600
+): (caller: { filePath: string; language: Language }, site: { line?: number; column?: number }) => Promise<string> {
+  return createSiteReader(cg, projectRoot, maxSites).when;
 }

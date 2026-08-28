@@ -190,7 +190,7 @@ describe('edgeLabel', () => {
     const collect = edgeLabel([link('/home', '/capture/collect', `${chain}guide.dontShowAgain.captureGuide`)]);
     const intro = edgeLabel([link('/home', '/guide', `${chain}!guide.dontShowAgain.captureGuide`)]);
     expect(collect).toBe('…guide.dontShowAgain.captureGuide');
-    expect(intro).toBe('…!guide.dontShowAgain.captureGuide');
+    expect(intro).toBe('…NOT guide.dontShowAgain.captureGuide');
     // The whole point: two arms of a fork no longer read the same.
     expect(collect).not.toBe(intro);
   });

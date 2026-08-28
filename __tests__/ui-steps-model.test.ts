@@ -70,7 +70,7 @@ describe('steps model', () => {
     const edges = [...model.edges.values()];
     expect(edges).toHaveLength(6);
     const toBridge = edges.find((e) => e.to === bridge.id)!;
-    expect(toBridge.label).toBe('!busy');
+    expect(toBridge.label).toBe('NOT busy');
     expect(toBridge.kind).toBe('bridge');
     const toEvent = edges.find((e) => e.to === event.id)!;
     expect(toEvent.synthesized).toBe(true);

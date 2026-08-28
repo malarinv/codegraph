@@ -71,11 +71,32 @@ export function guardLabel(guards: readonly BranchGuard[]): string {
 
 function renderGuard(g: BranchGuard): string {
   if (g.form === 'catch') return g.text;
-  if (!g.negated) return g.text;
+  // `if (!object?.id || !object?.name)` joined to the guard before it with
+  // `&&` would read as two conditions: it keeps its parentheses.
+  if (!g.negated) return hasTopLevelOr(g.text) ? `(${g.text})` : g.text;
   // `!x` negated reads back as `x`; a simple operand takes a bare `!`;
   // anything with operators is parenthesised so the negation is unambiguous.
   if (/^!(?![=])/.test(g.text) && isSimpleOperand(g.text.slice(1))) return g.text.slice(1);
   return isSimpleOperand(g.text) ? `!${g.text}` : `!(${g.text})`;
+}
+
+/** A `||` outside every bracket and string — the condition is a disjunction as written. */
+function hasTopLevelOr(text: string): boolean {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote !== null) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+    else if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && ch === '|' && text[i + 1] === '|') return true;
+  }
+  return false;
 }
 
 function isSimpleOperand(text: string): boolean {
@@ -232,6 +253,341 @@ export function guardsForFileSync(
 
 /** The languages with rules here — what {@link warmBranchGuardGrammars} loads. */
 export const BRANCH_GUARD_LANGUAGES: readonly Language[] = ['typescript', 'tsx', 'javascript', 'jsx', 'swift'];
+
+// =============================================================================
+// Call arguments — what a site passes
+// =============================================================================
+
+/** Longest argument list kept before it is cut with an ellipsis. */
+const MAX_ARGS_TEXT = 96;
+/** Longest single argument (a string literal, a name) kept whole. */
+const MAX_ARG_TEXT = 40;
+/** Object keys listed before `…` stands for the rest. */
+const MAX_OBJECT_KEYS = 4;
+const CALL_TYPES: ReadonlySet<string> = new Set(['call_expression', 'new_expression']);
+const ARGUMENT_CONTAINERS: ReadonlySet<string> = new Set(['arguments', 'value_arguments', 'argument_list']);
+const STRING_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'template_string',
+  'line_string_literal',
+  'multi_line_string_literal',
+  'raw_string_literal',
+]);
+const OBJECT_TYPES: ReadonlySet<string> = new Set(['object', 'object_expression']);
+const ARRAY_TYPES: ReadonlySet<string> = new Set(['array', 'array_literal', 'dictionary_literal']);
+const FUNCTION_TYPES: ReadonlySet<string> = new Set(['arrow_function', 'function_expression', 'function']);
+
+/**
+ * The arguments a call site passes, as written, abbreviated to what a reader
+ * scans for: a string literal whole (a storage key, a URL, a message), a name
+ * whole, an object as its keys (`{ email, password }`), an array as `[…]`, a
+ * function as `() => …`, a nested call as `f(…)`. The conditions say WHEN a
+ * step runs; this says WITH WHAT — `SecureStore.setItemAsync('userEmail',
+ * values.email)` is a different fact from `SecureStore.setItemAsync`.
+ *
+ * Keyed by {@link siteKey} like the guards, read from the same cached tree.
+ * A site that is not inside a call, or a language without rules, is absent.
+ */
+export async function callArgumentsForFile(
+  absPath: string,
+  language: Language,
+  sites: readonly CallSite[]
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!supportsBranchGuards(language) || sites.length === 0) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  for (const site of sites) {
+    const key = siteKey(site);
+    if (out.has(key)) continue;
+    const text = callArgumentsInTree(cached.tree.rootNode, cached.source, site.line, site.column ?? null);
+    if (text !== null) out.set(key, text);
+  }
+  return out;
+}
+
+/** {@link callArgumentsForFile} over source text — the test surface. */
+export async function callArgumentsInSource(
+  source: string,
+  language: Language,
+  line: number,
+  column: number | null
+): Promise<string | null> {
+  if (!supportsBranchGuards(language)) return null;
+  const tree = await parse(source, language);
+  if (!tree) return null;
+  try {
+    return callArgumentsInTree(tree.rootNode, source, line, column);
+  } finally {
+    tree.delete();
+  }
+}
+
+export function callArgumentsInTree(
+  root: SyntaxNode,
+  source: string,
+  line: number,
+  column: number | null
+): string | null {
+  const row = line - 1;
+  const col = column ?? firstNonBlankColumn(source, row);
+  const start = innermostAt(root, row, col);
+  if (!start) return null;
+  // The site's position is on the callee (`setItemAsync` in
+  // `SecureStore.setItemAsync(…)`): climb to the call it belongs to. A few
+  // levels cover a member chain; further up would be another statement.
+  let call: SyntaxNode | null = null;
+  let node: SyntaxNode | null = start;
+  for (let up = 0; node && up < 6; up++, node = node.parent) {
+    if (CALL_TYPES.has(node.type)) {
+      call = node;
+      break;
+    }
+  }
+  if (!call) return null;
+  const container = argumentsOf(call);
+  if (!container) return null;
+  if (container.type === 'lambda_literal') return '{ … }';
+  const parts: string[] = [];
+  for (let i = 0; i < container.namedChildCount; i++) {
+    const c = container.namedChild(i);
+    if (!c || c.type === 'comment') continue;
+    parts.push(abbreviateArgument(c, source));
+  }
+  const text = parts.join(', ');
+  return text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text;
+}
+
+/** The node holding a call's arguments: the `arguments` field, a container child, or Swift's `call_suffix` contents. */
+function argumentsOf(call: SyntaxNode): SyntaxNode | null {
+  const field = call.childForFieldName('arguments');
+  if (field) return field;
+  for (let i = 0; i < call.namedChildCount; i++) {
+    const c = call.namedChild(i);
+    if (!c) continue;
+    if (ARGUMENT_CONTAINERS.has(c.type)) return c;
+    if (c.type === 'call_suffix') {
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const inner = c.namedChild(j);
+        if (inner && (ARGUMENT_CONTAINERS.has(inner.type) || inner.type === 'lambda_literal')) return inner;
+      }
+      return c;
+    }
+  }
+  return null;
+}
+
+function abbreviateArgument(node: SyntaxNode, source: string): string {
+  const type = node.type;
+  if (STRING_TYPES.has(type)) return cut(collapse(node.text), MAX_ARG_TEXT);
+  if (OBJECT_TYPES.has(type)) return objectKeys(node, source);
+  if (ARRAY_TYPES.has(type)) return '[…]';
+  if (FUNCTION_TYPES.has(type)) return '() => …';
+  if (type === 'lambda_literal') return '{ … }';
+  if (type === 'spread_element') return cut(collapse(node.text), MAX_ARG_TEXT);
+  if (type === 'await_expression') {
+    const inner = node.namedChild(0);
+    return inner ? `await ${abbreviateArgument(inner, source)}` : 'await …';
+  }
+  if (CALL_TYPES.has(type)) {
+    const callee = node.childForFieldName('function') ?? node.childForFieldName('constructor') ?? node.namedChild(0);
+    const name = callee ? cut(collapse(callee.text), 28) : '';
+    return `${type === 'new_expression' ? 'new ' : ''}${name}(…)`;
+  }
+  // Swift `label: value` — the label is half the meaning (`withName:`).
+  if (type === 'value_argument') {
+    const named: SyntaxNode[] = [];
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i);
+      if (c) named.push(c);
+    }
+    if (named.length >= 2 && (named[0]!.type === 'simple_identifier' || named[0]!.type === 'value_argument_label')) {
+      return `${named[0]!.text}: ${abbreviateArgument(named[named.length - 1]!, source)}`;
+    }
+    return named.length > 0 ? abbreviateArgument(named[named.length - 1]!, source) : cut(collapse(node.text), MAX_ARG_TEXT);
+  }
+  if (type === 'lambda_argument' || type === 'trailing_closure') return '{ … }';
+  return cut(collapse(node.text), MAX_ARG_TEXT);
+}
+
+/** `{ email, password, …}` — the keys an object literal passes, not its bulk. */
+function objectKeys(node: SyntaxNode, source: string): string {
+  const keys: string[] = [];
+  let more = 0;
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const c = node.namedChild(i);
+    if (!c || c.type === 'comment') continue;
+    let key: string | null = null;
+    if (c.type === 'pair') key = c.childForFieldName('key')?.text ?? null;
+    else if (c.type === 'shorthand_property_identifier' || c.type === 'shorthand_property_identifier_pattern') key = c.text;
+    else if (c.type === 'spread_element') key = collapse(c.text);
+    else if (c.type === 'method_definition') key = c.childForFieldName('name')?.text ?? null;
+    if (key === null) continue;
+    if (keys.length >= MAX_OBJECT_KEYS) {
+      more++;
+      continue;
+    }
+    keys.push(cut(key, 24));
+  }
+  void source;
+  if (keys.length === 0) return '{…}';
+  return `{ ${keys.join(', ')}${more > 0 ? ', …' : ''} }`;
+}
+
+// =============================================================================
+// Triggers — what fires a site
+// =============================================================================
+
+/**
+ * What binds a call site to an event, when something does — the answer to
+ * "at what point does this run": the JSX attribute the site sits under
+ * (`onPress` of `<Button>`), the `on*` option it is written in (`onSubmit`
+ * of `useFormik({…})`), or the runs-later call it is an argument of
+ * (`useEffect`, `setTimeout`, `addListener('x')`, `.then`).
+ */
+export interface SiteTrigger {
+  kind: 'prop' | 'option' | 'callback';
+  /** `onPress`, `onSubmit`, `useEffect`, `addListener`. */
+  name: string;
+  /** `Button` for a prop, `useFormik` for an option, the first string argument for a callback; null when unknown. */
+  of: string | null;
+}
+
+/** Callees whose function argument runs LATER — a callback, not a call. Matched on the last segment. */
+const LATER_CALLEES: ReadonlySet<string> = new Set([
+  'useEffect',
+  'useLayoutEffect',
+  'useFocusEffect',
+  'useImperativeHandle',
+  'setTimeout',
+  'setInterval',
+  'requestAnimationFrame',
+  'requestIdleCallback',
+  'runAfterInteractions',
+  'addListener',
+  'addEventListener',
+  'on',
+  'once',
+  'subscribe',
+  'then',
+  'catch',
+  'finally',
+  'runOnJS',
+  'runOnUI',
+  'scheduleOnRN',
+]);
+/** The walk up never leaves the function the site belongs to — unless that function is inline. */
+const TRIGGER_BOUNDARIES: ReadonlySet<string> = new Set(['function_declaration', 'method_definition', 'class_declaration', 'class_body', 'program']);
+const MAX_TRIGGER_CLIMB = 24;
+
+export async function triggersForFile(
+  absPath: string,
+  language: Language,
+  sites: readonly CallSite[]
+): Promise<Map<string, SiteTrigger>> {
+  const out = new Map<string, SiteTrigger>();
+  if (!JS_FAMILY.has(language) || sites.length === 0) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  for (const site of sites) {
+    const key = siteKey(site);
+    if (out.has(key)) continue;
+    const t = triggerInTree(cached.tree.rootNode, cached.source, site.line, site.column ?? null);
+    if (t !== null) out.set(key, t);
+  }
+  return out;
+}
+
+/** {@link triggersForFile} over source text — the test surface. */
+export async function triggerInSource(
+  source: string,
+  language: Language,
+  line: number,
+  column: number | null
+): Promise<SiteTrigger | null> {
+  if (!JS_FAMILY.has(language)) return null;
+  const tree = await parse(source, language);
+  if (!tree) return null;
+  try {
+    return triggerInTree(tree.rootNode, source, line, column);
+  } finally {
+    tree.delete();
+  }
+}
+
+export function triggerInTree(root: SyntaxNode, source: string, line: number, column: number | null): SiteTrigger | null {
+  const row = line - 1;
+  const col = column ?? firstNonBlankColumn(source, row);
+  let node: SyntaxNode | null = innermostAt(root, row, col);
+  let prev: SyntaxNode | null = null;
+  for (let up = 0; node && up < MAX_TRIGGER_CLIMB; up++, prev = node, node = node.parent) {
+    const type = node.type;
+    if (TRIGGER_BOUNDARIES.has(type)) return null;
+    // A named handler is its own story: `const handleX = useCallback(() => …)`
+    // binds a name, and whoever uses the name is the trigger of what is inside.
+    if ((type === 'arrow_function' || type === 'function_expression') && node.parent) {
+      const p = node.parent;
+      if (p.type === 'variable_declarator') return null;
+      if (p.type === 'arguments' && p.parent) {
+        const callee = calleeName(p.parent);
+        if (callee === 'useCallback' || callee === 'useMemo' || callee === 'useEffectEvent' || callee === 'useEvent') return null;
+      }
+    }
+    if (type === 'jsx_attribute') {
+      const name = node.namedChild(0);
+      const element = node.parent;
+      const tag = element ? element.childForFieldName('name') : null;
+      return { kind: 'prop', name: name ? name.text : 'prop', of: tag ? collapseText(tag.text) : null };
+    }
+    if (type === 'pair') {
+      const key = node.childForFieldName('key');
+      const keyText = key ? key.text.replace(/^['"`]|['"`]$/g, '') : '';
+      if (/^on[A-Z]\w*$/.test(keyText)) {
+        // `useFormik({ onSubmit: … })`: the object is an argument of a call.
+        const object = node.parent;
+        const args = object?.parent;
+        const call = args?.type === 'arguments' ? args.parent : null;
+        return { kind: 'option', name: keyText, of: call && CALL_TYPES.has(call.type) ? calleeName(call) : null };
+      }
+    }
+    if (type === 'arguments' && node.parent && CALL_TYPES.has(node.parent.type) && prev !== null) {
+      const callee = calleeName(node.parent);
+      if (callee !== null && LATER_CALLEES.has(callee)) {
+        const first = node.namedChild(0);
+        const of = first && STRING_TYPES.has(first.type) ? cut(collapseText(first.text), MAX_ARG_TEXT) : null;
+        return { kind: 'callback', name: callee, of };
+      }
+    }
+  }
+  return null;
+}
+
+/** The last segment of a call's callee: `nativeEmitter.addListener` → `addListener`. */
+function calleeName(call: SyntaxNode): string | null {
+  const callee = call.childForFieldName('function') ?? call.childForFieldName('constructor');
+  if (!callee) return null;
+  const text = collapseText(callee.text);
+  const m = text.match(/([A-Za-z_$][\w$]*)\s*$/);
+  return m ? m[1]! : text;
+}
+
+function collapseText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function collapse(text: string): string {
+  return collapseText(text);
+}
+
+function cut(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function firstNonBlankColumn(source: string, row: number): number {
+  const line = source.split('\n')[row] ?? '';
+  const m = line.match(/\S/);
+  return m ? (m.index ?? 0) : 0;
+}
 
 /** Load the grammars {@link guardsForFileSync} needs; a no-op once loaded, never throws. */
 export async function warmBranchGuardGrammars(only?: readonly Language[]): Promise<void> {

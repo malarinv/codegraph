@@ -669,6 +669,7 @@ export interface WireScreenSite {
   line: number;
   href: string;
   method: string;
+  /** The conditions THIS site runs under (the whole chain's plus its own); '' when unconditional. */
   when: string;
 }
 
@@ -705,6 +706,10 @@ export interface WireStepSite {
   line: number;
   /** `push /capture`, `calls`, `client.post` — what the site does, in a word or two. */
   text: string;
+  /** What the site passes, abbreviated (`'userEmail', values.email`); '' for none; absent when unreadable. */
+  args?: string;
+  /** The conditions THIS site runs under (the whole chain's); '' when unconditional. */
+  when: string;
 }
 
 export interface WireStep {

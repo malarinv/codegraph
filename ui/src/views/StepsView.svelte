@@ -31,6 +31,7 @@
   import { fileHref, flowHref, navigate, stepsHref, symbolHref } from '../lib/navigation';
   import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
   import { hoverPill, nearestEdge, placeLabels } from '../lib/screens-model';
+  import { commonTokens, conditionTokens, restTokens, scenarios, whenWords, type WordToken } from '../lib/conditions';
   import {
     buildStepsModel,
     kindWord,
@@ -280,7 +281,7 @@
   /** The words a panel row puts on its line: the arrow, and the whole condition. */
   function fullText(link: WireStepLink): string {
     const arriving = selected !== null && link.to === selected && link.from !== selected;
-    return `${arriving ? '←' : '→'} ${link.when || 'always'}`;
+    return `${arriving ? '←' : '→'} ${whenWords(link.when) || 'always'}`;
   }
 
   function rowHot(link: WireStepLink): boolean {
@@ -310,7 +311,16 @@
   function basename(file: string): string {
     return file.slice(file.lastIndexOf('/') + 1);
   }
+
+  /** `SecureStore.setItemAsync('userEmail', values.email)` — the site, with what it passes when that could be read. */
+  function siteWords(site: { text: string; args?: string }): string {
+    return site.args === undefined ? site.text : `${site.text}(${site.args})`;
+  }
 </script>
+
+{#snippet words(tokens: WordToken[])}
+  {#each tokens as t, i (i)}{#if i > 0}{' '}{/if}{#if t.kw}<b class="kw">{t.text}</b>{:else}{t.text}{/if}{/each}
+{/snippet}
 
 <div class="steps">
   <div class="stage" bind:this={stage} role="presentation" onmousemove={onStageMove} onmouseleave={() => (hovered = null)}>
@@ -432,9 +442,11 @@
           <div class="mono"><b>{nameOf(hoveredInfo.from)}</b> → {nameOf(hoveredInfo.to)}</div>
           {#each hoveredInfo.links.slice(0, 5) as link (link.id)}
             <div class="tiprow">
-              {#if link.when}<span class="when">when {link.when}</span>{:else}<span class="dim">always</span>{/if}
+              {#if link.sites.length > 1}<span class="dim">{link.sites.length} ways</span>{/if}
+              <span class="when">{@render words(conditionTokens(link.when))}</span>
               {#if link.via.length > 0}<span class="mono dim">via {stepViaText(link)}</span>{/if}
               {#if link.label}<span class="dim">{link.label}</span>{/if}
+              {#if link.sites[0]}<span class="mono">{siteWords(link.sites[0])}</span>{/if}
             </div>
           {/each}
           {#if hoveredInfo.links.length > 5}<div class="dim">+{hoveredInfo.links.length - 5} more</div>{/if}
@@ -509,6 +521,8 @@
           <p class="dim">{selectedInfo.step.anchor ? 'The anchor — the picture starts here.' : 'Nothing in the picture leads here.'}</p>
         {/if}
         {#each lists.arrivesFrom as link (link.id)}
+            {@const sc = scenarios(link.sites)}
+            {@const fallback = payload.steps.find((s) => s.id === link.from)?.node?.id ?? null}
           <div
             class="row"
             class:hot={rowHot(link)}
@@ -519,16 +533,20 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.from)}>{nameOf(link.from)}</button>
-            {#if link.when}<div class="when">when {link.when}</div>{/if}
+            {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {stepViaText(link)}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
-            {#each link.sites as site (site.file + site.line)}
-              {@const href = siteHref(link, site, payload.steps.find((s) => s.id === link.from)?.node?.id ?? null)}
-              {#if href}
-                <a class="site dim" {href}>{site.text} · {basename(site.file)}:{site.line}</a>
-              {:else}
-                <span class="site dim">{site.text} · {basename(site.file)}:{site.line}</span>
-              {/if}
+            {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
+            {#each sc.rows as row (row.site.file + row.site.line)}
+              {@const href = siteHref(link, row.site, fallback)}
+              <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
+                {#if href}
+                  <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
+                {:else}
+                  <span class="site">{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
+                {/if}
+              </div>
             {/each}
             {#if stripHref(link)}<a class="site act" href={stripHref(link)}>Open as a flow →</a>{/if}
           </div>
@@ -541,6 +559,8 @@
           </p>
         {/if}
         {#each lists.leadsTo as link (link.id)}
+            {@const sc = scenarios(link.sites)}
+            {@const fallback = selectedInfo.step.screen?.component?.id ?? selectedInfo.step.node?.id ?? null}
           <div
             class="row"
             class:hot={rowHot(link)}
@@ -551,16 +571,20 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.to)}>{nameOf(link.to)}</button>
-            {#if link.when}<div class="when">when {link.when}</div>{/if}
+            {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {stepViaText(link)}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
-            {#each link.sites as site (site.file + site.line)}
-              {@const href = siteHref(link, site, selectedInfo.step.screen?.component?.id ?? selectedInfo.step.node?.id ?? null)}
-              {#if href}
-                <a class="site dim" {href}>{site.text} · {basename(site.file)}:{site.line}</a>
-              {:else}
-                <span class="site dim">{site.text} · {basename(site.file)}:{site.line}</span>
-              {/if}
+            {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
+            {#each sc.rows as row (row.site.file + row.site.line)}
+              {@const href = siteHref(link, row.site, fallback)}
+              <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
+                {#if href}
+                  <a class="site" {href}>{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></a>
+                {:else}
+                  <span class="site">{siteWords(row.site)} <span class="dim">· {basename(row.site.file)}:{row.site.line}</span></span>
+                {/if}
+              </div>
             {/each}
             {#if stripHref(link)}<a class="site act" href={stripHref(link)}>Open as a flow →</a>{/if}
           </div>
@@ -817,6 +841,8 @@
   .big {
     font-size: 15px;
     font-weight: 600;
+    /* An effect's label is a call with its arguments — one long token. */
+    overflow-wrap: anywhere;
   }
   .sub {
     display: flex;
@@ -900,15 +926,31 @@
     font: 400 11.5px var(--mono);
     margin-top: 2px;
   }
+  /* The joins we add — WHEN, AND, OR, NOT — a little bolder than the code between them. */
+  .kw {
+    font-weight: 600;
+  }
   .via {
     font: 400 11px var(--mono);
     margin-top: 2px;
+  }
+  .ways {
+    font: 500 11px var(--sans);
+    margin-top: 6px;
+  }
+  /* One scenario per row under a link: its own tail of conditions, then its site. */
+  .scenario.many {
+    margin: 4px 0 0 8px;
+    padding-left: 8px;
+    border-left: 1px solid var(--rule-soft);
   }
   .site {
     display: block;
     font: 400 11px var(--mono);
     margin-top: 2px;
+    color: var(--ink-2);
     text-decoration: none;
+    overflow-wrap: anywhere;
   }
   a.site:hover {
     text-decoration: underline;

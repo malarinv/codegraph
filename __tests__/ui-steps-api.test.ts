@@ -73,6 +73,7 @@ beforeAll(async () => {
       '  const handleZipComplete = useCallback(async (data: { uri: string }) => {\n' +
       '    setZipUri(data.uri)\n' +
       '    await uploadARCapture(data.uri)\n' +
+      "    Alert.alert('Uploaded', data.uri, [{ text: 'OK' }])\n" +
       "    if (unlimited) router.replace('/')\n" +
       '  }, [unlimited])\n' +
       '  useEffect(() => {\n' +
@@ -192,6 +193,7 @@ describe('buildSteps', () => {
 
     const link = (from: string, to: string) =>
       payload.links.find((l) => l.from === byLabel.get(from)!.id && l.to === byLabel.get(to)!.id);
+    const req = link('handleZipComplete', 'client.post +1');
     expect(link('/capture/review', 'handleApprove')?.kind).toBe('handler');
     expect(link('handleApprove', 'finalizeCaptureSession')?.kind).toBe('bridge');
     const evt = link('finalizeCaptureSession', 'handleZipComplete');
@@ -200,14 +202,26 @@ describe('buildSteps', () => {
     expect(evt?.via.map((v) => v.name)).toEqual(['emitZipComplete']);
     expect(evt?.when).toBe('result');
     expect(evt?.label).toContain('event onZipComplete');
-    expect(link('handleZipComplete', 'setZipUri')?.kind).toBe('store');
-    const req = link('handleZipComplete', 'client.post +1');
+    const storeLink = link('handleZipComplete', 'setZipUri');
+    expect(storeLink?.kind).toBe('store');
+    // Every call-shaped site says what it passes.
+    expect(storeLink?.sites[0]?.args).toBe('data.uri');
+    expect(link('handleApprove', 'finalizeCaptureSession')?.sites[0]?.args).toBe('');
+    // One call behind an effect box: the box says it. Several: the panel does.
+    const alert = payload.steps.find((s) => s.kind === 'effect' && s.effect?.category === 'device')!;
+    expect(alert.label).toBe("Alert.alert('Uploaded', data.uri, […])");
+    expect(network.label).toBe('client.post +1');
+    expect(req?.sites.map((s) => `${s.text}(${s.args})`)).toEqual(["client.post('/frames', { uri })", "client.get('/frames/status')"]);
     expect(req?.kind).toBe('effect');
     expect(req?.via.map((v) => v.name)).toEqual(['uploadARCapture']);
     const nav = link('handleZipComplete', '/');
     expect(nav?.kind).toBe('navigates');
     expect(nav?.when).toBe('unlimited');
     expect(nav?.sites[0]?.text).toBe('replace /');
+    // Every site carries the whole condition it runs under — one scenario each.
+    expect(nav?.sites[0]?.when).toBe('unlimited');
+    expect(evt?.sites[0]?.when).toBe('result');
+    expect(storeLink?.sites[0]?.when).toBe('');
 
     // Rows: the anchor on 0, then one more step away each. The listener is
     // registered BY the screen (`addListener('onZipComplete', handleZipComplete)`),

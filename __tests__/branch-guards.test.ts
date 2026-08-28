@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph } from '../src';
 import { initGrammars } from '../src/extraction/grammars';
-import { guardsInSource, guardLabel, supportsBranchGuards } from '../src/graph/branch-guards';
+import { callArgumentsInSource, guardsInSource, guardLabel, supportsBranchGuards } from '../src/graph/branch-guards';
 import { buildNode } from '../src/ui-server/api/node';
 import { buildFlow } from '../src/ui-server/api/flow';
 
@@ -46,6 +46,21 @@ export function ItemCard(props) {
 
   it('reads an if branch and the early-return guards before it', async () => {
     expect(await labelAt(handlePress, 'openObjectDetail(')).toBe('!isUploading && isCollected');
+  });
+
+  it('keeps a disjunctive guard in parentheses, so the join stays unambiguous', async () => {
+    const src = `
+function go(object) {
+  if (isUploading) return
+  if (!object?.id || !object?.name) {
+    bail()
+    return
+  }
+  proceed()
+}
+`;
+    expect(await labelAt(src, 'bail(')).toBe('!isUploading && (!object?.id || !object?.name)');
+    expect(await labelAt(src, 'proceed(')).toBe('!isUploading && !(!object?.id || !object?.name)');
   });
 
   it('turns each earlier early-return into a negated guard, in source order', async () => {
@@ -236,5 +251,59 @@ describe('branch guards: on the wire', () => {
     expect(hop.edge?.label).toBe('calls · when !busy && ready');
 
     cg.close();
+  });
+});
+
+
+// =============================================================================
+// Call arguments — what a site passes
+// =============================================================================
+
+async function argsAt(src: string, needle: string, language: 'tsx' | 'typescript' | 'swift' = 'tsx') {
+  const line = lineOf(src, needle);
+  const column = src.split('\n')[line - 1]!.indexOf(needle);
+  return callArgumentsInSource(src, language, line, column);
+}
+
+describe('call arguments', () => {
+  const login = `
+async function handleLogin(values) {
+  await SecureStore.setItemAsync('userEmail', values.email)
+  const res = await client.post('/auth/login', { email: values.email, password, ...rest })
+  Alert.alert(i18n.t('error_login_failed'), err.message, [{ text: 'OK' }])
+  router.push({ pathname: '/item/[id]', params: { id } })
+  captureView.finalizeCaptureSession()
+  run(() => go(), async (x) => x, new Thing(1))
+  const big = fetch(\`/api/\${id}\`, { method: 'POST', headers, body, mode, cache, credentials })
+}
+`;
+
+  it('keeps literals and names whole, folds objects to their keys, arrays and functions to a shape', async () => {
+    expect(await argsAt(login, 'SecureStore.setItemAsync(')).toBe("'userEmail', values.email");
+    expect(await argsAt(login, 'client.post(')).toBe("'/auth/login', { email, password, ...rest }");
+    expect(await argsAt(login, 'Alert.alert(')).toBe('i18n.t(…), err.message, […]');
+    expect(await argsAt(login, 'router.push(')).toBe('{ pathname, params }');
+    expect(await argsAt(login, 'run(')).toBe('() => …, () => …, new Thing(…)');
+    expect(await argsAt(login, 'fetch(')).toBe('`/api/${id}`, { method, headers, body, mode, … }');
+  });
+
+  it('an empty argument list is an empty string; a position outside a call is null', async () => {
+    expect(await argsAt(login, 'captureView.finalizeCaptureSession(')).toBe('');
+    expect(await argsAt(login, 'async function handleLogin')).toBeNull();
+  });
+
+  it('Swift: labels stay with their values, a trailing closure is a shape', async () => {
+    const src = `
+class CaptureEvents {
+  func emitZipComplete(result: ZipResult) {
+    sendEvent(withName: "onZipComplete", body: ["zipURL": result.url])
+    tracker.setup(side: side, angle: 45)
+    DispatchQueue.main.async { finish() }
+  }
+}
+`;
+    expect(await argsAt(src, 'sendEvent(', 'swift')).toBe('withName: "onZipComplete", body: […]');
+    expect(await argsAt(src, 'tracker.setup(', 'swift')).toBe('side: side, angle: 45');
+    expect(await argsAt(src, 'DispatchQueue.main.async', 'swift')).toBe('{ … }');
   });
 });

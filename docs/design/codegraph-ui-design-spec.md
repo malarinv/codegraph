@@ -460,7 +460,13 @@ whole app; so is a native event that lands in a COMPONENT (the capture overlay t
 another screen's body — `cut: 'component'`). A bridge or event step needs evidence — a bridge resolver's edge or a synthesized channel's; a plain
 name-matched call across the families (`arr.flat()` landing on a Swift `flat`) is neither drawn nor walked. Effects
 are one box per (function, category), labelled by the first call and counting the rest (`client.post +1`), the calls
-listed in the panel. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
+listed in the panel. Every call-shaped site (a store action, a bridge call, an effect, a plain call to a step) also
+carries **what it passes** — `graph/branch-guards.ts`'s `callArgumentsForFile`, read from the same cached tree as the
+guards: string literals and names whole, an object as its keys (`{ email, password }`), arrays `[…]`, functions
+`() => …`, nested calls `f(…)`, Swift labels kept (`withName: "onZipComplete"`), ≤ 96 chars — printed on the panel's
+site rows (`SecureStore.setItemAsync('userEmail', values.email) · index.tsx:226`) and in the tooltip, and an effect
+box with exactly one call behind it wears it as its label (`axios.post('/auth/login', { email, password })`, ≤ 56).
+The conditions say when a step runs; the arguments say with what. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
 at, drawn with `name …`), fan-out per node (80), folded nodes per step (300), steps per picture (120 default, ≤ 400);
 hubs (fan-in ≥ 40) and shared chrome (a component rendered by ≥ 5 parents — higher than the Screens view's 3, which
 attributes navigations rather than deciding what to walk into) are dead ends, counted in `truncated`. A step several
@@ -529,6 +535,19 @@ the same question about the same graph.
 - Versioned with the engine (`scripts/sync-ui-version.mjs`), because the payload shapes are versioned with the binary that serves
   them. **Prepared, not published**: `"private": true` is the guard and `scripts/pack-npm.sh` only packs it under
   `CODEGRAPH_PACK_UI=1`.
+
+### 3.14 Conditions, as a reader says them (`ui/src/lib/conditions.ts`)
+A `when` arrives from the graph as code joined by OUR operators — guards along a chain joined with ` && `, a negated
+guard wrapped `!(…)`, a link's several call sites joined with ` || ` — and those joins render as words: **WHEN**,
+**AND**, **OR**, **NOT**, set in capitals at weight 600 in the condition's own mono (no tracking — they are words in a
+sentence, not labels), so the joins read at a glance and the code between them reads as code. The code inside one
+guard stays code (`isUploadInProgress || elapsed < 5000` is what the source
+says; a guard that is itself a disjunction keeps its parentheses, `graph/branch-guards.ts` adds them). A link with
+several call sites is several **scenarios**, never one long condition: the panel prints the clauses every site shares
+once (`WHEN NOT (busy || late)`), then one row per site with its own tail (`AND NOT user?.organization_id` · site ·
+file:line), or `always`; the connector's pill counts them (`4 ways · 4 conditional`) instead of quoting them. Both the
+Screens and the Steps view use this; a site's `when` on the wire is the whole condition for that site, the link's
+`when` only their summary.
 
 ## 5. Copy rules
 Sentence case; controls say what happens ("Read as flow", "Clear"); counts always visible next to folds; honesty phrases fixed:

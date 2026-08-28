@@ -26,6 +26,7 @@
   import { live } from '../lib/live.svelte';
   import { symbolHref, fileHref, stepsHref } from '../lib/navigation';
   import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
+  import { commonTokens, conditionTokens, restTokens, scenarios, whenWords, type WordToken } from '../lib/conditions';
   import {
     buildScreensModel,
     hoverPill,
@@ -249,7 +250,7 @@
   /** The words a panel row puts on its line: the arrow, and the whole condition. */
   function fullText(link: WireScreenLink): string {
     const arriving = selected !== null && link.to === selected && link.from !== selected;
-    return `${arriving ? '←' : '→'} ${link.when || 'always'}`;
+    return `${arriving ? '←' : '→'} ${whenWords(link.when) || 'always'}`;
   }
 
   function rowHot(link: WireScreenLink): boolean {
@@ -267,6 +268,10 @@
     return other;
   }
 </script>
+
+{#snippet words(tokens: WordToken[])}
+  {#each tokens as t, i (i)}{#if i > 0}{' '}{/if}{#if t.kw}<b class="kw">{t.text}</b>{:else}{t.text}{/if}{/each}
+{/snippet}
 
 <div class="screens">
   <div class="stage" bind:this={stage} role="presentation" onmousemove={onStageMove} onmouseleave={() => (hovered = null)}>
@@ -365,7 +370,8 @@
           <div class="mono"><b>{nameOf(hoveredInfo.from)}</b> → {nameOf(hoveredInfo.to)}</div>
           {#each hoveredInfo.links.slice(0, 5) as link (link.id)}
             <div class="tiprow">
-              {#if link.when}<span class="when">when {link.when}</span>{:else}<span class="dim">always</span>{/if}
+              {#if link.sites.length > 1}<span class="dim">{link.sites.length} ways</span>{/if}
+              <span class="when">{@render words(conditionTokens(link.when))}</span>
               {#if link.via.length > 0}<span class="mono dim">via {viaText(link)}</span>{/if}
             </div>
           {/each}
@@ -410,6 +416,7 @@
           </p>
         {/if}
         {#each lists.opensFrom as link (link.id)}
+            {@const sc = scenarios(link.sites)}
           <div
             class="row"
             class:hot={rowHot(link)}
@@ -420,12 +427,16 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.from)}>{sentence(link, 'from')}</button>
-            {#if link.when}<div class="when">when {link.when}</div>{/if}
+            {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
-            {#each link.sites as site (site.file + site.line)}
-              <a class="site dim" href={symbolHref(link.via[link.via.length - 1]?.id ?? selectedInfo.id, { line: site.line })}
-                >{site.method} {site.href} · {site.file.slice(site.file.lastIndexOf('/') + 1)}:{site.line}</a
-              >
+            {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
+            {#each sc.rows as row (row.site.file + row.site.line)}
+              <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
+                <a class="site dim" href={symbolHref(link.via[link.via.length - 1]?.id ?? selectedInfo.id, { line: row.site.line })}
+                  >{row.site.method} {row.site.href} · {row.site.file.slice(row.site.file.lastIndexOf('/') + 1)}:{row.site.line}</a
+                >
+              </div>
             {/each}
           </div>
         {/each}
@@ -433,6 +444,7 @@
         <h4>Goes to <span class="dim">{lists.goesTo.length}</span></h4>
         {#if lists.goesTo.length === 0}<p class="dim">No navigation leaves this screen.</p>{/if}
         {#each lists.goesTo as link (link.id)}
+            {@const sc = scenarios(link.sites)}
           <div
             class="row"
             class:hot={rowHot(link)}
@@ -443,14 +455,18 @@
             onfocusout={() => onRowHover(null)}
           >
             <button class="peer mono" onclick={() => (selected = link.to)}>{sentence(link, 'to')}</button>
-            {#if link.when}<div class="when">when {link.when}</div>{/if}
+            {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.via.length > 0}<div class="via dim">via {viaText(link)}</div>{/if}
-            {#each link.sites as site (site.file + site.line)}
-              <a
-                class="site dim"
-                href={symbolHref(link.via[link.via.length - 1]?.id ?? selectedInfo.screen?.component?.id ?? selectedInfo.id, { line: site.line })}
-                >{site.method} {site.href} · {site.file.slice(site.file.lastIndexOf('/') + 1)}:{site.line}</a
-              >
+            {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
+            {#each sc.rows as row (row.site.file + row.site.line)}
+              <div class="scenario" class:many={sc.rows.length > 1}>
+                {#if sc.rows.length > 1}<div class="when">{@render words(restTokens(row.rest, sc.common.length > 0))}</div>{/if}
+                <a
+                  class="site dim"
+                  href={symbolHref(link.via[link.via.length - 1]?.id ?? selectedInfo.screen?.component?.id ?? selectedInfo.id, { line: row.site.line })}
+                  >{row.site.method} {row.site.href} · {row.site.file.slice(row.site.file.lastIndexOf('/') + 1)}:{row.site.line}</a
+                >
+              </div>
             {/each}
           </div>
         {/each}
@@ -716,9 +732,23 @@
     font: 400 11.5px var(--mono);
     margin-top: 2px;
   }
+  /* The joins we add — WHEN, AND, OR, NOT — a little bolder than the code between them. */
+  .kw {
+    font-weight: 600;
+  }
   .via {
     font: 400 11px var(--mono);
     margin-top: 2px;
+  }
+  .ways {
+    font: 500 11px var(--sans);
+    margin-top: 6px;
+  }
+  /* One scenario per row under a transition: its own tail of conditions, then its site. */
+  .scenario.many {
+    margin: 4px 0 0 8px;
+    padding-left: 8px;
+    border-left: 1px solid var(--rule-soft);
   }
   .site {
     display: block;

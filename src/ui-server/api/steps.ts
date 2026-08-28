@@ -40,7 +40,8 @@
 import type CodeGraph from '../../index';
 import type { Edge, Language, Node, UnresolvedReference } from '../../types';
 import { badRequest, intParam, notFound } from './respond';
-import { createWhenReader } from './when';
+import { createSiteReader } from './when';
+import type { SiteTrigger } from '../../graph/branch-guards';
 import { HUB_THRESHOLD, UNCERTAIN_BELOW, toNodeRef, type WireNodeRef } from './wire';
 
 // =============================================================================
@@ -56,6 +57,26 @@ export interface WireStepSite {
   line: number;
   /** `push /capture`, `calls`, `client.post` — what the site does, in a word or two. */
   text: string;
+  /**
+   * What the site passes, as written and abbreviated: `'userEmail',
+   * values.email`, `'/auth/login', { email, password }`. '' for an empty
+   * argument list; absent when the source could not be read.
+   */
+  args?: string;
+  /**
+   * The conditions THIS site runs under — the whole chain's, joined; '' when
+   * unconditional. A link with several sites is several scenarios (four
+   * early returns that each go home), and the viewer lists them as rows with
+   * the clauses they share factored out; the link's own `when` is only the
+   * summary of all of them.
+   */
+  when: string;
+}
+
+/** What fires a step or a link: the event it is written under, and the function that writes it there. */
+export interface WireStepTrigger extends SiteTrigger {
+  /** The function the binding is written in — `LoginButton` for its `onPress`. */
+  in: string;
 }
 
 export interface WireStep {
@@ -82,6 +103,8 @@ export interface WireStep {
   event?: string;
   /** Every event that lands on this step, in the order the walk met them. */
   events?: string[];
+  /** For a handler: what fires it — the first binding the walk met. */
+  trigger?: WireStepTrigger;
   /** For a screen: its path and the component that renders it. */
   screen?: { path: string; component: WireNodeRef | null };
   /**
@@ -105,6 +128,8 @@ export interface WireStepLink {
   synthesized: boolean;
   uncertain: boolean;
   sites: WireStepSite[];
+  /** What fires the first site, when something binds it to an event. */
+  trigger?: WireStepTrigger;
 }
 
 export interface WireStepsPayload {
@@ -145,8 +170,10 @@ const MAX_FOLD_DEPTH = 7;
 const MAX_FANOUT = 80;
 /** Unresolved-reference scans (for effects) per request. */
 const MAX_EFFECT_SCANS = 800;
-/** Call sites labelled with conditions per request. */
-const MAX_WHEN_SITES = 800;
+/** Call sites read for conditions and arguments per request. */
+const MAX_WHEN_SITES = 1600;
+/** Longest effect-box label before its argument list is cut. */
+const MAX_EFFECT_LABEL = 56;
 /**
  * A component rendered by this many distinct parents is chrome (a top bar, a
  * button), not a screen's own behaviour. Higher than the Screens view's 3: that
@@ -252,8 +279,13 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     }
   }
 
-  const readWhen = createWhenReader(cg, projectRoot, MAX_WHEN_SITES);
-  const whenAt = (caller: Node, site: { line?: number; column?: number }) => readWhen(caller, site);
+  const reader = createSiteReader(cg, projectRoot, MAX_WHEN_SITES);
+  const whenAt = (caller: Node, site: { line?: number; column?: number }) => reader.when(caller, site);
+  const argsAt = (caller: Node, site: { line?: number; column?: number }) => reader.args(caller, site);
+  const withArgs = async (site: WireStepSite, caller: Node, at: { line?: number; column?: number }): Promise<WireStepSite> => {
+    const args = await argsAt(caller, at);
+    return args === null ? site : { ...site, args };
+  };
 
   const steps = new Map<string, StepRecord>();
   const links = new Map<string, WireStepLink>();
@@ -343,7 +375,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     chain: Node[],
     whens: string[],
     site: WireStepSite,
-    edge: Edge | null
+    edge: Edge | null,
+    trigger: WireStepTrigger | null = null
   ): void => {
     const meta = (edge?.metadata ?? {}) as Record<string, unknown>;
     const synthesized = edge?.provenance === 'heuristic';
@@ -352,9 +385,11 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const viaKey = via.map((v) => v.id).join('>');
     const id = `${from.id} ${to.id} ${viaKey}`;
     const when = whens.filter((w, i) => w && whens.indexOf(w) === i).join(' && ');
+    const stamped: WireStepSite = { ...site, when };
     const existing = links.get(id);
     if (existing) {
-      if (!existing.sites.some((s) => s.file === site.file && s.line === site.line)) existing.sites.push(site);
+      if (!existing.sites.some((s) => s.file === site.file && s.line === site.line)) existing.sites.push(stamped);
+      if (!existing.trigger && trigger) existing.trigger = trigger;
       if (when !== existing.when) {
         if (!when || !existing.when) existing.when = '';
         else if (!existing.when.split(' || ').includes(when)) existing.when = `${existing.when} || ${when}`;
@@ -371,8 +406,16 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       label: hopLabel(meta, synthesized),
       synthesized,
       uncertain: confidence !== null && confidence < UNCERTAIN_BELOW,
-      sites: [site],
+      sites: [stamped],
+      ...(trigger ? { trigger } : {}),
     });
+    if (trigger && to.kind === 'trigger' && !to.trigger) to.trigger = trigger;
+  };
+
+  /** What fires a site, with the function it is written in. */
+  const triggerAt = async (caller: Node, at: { line?: number; column?: number }): Promise<WireStepTrigger | null> => {
+    const t = await reader.trigger(caller, at);
+    return t ? { ...t, in: caller.name } : null;
   };
 
   // The anchor: a screen keeps its kind and explores from its component.
@@ -454,8 +497,10 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             if (category === null) continue;
             const target = effectStep(fold.node, ref, category, step.depth + 1);
             if (target === null) continue;
-            const when = await whenAt(fold.node, { line: ref.line, column: ref.column });
-            link(step, target, 'effect', fold.chain, [...fold.whens, when], { file: posix(fold.node.filePath), line: ref.line, text: ref.referenceName }, null);
+            const at = { line: ref.line, column: ref.column };
+            const when = await whenAt(fold.node, at);
+            const site = await withArgs({ file: posix(fold.node.filePath), line: ref.line, text: ref.referenceName, when: '' }, fold.node, at);
+            link(step, target, 'effect', fold.chain, [...fold.whens, when], site, null, await triggerAt(fold.node, at));
           }
         }
 
@@ -486,6 +531,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           kind: WireStepKind | null;
           linkKind: WireStepLinkKind;
           extra: Partial<WireStep>;
+          trigger: WireStepTrigger | null;
         }
         const arrivals: Arrival[] = [];
         for (const e of edges) {
@@ -496,7 +542,15 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             file: posix(fold.node.filePath),
             line: e.line ?? fold.node.startLine,
             text: siteText(e, meta, target),
+            when: '',
           };
+
+          // What fires this hop, when the site is written under an event:
+          // the JSX prop, the `on*` option, the runs-later call. Read for
+          // every call-shaped hop, so a store action or an effect fired by
+          // a tap says so on its link too.
+          const isCall = e.kind === 'calls' || e.kind === 'instantiates' || (e.kind === 'references' && meta.fnRef === true);
+          const trigger = isCall ? await triggerAt(fold.node, { line: e.line, column: e.column }) : null;
 
           // What kind of step, if any, this edge arrives at.
           let kind: WireStepKind | null = null;
@@ -521,30 +575,44 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             } else if (cross === 'bridge') {
               kind = 'bridge';
               linkKind = 'bridge';
-            } else if (e.kind === 'references' && meta.fnRef === true && !looksLikeComponent(target)) {
-              // A function passed as a value is a handler — unless it is a
-              // component (`memo(CaptureComponent)`, `component={Home}`),
-              // which is a render hop and folds like one.
-              kind = 'trigger';
-              linkKind = 'handler';
             } else if (
               (target.kind === 'function' || target.kind === 'method') &&
               isStoreFile(target.filePath) &&
               !isStoreFile(fold.node.filePath)
             ) {
+              // A store action fired straight from a tap stays a store
+              // action; the tap is on its link.
               kind = 'store';
               linkKind = 'store';
+            } else if (
+              (target.kind === 'function' || target.kind === 'method') &&
+              !looksLikeComponent(target) &&
+              ((e.kind === 'references' && meta.fnRef === true) || trigger !== null)
+            ) {
+              // A handler: a function passed as a value (`onPress={handleX}`,
+              // `addListener('x', handleX)`), or one called from under an
+              // event binding (`onPress={() => handleLogin(values)}`,
+              // `useFormik({ onSubmit: (v) => handleLogin(v) })`). A
+              // component passed as a value (`memo(CaptureComponent)`) is a
+              // render hop and folds like one.
+              kind = 'trigger';
+              linkKind = 'handler';
+              if (trigger) extra.trigger = trigger;
             }
           }
-          arrivals.push({ e, target, meta, site, kind, linkKind, extra });
+          arrivals.push({ e, target, meta, site, kind, linkKind, extra, trigger });
         }
 
         for (const a of arrivals) {
           if (a.kind === null) continue;
           const to = stepFor(a.target, a.kind, step.depth + 1, a.extra);
           if (to === null) continue;
-          const when = await whenAt(fold.node, { line: a.e.line, column: a.e.column });
-          link(step, to, a.linkKind, fold.chain, [...fold.whens, when], a.site, a.e);
+          const at = { line: a.e.line, column: a.e.column };
+          const when = await whenAt(fold.node, at);
+          // A call-shaped hop says what it passes; a navigation already says
+          // its href, a handler binding and an event channel pass nothing.
+          const site = a.linkKind === 'bridge' || a.linkKind === 'store' || a.linkKind === 'calls' ? await withArgs(a.site, fold.node, at) : a.site;
+          link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger);
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
             queue.push(to);
@@ -566,8 +634,10 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             if (api !== null && category !== null) {
               const to = effectStep(fold.node, { referenceName: api, line: e.line ?? fold.node.startLine }, category, step.depth + 1);
               if (to === null) continue;
-              const when = await whenAt(fold.node, { line: e.line, column: e.column });
-              link(step, to, 'effect', fold.chain, [...fold.whens, when], { file: posix(fold.node.filePath), line: e.line ?? fold.node.startLine, text: api }, null);
+              const at = { line: e.line, column: e.column };
+              const when = await whenAt(fold.node, at);
+              const site = await withArgs({ file: posix(fold.node.filePath), line: e.line ?? fold.node.startLine, text: api, when: '' }, fold.node, at);
+              link(step, to, 'effect', fold.chain, [...fold.whens, when], site, null, a.trigger);
               continue;
             }
           }
@@ -576,8 +646,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const known = steps.get(target.id);
           if (known) {
             if (known.id !== step.id) {
-              const when = await whenAt(fold.node, { line: e.line, column: e.column });
-              link(step, known, 'calls', fold.chain, [...fold.whens, when], a.site, e);
+              const at = { line: e.line, column: e.column };
+              const when = await whenAt(fold.node, at);
+              link(step, known, 'calls', fold.chain, [...fold.whens, when], await withArgs(a.site, fold.node, at), e, a.trigger);
             }
             continue;
           }
@@ -603,6 +674,23 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       }
       frontier = next;
     }
+  }
+
+  // An effect box with ONE call behind it says what that call passes —
+  // `axios.post('/auth/login', { email, password })` is the fact a reader
+  // scans for; several calls list themselves in the panel instead.
+  const sitesByStep = new Map<string, WireStepSite[]>();
+  for (const l of links.values()) {
+    const list = sitesByStep.get(l.to) ?? [];
+    list.push(...l.sites);
+    sitesByStep.set(l.to, list);
+  }
+  for (const step of steps.values()) {
+    if (step.kind !== 'effect' || !step.effect || step.effect.apis.length !== 1) continue;
+    const sites = sitesByStep.get(step.id) ?? [];
+    if (sites.length !== 1 || sites[0]!.args === undefined) continue;
+    const label = `${step.effect.api}(${sites[0]!.args})`;
+    step.label = label.length > MAX_EFFECT_LABEL ? `${label.slice(0, MAX_EFFECT_LABEL - 2)}…)` : label;
   }
 
   const ordered = [...steps.values()].sort((a, b) => a.depth - b.depth || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));

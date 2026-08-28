@@ -71,7 +71,11 @@ export interface WireScreenSite {
   href: string;
   /** `push`, `replace`, `navigate`, or `return` for a helper's return value. */
   method: string;
-  /** Branch conditions at this site alone. */
+  /**
+   * The conditions THIS site runs under — the whole chain's plus its own,
+   * joined; '' when unconditional. A link with several sites is several
+   * scenarios; the link's `when` is only their summary.
+   */
   when: string;
 }
 
@@ -243,6 +247,7 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
         if (w && !whens.includes(w)) whens.push(w);
       }
       if (site.when && !whens.includes(site.when)) whens.push(site.when);
+      site.when = whens.join(' && ');
 
       const viaKey = via.map((v) => v.id).join('>');
       if (fromOrigin && start.path[0]!.node.id !== holder.id) {
