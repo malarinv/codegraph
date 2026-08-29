@@ -296,6 +296,20 @@ export async function save() {
     expect(one[0]!.branch).not.toBe(two[0]!.branch);
   });
 
+  it('does not call an arm an exit because a later elif raises', async () => {
+    const src = `
+def handler(user):
+    if not user:
+        raise HTTPException(400)
+    elif not user.is_active:
+        raise HTTPException(400)
+    go(user)
+`;
+    // The `elif` arm raises; the arm it is written in runs on to `go(user)`.
+    const after = await guardsInSource(src, 'python', lineOf(src, 'go(user)'), 4);
+    expect(after.map((g) => g.armExit ?? null)).toEqual(after.map(() => null));
+  });
+
   it('reads a Swift guard as an exit', async () => {
     const src = `
 func load() {

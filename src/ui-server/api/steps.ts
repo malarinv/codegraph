@@ -397,12 +397,20 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const line = at.line ?? caller.startLine;
     const column = at.column ?? 0;
     const read = at.line ? await callAt(caller, { ...at, ...(callee ? { callee } : {}) }) : null;
+    // The read must be THIS call. An inline handler's edges carry the ROUTE's
+    // line (`router.post('/users/login', async (req, res) => {`), where the
+    // only call is the registration itself — and taking its span would make
+    // every call in the handler read as written inside it, and so as running
+    // first. A miss is a bare position: no span to nest by, no `within`.
+    const last = (n: string) => n.replace(/\([^()]*\)/g, '').split(/[.:]/).pop() ?? n;
+    const usable = read !== null && (!callee || last(read.callee) === last(callee));
+    if (!usable) return { file: caller.filePath, line, column, end: { line, column }, within: null };
     return {
       file: caller.filePath,
-      line: read?.span?.start.line ?? line,
-      column: read?.span?.start.column ?? column,
-      end: read?.span?.end ?? { line, column },
-      within: read?.within ?? null,
+      line: read.span?.start.line ?? line,
+      column: read.span?.start.column ?? column,
+      end: read.span?.end ?? { line, column },
+      within: read.within ?? null,
     };
   };
   const pointHop = (caller: Node, at: { line?: number; column?: number }): HopSite => {
@@ -476,6 +484,19 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const method = segments[segments.length - 1]!;
     const members = cg.getNodesInFile(cls.filePath).filter((n) => (n.kind === 'method' || n.kind === 'function') && n.name === method && n.startLine >= cls!.startLine && n.endLine <= cls!.endLine);
     return members[0] ?? null;
+  };
+
+  /**
+   * A name-match that the call as written disproves: the target is a method of
+   * the CALLER's own class, but the call names a receiver that is not `this` —
+   * and in the JS family a method of your own class cannot be called any other
+   * way. Only there: `self.` is a convention elsewhere, not a rule.
+   */
+  const ownMethodWithoutReceiver = (caller: Node, target: Node, written: string): boolean => {
+    if (!JS_FAMILY.has(caller.language) || target.kind !== 'method') return false;
+    if (/^(?:this|self)[.?]/.test(written)) return false;
+    const container = (q: string) => q.replace(/[.:]+[^.:]*$/, '');
+    return caller.filePath === target.filePath && container(caller.qualifiedName) === container(target.qualifiedName);
   };
 
   /** A method the walk cannot enter (an interface's, an ORM's) on a repository-shaped container. */
@@ -892,7 +913,15 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       // lands on the constant, and the walk goes on into what the handler does.
       for (const fold of frontier) {
         const value = fold.node.kind === 'constant' || fold.node.kind === 'variable';
-        if ((fold.node.kind !== 'component' && !value) || (bySource.get(fold.node.id)?.length ?? 0) > 0) continue;
+        // Edges the walk would follow as BEHAVIOUR. `const signIn =
+        // validatedAction(schema, async (data) => { … })` holds a plain
+        // `references` edge to its schema and nothing else: counting that as
+        // "it has edges of its own" left the whole handler body unlent, and the
+        // picture showed one call out of nine.
+        const behaviour = (bySource.get(fold.node.id) ?? []).filter(
+          (e) => e.kind !== 'references' || (e.metadata as Record<string, unknown> | undefined)?.fnRef === true
+        ).length;
+        if ((fold.node.kind !== 'component' && !value) || behaviour > 0) continue;
         for (const e of fileScopeEdgesWithin(cg, fold.node, fileScopeRefs, value)) {
           const list = bySource.get(fold.node.id) ?? [];
           list.push({ ...e, source: fold.node.id });
@@ -1025,6 +1054,14 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
                   if (real && real.id !== target.id) {
                     target = real;
                     retargeted = true;
+                  } else if (real === null && ownMethodWithoutReceiver(fold.node, target, written.callee)) {
+                    // `crypto.createHash('sha256').update(…)` in a method of a
+                    // class that happens to have an `update`: the index kept
+                    // only `update` and matched it by name. In this family a
+                    // method of your own class is written `this.update(…)`, so
+                    // a receiver that is not `this` proves the guess wrong. The
+                    // call leaves the index — say nothing rather than the wrong thing.
+                    continue;
                   }
                 }
               }

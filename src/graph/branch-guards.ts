@@ -1212,7 +1212,8 @@ function branchKey(node: SyntaxNode): string {
  * Containers whose LAST statement decides how the whole thing leaves: a block,
  * and the clause wrappers a grammar puts an arm's block inside (`else_clause`,
  * `except_clause`) — the walk climbs through those, so the node it hands back
- * is the wrapper, not the block.
+ * is the wrapper, not the block. A CONDITIONAL wrapper is not one of them: an
+ * `elif` whose body raises does not mean the arm it is in always raises.
  */
 const BLOCKISH: ReadonlySet<string> = new Set([
   'statement_block',
@@ -1222,7 +1223,6 @@ const BLOCKISH: ReadonlySet<string> = new Set([
   'compound_statement',
   'control_structure_body',
   'else_clause',
-  'elif_clause',
   'else_statement',
   'catch_clause',
   'catch_block',
