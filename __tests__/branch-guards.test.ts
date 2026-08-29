@@ -201,6 +201,114 @@ func f() {
   });
 });
 
+describe('branch guards: the arms of one decision', () => {
+  /** The guards at the site, unjoined. */
+  async function guardsAt(src: string, needle: string, language: 'tsx' | 'typescript' | 'swift' = 'tsx') {
+    const line = lineOf(src, needle);
+    const column = src.split('\n')[line - 1]!.indexOf(needle);
+    return guardsInSource(src, language, line, column);
+  }
+
+  const ifElse = `
+export async function authUser(req, res) {
+  const user = await User.findOne({ email })
+  if (user && (await user.matchPassword(password))) {
+    res.json({ token: generateToken(user._id) })
+  } else {
+    res.status(401)
+    throw new Error('Invalid email or password')
+  }
+}`;
+
+  it('gives an if and its else the same branch, with negated flipped', async () => {
+    const yes = await guardsAt(ifElse, 'res.json');
+    const no = await guardsAt(ifElse, 'res.status');
+    expect(yes).toHaveLength(1);
+    expect(no).toHaveLength(1);
+    expect(yes[0]!.text).toBe(no[0]!.text);
+    expect(yes[0]!.negated).toBe(false);
+    expect(no[0]!.negated).toBe(true);
+    // The identity of the FORK, not of the arm: both arms of one `if`.
+    expect(yes[0]!.branch).toBe(no[0]!.branch);
+    expect(yes[0]!.branch).toMatch(/^\d+:\d+$/);
+    // The else arm ends by throwing; the then arm runs on.
+    expect(no[0]!.armExit).toBe('throw');
+    expect(yes[0]!.armExit).toBeUndefined();
+  });
+
+  const earlyExit = `
+export async function createReview(req, res) {
+  const product = await Product.findById(req.params.id)
+  if (!product) {
+    res.status(404)
+    throw new Error('Product not found')
+  }
+  await product.save()
+}`;
+
+  it('gives an early exit and the code it guards the same branch', async () => {
+    const inside = await guardsAt(earlyExit, 'res.status');
+    const after = await guardsAt(earlyExit, 'product.save');
+    expect(inside).toHaveLength(1);
+    expect(after).toHaveLength(1);
+    expect(inside[0]!.branch).toBe(after[0]!.branch);
+    expect(inside[0]!.negated).toBe(false);
+    expect(after[0]!.negated).toBe(true);
+    // The arm NOT taken throws — what the rail draws as the fork's terminal.
+    expect(after[0]!.form).toBe('guard');
+    expect(after[0]!.exit).toBe('throw');
+    expect(inside[0]!.armExit).toBe('throw');
+  });
+
+  const switched = `
+export function route(kind) {
+  switch (kind) {
+    case 'a':
+      first()
+      break
+    case 'b':
+      second()
+      break
+    default:
+      other()
+  }
+}`;
+
+  it('gives every case of one switch the same branch', async () => {
+    const a = await guardsAt(switched, 'first()');
+    const b = await guardsAt(switched, 'second()');
+    const d = await guardsAt(switched, 'other()');
+    expect(a[0]!.branch).toBe(b[0]!.branch);
+    expect(a[0]!.branch).toBe(d[0]!.branch);
+    expect([a[0]!.text, b[0]!.text, d[0]!.text]).toEqual(['kind === \'a\'', 'kind === \'b\'', 'kind: default']);
+  });
+
+  it('gives two try/catch blocks branches of their own', async () => {
+    const src = `
+export async function save() {
+  try { await a() } catch (e) { first(e) }
+  try { await b() } catch (e) { second(e) }
+}`;
+    const one = await guardsAt(src, 'first(e)');
+    const two = await guardsAt(src, 'second(e)');
+    expect(one[0]!.text).toBe('on error');
+    expect(two[0]!.text).toBe('on error');
+    expect(one[0]!.branch).not.toBe(two[0]!.branch);
+  });
+
+  it('reads a Swift guard as an exit', async () => {
+    const src = `
+func load() {
+  guard let user = current else { return }
+  fetch(user)
+}`;
+    const after = await guardsAt(src, 'fetch(user)', 'swift');
+    expect(after[0]!.form).toBe('guard');
+    expect(after[0]!.exit).toBe('return');
+    expect(after[0]!.branch).toMatch(/^\d+:\d+$/);
+  });
+});
+
 describe('branch guards: unsupported', () => {
   it('reports no guards for a language without rules', async () => {
     expect(supportsBranchGuards('ruby')).toBe(false);

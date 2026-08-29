@@ -40,6 +40,9 @@ import { getParser, loadGrammarsForLanguages } from '../extraction/grammars';
 
 export type GuardForm = 'if' | 'else' | 'ternary' | 'case' | 'guard' | 'and' | 'or' | 'catch';
 
+/** How an arm leaves the flow: back to the caller, or by an error. */
+export type GuardExit = 'return' | 'throw' | 'exit';
+
 export interface BranchGuard {
   /** The condition's source, whitespace-collapsed, outer parens dropped, capped in length. */
   text: string;
@@ -48,6 +51,20 @@ export interface BranchGuard {
   form: GuardForm;
   /** Line of the condition (1-based). */
   line: number;
+  /**
+   * Where the branching construct starts, `line:column` (1-based line, 0-based
+   * column) — the identity of the FORK rather than of the arm: the `if` an
+   * `if` guard and its `else` guard both come from, the `switch` every one of
+   * its cases comes from, the `try` a `catch` belongs to. Two guards with the
+   * same `branch` are arms of one decision, which is what a reader of the code
+   * in its own order needs and a joined condition string cannot say.
+   * '' when the walk could not place it.
+   */
+  branch: string;
+  /** How the arm the site is IN leaves, when it always does — `return`, `throw`. */
+  armExit?: GuardExit;
+  /** For an early exit (`form: 'guard'`), how the arm that was NOT taken leaves. */
+  exit?: GuardExit;
 }
 
 /** Longest condition text kept before it is cut with an ellipsis. */
@@ -967,7 +984,17 @@ export function guardsInTree(
       node = parent;
       continue;
     }
+    // Anything `enclosing` pushed came from THIS construct, and the arm the
+    // site is in is the child the walk came up through: stamp both, unless the
+    // rule already named a different branch (a `switch` case's is the switch).
+    const before = found.length;
     rules.enclosing(parent, node, found);
+    for (let i = before; i < found.length; i++) {
+      const g = found[i]!;
+      if (!g.branch) g.branch = branchKey(parent);
+      const arm = exitKind(node);
+      if (arm && !g.armExit) g.armExit = arm;
+    }
     if (rules.blocks.has(parent.type)) rules.earlyExits(parent, node, found);
     node = parent;
   }
@@ -1041,10 +1068,82 @@ function condText(node: SyntaxNode | null | undefined): string {
   return text.length > MAX_TEXT ? text.slice(0, MAX_TEXT - 1) + '…' : text;
 }
 
-function guard(form: GuardForm, cond: SyntaxNode | null | undefined, negated: boolean, text?: string): BranchGuard | null {
+/**
+ * One guard. `branch` names the construct the arm belongs to: by default the
+ * node the walk is climbing THROUGH (an `if`, a ternary, a `catch`), which is
+ * right whenever the construct is the site's parent — and overridden where it
+ * is not, by a `switch` case (whose parent is the case) and by an early exit
+ * (whose branch is the `if` that returned, several statements back).
+ */
+function guard(
+  form: GuardForm,
+  cond: SyntaxNode | null | undefined,
+  negated: boolean,
+  text?: string,
+  branch?: SyntaxNode | null,
+  exit?: GuardExit | null
+): BranchGuard | null {
   const t = text ?? condText(cond);
   if (!t) return null;
-  return { text: t, negated, form, line: (cond ?? null) ? cond!.startPosition.row + 1 : 0 };
+  return {
+    text: t,
+    negated,
+    form,
+    line: (cond ?? null) ? cond!.startPosition.row + 1 : 0,
+    branch: branch ? branchKey(branch) : '',
+    ...(exit ? { exit } : {}),
+  };
+}
+
+/** A branching construct's identity: where it starts, `line:column`. */
+function branchKey(node: SyntaxNode): string {
+  return `${node.startPosition.row + 1}:${node.startPosition.column}`;
+}
+
+/**
+ * Containers whose LAST statement decides how the whole thing leaves: a block,
+ * and the clause wrappers a grammar puts an arm's block inside (`else_clause`,
+ * `except_clause`) — the walk climbs through those, so the node it hands back
+ * is the wrapper, not the block.
+ */
+const BLOCKISH: ReadonlySet<string> = new Set([
+  'statement_block',
+  'block',
+  'statements',
+  'function_body',
+  'compound_statement',
+  'control_structure_body',
+  'else_clause',
+  'elif_clause',
+  'else_statement',
+  'catch_clause',
+  'catch_block',
+  'except_clause',
+  'finally_clause',
+]);
+
+/**
+ * How a statement — or a block, by its last statement — leaves: `throw` for a
+ * raised error, `return` for a return / break / continue, `exit` for a
+ * language's other way out (Go's `panic`, C's `exit`) that the language rules
+ * count as an exit but no keyword names. Null when it does not always leave.
+ */
+function exitKind(node: SyntaxNode | null | undefined): GuardExit | null {
+  if (!node) return null;
+  const t = node.type;
+  if (t === 'throw_statement' || t === 'raise_statement' || t === 'throw_expression') return 'throw';
+  if (/^(?:return|break|continue|goto|yield)_statement$/.test(t)) return 'return';
+  // Swift's `control_transfer_statement` and Kotlin's `jump_expression` say
+  // which in their first word.
+  if (t === 'control_transfer_statement' || t === 'jump_expression') return /^\s*throw\b/.test(node.text) ? 'throw' : 'return';
+  if (BLOCKISH.has(t)) return exitKind(lastNamed(node));
+  return null;
+}
+
+/** {@link exitKind}, or `exit` when the language's rules call it an exit and no keyword names it. */
+function exitKindOr(node: SyntaxNode | null | undefined, exits: boolean): GuardExit | null {
+  if (!exits) return null;
+  return exitKind(node) ?? 'exit';
 }
 
 function push(out: BranchGuard[], g: BranchGuard | null): void {
@@ -1125,10 +1224,10 @@ const JS: Rules = {
         const body = parent.parent; // switch_body
         const stmt = body?.parent; // switch_statement
         const subject = condText(stmt?.childForFieldName('value'));
-        if (parent.type === 'switch_default') push(out, guard('case', stmt?.childForFieldName('value'), false, subject ? `${subject}: default` : 'default'));
+        if (parent.type === 'switch_default') push(out, guard('case', stmt?.childForFieldName('value'), false, subject ? `${subject}: default` : 'default', stmt));
         else {
           const value = condText(parent.childForFieldName('value'));
-          push(out, guard('case', parent.childForFieldName('value'), false, subject ? `${subject} === ${value}` : value));
+          push(out, guard('case', parent.childForFieldName('value'), false, subject ? `${subject} === ${value}` : value, stmt));
         }
         return;
       }
@@ -1156,8 +1255,9 @@ const JS: Rules = {
     for (let i = before.length - 1; i >= 0; i--) {
       const s = before[i]!;
       if (s.type !== 'if_statement' || s.childForFieldName('alternative')) continue;
-      if (!jsAlwaysExits(s.childForFieldName('consequence'))) continue;
-      push(out, guard('guard', s.childForFieldName('condition'), true));
+      const body = s.childForFieldName('consequence');
+      if (!jsAlwaysExits(body)) continue;
+      push(out, guard('guard', s.childForFieldName('condition'), true, undefined, s, exitKindOr(body, true)));
     }
   },
 };
@@ -1243,7 +1343,7 @@ const SWIFT: Rules = {
         const isDefault = parent.children.some((n) => n.type === 'default_keyword');
         const value = pattern ? condText(pattern) : '';
         const text = isDefault ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
-        push(out, guard('case', pattern ?? stmt?.childForFieldName('expr'), false, text));
+        push(out, guard('case', pattern ?? stmt?.childForFieldName('expr'), false, text, stmt));
         return;
       }
       case 'catch_block':
@@ -1260,12 +1360,13 @@ const SWIFT: Rules = {
       const s = before[i]!;
       if (s.type === 'guard_statement') {
         const c = swiftConditions(s);
-        push(out, guard('guard', c.node, false, c.text));
+        const body = s.namedChildren.find((n) => n.type === 'statements') ?? null;
+        push(out, guard('guard', c.node, false, c.text, s, exitKindOr(body, true)));
       } else if (s.type === 'if_statement' && !s.children.some((n) => n.type === 'else')) {
         const body = s.namedChildren.find((n) => n.type === 'statements') ?? null;
         if (!swiftAlwaysExits(body)) continue;
         const c = swiftConditions(s);
-        push(out, guard('guard', c.node, true, c.text));
+        push(out, guard('guard', c.node, true, c.text, s, exitKindOr(body, true)));
       }
     }
   },
@@ -1301,9 +1402,10 @@ function guardsBefore(
   for (let i = before.length - 1; i >= 0; i--) {
     const s = before[i]!;
     if (!isIf(s) || hasElse(s)) continue;
-    if (!alwaysExits(body(s))) continue;
+    const arm = body(s);
+    if (!alwaysExits(arm)) continue;
     const c = condition(s);
-    push(out, guard('guard', c.node, true, c.text));
+    push(out, guard('guard', c.node, true, c.text, s, exitKindOr(arm, true)));
   }
 }
 
@@ -1368,7 +1470,7 @@ const PYTHON: Rules = {
           const value = pattern ? condText(pattern) : '';
           const isDefault = value === '_' || value === '';
           const text = isDefault ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
-          push(out, guard('case', pattern ?? null, false, text));
+          push(out, guard('case', pattern ?? null, false, text, stmt));
         }
         return;
       }
@@ -1457,7 +1559,7 @@ const JAVA: Rules = {
         const stmt = parent.parent?.parent;
         const subject = condText(stmt?.childForFieldName('condition'));
         const labels = namedChildren(parent).filter((n) => n.type === 'switch_label');
-        push(out, guard('case', labels[0] ?? null, false, javaCaseText(labels, subject)));
+        push(out, guard('case', labels[0] ?? null, false, javaCaseText(labels, subject), stmt));
         return;
       }
       case 'binary_expression': {
@@ -1535,10 +1637,10 @@ const KOTLIN: Rules = {
         const when = parent.parent;
         const subject = condText(namedChildren(when!).find((n) => n.type === 'when_subject')).replace(/^\((.*)\)$/, '$1');
         const conds = namedChildren(parent).filter((n) => n.type === 'when_condition');
-        if (conds.length === 0) push(out, guard('case', null, false, subject ? `${subject}: else` : 'else'));
+        if (conds.length === 0) push(out, guard('case', null, false, subject ? `${subject}: else` : 'else', when));
         else {
           const value = conds.map((c) => condText(c)).join(', ');
-          push(out, guard('case', conds[0]!, false, subject ? `${subject} == ${value}` : value));
+          push(out, guard('case', conds[0]!, false, subject ? `${subject} == ${value}` : value, when));
         }
         return;
       }
@@ -1627,16 +1729,17 @@ const CSHARP: Rules = {
         const labels = namedChildren(parent).filter(isLabel);
         const value = labels.map((l) => condText(l)).filter(Boolean).join(', ');
         const text = value === '' ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
-        push(out, guard('case', labels[0] ?? null, false, text));
+        push(out, guard('case', labels[0] ?? null, false, text, stmt));
         return;
       }
       case 'switch_expression_arm': {
         if (!isField(parent, 'expression', child)) return;
-        const subject = condText(parent.parent?.childForFieldName('value'));
+        const stmt = parent.parent;
+        const subject = condText(stmt?.childForFieldName('value'));
         const pattern = parent.childForFieldName('pattern');
         const value = condText(pattern);
         const text = value === '_' || value === '' ? (subject ? `${subject}: default` : 'default') : subject ? `${subject} == ${value}` : value;
-        push(out, guard('case', pattern, false, text));
+        push(out, guard('case', pattern, false, text, stmt));
         return;
       }
       case 'binary_expression': {
@@ -1707,14 +1810,14 @@ const GO: Rules = {
         const stmt = parent.parent;
         const subject = condText(stmt?.childForFieldName('value'));
         const v = condText(value);
-        if (parent.type === 'communication_case') push(out, guard('case', value, false, v));
-        else push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v));
+        if (parent.type === 'communication_case') push(out, guard('case', value, false, v, stmt));
+        else push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v, stmt));
         return;
       }
       case 'default_case': {
         const stmt = parent.parent;
         const subject = condText(stmt?.childForFieldName('value'));
-        push(out, guard('case', stmt?.childForFieldName('value'), false, subject ? `${subject}: default` : 'default'));
+        push(out, guard('case', stmt?.childForFieldName('value'), false, subject ? `${subject}: default` : 'default', stmt));
         return;
       }
       case 'binary_expression': {
@@ -1792,10 +1895,10 @@ const C: Rules = {
         if (value && child.id === value.id) return;
         const stmt = parent.parent?.parent;
         const subject = condText(stmt?.childForFieldName('condition'));
-        if (!value) push(out, guard('case', stmt?.childForFieldName('condition'), false, subject ? `${subject}: default` : 'default'));
+        if (!value) push(out, guard('case', stmt?.childForFieldName('condition'), false, subject ? `${subject}: default` : 'default', stmt));
         else {
           const v = condText(value);
-          push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v));
+          push(out, guard('case', value, false, subject ? `${subject} == ${v}` : v, stmt));
         }
         return;
       }

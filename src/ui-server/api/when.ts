@@ -23,6 +23,7 @@ import {
   siteKey,
   supportsBranchGuards,
   triggersForFile,
+  type BranchGuard,
   type CallSiteText,
   type DefinitionDecorators,
   type SiteTrigger,
@@ -98,6 +99,13 @@ export async function annotateWhen(cg: CodeGraph, projectRoot: string, batches: 
 export interface SiteReader {
   /** The conditions the site runs under, joined; '' when unconditional or unreadable. */
   when(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string>;
+  /**
+   * The same conditions, outermost first, unjoined — each with the branching
+   * construct it belongs to, so two sites can be told to be the two arms of
+   * ONE `if` rather than two conditions that happen to read as opposites.
+   * What {@link SiteReader.when} joins; empty when unconditional or unreadable.
+   */
+  guards(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<BranchGuard[]>;
   /** What the site passes, abbreviated (`'userEmail', values.email`); null when unreadable. '' for an empty list. */
   args(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string | null>;
   /** What fires the site — the JSX prop, `on*` option or runs-later call it is written under; null when nothing binds it. */
@@ -149,15 +157,23 @@ export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 
     }
     return file;
   };
+  // Named rather than a method, because `createWhenReader` hands `when` out
+  // detached: it must not depend on `this`.
+  const guards = async (
+    caller: { filePath: string; language: Language },
+    site: { line?: number; column?: number }
+  ): Promise<BranchGuard[]> => {
+    if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return [];
+    const file = resolve(caller);
+    if (!file) return [];
+    sites++;
+    const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+    return (await guardsForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? [];
+  };
   return {
+    guards,
     async when(caller, site) {
-      if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return '';
-      const file = resolve(caller);
-      if (!file) return '';
-      sites++;
-      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
-      const g = (await guardsForFile(file.abs, file.language, [key])).get(siteKey(key));
-      return g ? guardLabel(g) : '';
+      return guardLabel(await guards(caller, site));
     },
     async args(caller, site) {
       if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return null;
