@@ -806,6 +806,46 @@ export interface WireStepLink {
   trigger?: WireStepTrigger;
 }
 
+/* ------------------------------------------- the same walk, in the code's order -- */
+
+/** How an arm of a fork leaves, when it does — the rail stops there. */
+export type WireArmEnd = 'reply' | 'return' | 'throw' | 'exit';
+
+export interface WireArm {
+  /** This arm's own condition, in the words the rest of the view uses. */
+  when: string;
+  /** How it leaves: it answers the request, returns, or throws. Null = it runs on. */
+  ends: WireArmEnd | null;
+  body: WireBlock;
+}
+
+export type WireBlock = WireItem[];
+
+export type WireItem =
+  /**
+   * A step of the picture, where the code writes it. `body` is what it does,
+   * when the walk entered it; `again` says it happens here too and was read
+   * above — a function is read ONCE in a rail, however many times it is called.
+   */
+  | { kind: 'step'; step: string; link?: string; within?: string; body?: WireBlock; again?: true }
+  /** A decision: `if` / `else`, a `switch`, a ternary, a `try`, or an early exit. */
+  | { kind: 'fork'; on: string; form: 'if' | 'switch' | 'ternary' | 'try'; arms: WireArm[] }
+  /**
+   * A run of items that is not plain sequence: a helper drawn where it is
+   * called (`inline`), a body that runs for each item (`loop`), work that runs
+   * after this function returns (`later`), or calls started together
+   * (`together`).
+   */
+  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; label: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
+  /** Where the reading stopped: a helper that calls itself, or a cap the walk hit. */
+  | { kind: 'cut'; why: 'folded' | 'depth' };
+
+export interface WireProgram {
+  root: WireBlock;
+  /** Items the reading could not place — a recursion or a cap it hit. */
+  truncated: number;
+}
+
 export interface WireStepsPayload {
   anchor: WireNodeRef;
   /** Other symbols that share the anchor's name, when it was given by name. */
@@ -814,6 +854,13 @@ export interface WireStepsPayload {
   project: 'app' | 'api' | 'web';
   steps: WireStep[];
   links: WireStepLink[];
+  /**
+   * The same walk read in the code's ORDER — the anchor's body as a rail that
+   * forks where the code forks. Null when the anchor has no body to read.
+   */
+  program: WireProgram | null;
+  /** Which reading to open with; the URL's `view` overrides it. */
+  defaultView: 'order' | 'tree';
   depth: number;
   limit: number;
   /** Screens reached from the anchor were entered rather than drawn as boundaries. */

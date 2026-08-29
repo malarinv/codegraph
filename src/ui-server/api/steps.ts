@@ -41,8 +41,10 @@ import type CodeGraph from '../../index';
 import type { Edge, Language, Node, UnresolvedReference } from '../../types';
 import { badRequest, intParam, notFound } from './respond';
 import { createSiteReader } from './when';
-import type { SiteTrigger } from '../../graph/branch-guards';
+import type { BranchGuard, SiteTrigger } from '../../graph/branch-guards';
+import { buildProgram, type ProgramSite, type WireProgram } from './program';
 import { classifyEffect, implicitResponseStatus, responseStatus, type Effect } from './effects';
+import { guardLabel } from '../../graph/branch-guards';
 import { looksLikeComponent, routeRoots } from './route-roots';
 import { nextRouteForFile } from '../../resolution/frameworks/nextjs';
 import { splitRouteName } from './routes';
@@ -180,6 +182,19 @@ export interface WireStepsPayload {
   project: 'app' | 'api' | 'web';
   steps: WireStep[];
   links: WireStepLink[];
+  /**
+   * The same walk read in the code's ORDER: the anchor's body as a rail that
+   * forks where the code forks. Built from the same records the links are, so
+   * the two readings hold the same steps; null when the anchor has no body to
+   * read (nothing was recorded).
+   */
+  program: WireProgram | null;
+  /**
+   * Which reading to open with: the code's order for a handler, an endpoint or
+   * any function; the tree for a screen, where handlers fire on events and
+   * have no order between them. The URL's `view` overrides it.
+   */
+  defaultView: 'order' | 'tree';
   depth: number;
   limit: number;
   /** Screens reached from the anchor were entered rather than drawn as boundaries. */
@@ -366,7 +381,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
   const reader = createSiteReader(cg, projectRoot, MAX_WHEN_SITES);
   const calls = createSiteReader(cg, projectRoot, MAX_CALL_SITES);
-  const whenAt = (caller: Node, site: { line?: number; column?: number }) => reader.when(caller, site);
+  /** The conditions a site runs under, structured — one read, joined where a string is wanted. */
+  const guardsAt = (caller: Node, site: { line?: number; column?: number }) => reader.guards(caller, site);
   const argsAt = (caller: Node, site: { line?: number; column?: number }) => reader.args(caller, site);
   const withArgs = async (site: WireStepSite, caller: Node, at: { line?: number; column?: number }): Promise<WireStepSite> => {
     const args = await argsAt(caller, at);
@@ -524,6 +540,36 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
   const steps = new Map<string, StepRecord>();
   const links = new Map<string, WireStepLink>();
+  /**
+   * What happens in each function, in the code's own order — the rail's
+   * material, recorded by the SAME pass that makes the links so the two
+   * readings can never hold different steps. Keyed by the function's node id,
+   * then by the site's position and what it reaches: a helper folded from two
+   * different steps is walked twice and must not be written twice.
+   */
+  const programs = new Map<string, Map<string, ProgramSite>>();
+  const record = (
+    fn: Node,
+    hop: HopSite,
+    guards: readonly BranchGuard[],
+    what: { step?: string; link?: string; into?: string },
+    trigger: WireStepTrigger | null = null
+  ): void => {
+    let sites = programs.get(fn.id);
+    if (!sites) {
+      sites = new Map();
+      programs.set(fn.id, sites);
+    }
+    const key = `${hop.line}:${hop.column}:${what.step ?? what.into ?? ''}`;
+    if (sites.has(key)) return;
+    sites.set(key, {
+      ...what,
+      at: { line: hop.line, column: hop.column, end: hop.end },
+      ...(hop.within ? { within: hop.within } : {}),
+      guards: [...guards],
+      ...(trigger ? { trigger } : {}),
+    });
+  };
   const truncated = { steps: 0, hubs: 0, chrome: 0 };
   let effectScans = 0;
   const fanIn = new Map<string, number>();
@@ -689,19 +735,26 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
         : null;
     const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, step.depth + 1, status);
     if (target === null) return true;
-    const when = await whenAt(fold.node, at);
+    const guards = await guardsAt(fold.node, at);
+    const when = guardLabel(guards);
     const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
     if (args !== null) wireSite.args = args;
     if (status !== null) wireSite.status = status;
-    const hop: HopSite = fold.first ?? {
+    // Where the call is written HERE — in this function, at this line. The
+    // rail places the step by it; the tree's row order uses the hop out of the
+    // step's root, which is the same position when nothing was folded.
+    const local: HopSite = {
       file: fold.node.filePath,
       line: site?.span?.start.line ?? ref.line,
       column: site?.span?.start.column ?? ref.column ?? 0,
       end: site?.span?.end ?? { line: ref.line, column: ref.column ?? 0 },
       within: site?.within ?? null,
     };
+    const hop: HopSite = fold.first ?? local;
     if (!target.first) target.first = hop;
-    link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)), hop.within);
+    const fired = trigger ?? (await triggerAt(fold.node, at));
+    const id = link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, fired, hop.within);
+    record(fold.node, local, guards, { step: target.id, link: id }, fired);
     return true;
   };
 
@@ -715,7 +768,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     edge: Edge | null,
     trigger: WireStepTrigger | null = null,
     within: string | null = null
-  ): void => {
+  ): string => {
     const meta = (edge?.metadata ?? {}) as Record<string, unknown>;
     const synthesized = edge?.provenance === 'heuristic';
     const confidence = typeof meta.confidence === 'number' ? meta.confidence : null;
@@ -729,7 +782,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const structural = (s: WireStepSite) => s.text.startsWith('defines ');
     const existing = links.get(id);
     if (existing) {
-      if (structural(stamped) && existing.sites.some((s) => !structural(s))) return;
+      if (structural(stamped) && existing.sites.some((s) => !structural(s))) return id;
       if (!structural(stamped) && existing.sites.every(structural)) existing.sites.length = 0;
       // One statement, two references (`res.status(201)` and its `.json(…)`):
       // the outer call is the site, the inner one folds into it.
@@ -744,7 +797,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
         if (!when || !existing.when) existing.when = '';
         else if (!existing.when.split(' || ').includes(when)) existing.when = `${existing.when} || ${when}`;
       }
-      return;
+      return id;
     }
     links.set(id, {
       id,
@@ -761,6 +814,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       ...(within ? { within } : {}),
     });
     if (trigger && to.kind === 'trigger' && !to.trigger) to.trigger = trigger;
+    return id;
   };
 
   /** What fires a site, with the function it is written in. */
@@ -1072,7 +1126,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             if (t) to.trigger = t;
           }
           const at = { line: a.e.line, column: a.e.column };
-          const when = await whenAt(fold.node, at);
+          const guards = await guardsAt(fold.node, at);
+          const when = guardLabel(guards);
           // A call-shaped hop says what it passes; a navigation already says
           // its href, a handler binding and a native event channel pass
           // nothing. A hop over a synthesized channel is a call in the source
@@ -1086,9 +1141,11 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           // Where this step is first reached from: the hop out of the root
           // this fold descends from, else this site — its position orders the row.
           const isCallHop = a.e.kind === 'calls' || a.e.kind === 'instantiates' || a.e.kind === 'navigates';
-          const hop = fold.first ?? (isCallHop ? await hopAt(fold.node, at, a.target.name) : pointHop(fold.node, at));
+          const local = isCallHop ? await hopAt(fold.node, at, a.target.name) : pointHop(fold.node, at);
+          const hop = fold.first ?? local;
           if (!to.first) to.first = hop;
-          link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
+          const id = link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
+          record(fold.node, local, guards, { step: to.id, link: id }, a.trigger);
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
             queue.push(to);
@@ -1122,9 +1179,11 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           if (known) {
             if (known.id !== step.id) {
               const at = { line: e.line, column: e.column };
-              const when = await whenAt(fold.node, at);
-              const hop = fold.first ?? (await hopAt(fold.node, at, target.name));
-              link(step, known, 'calls', fold.chain, [...fold.whens, when], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
+              const guards = await guardsAt(fold.node, at);
+              const local = await hopAt(fold.node, at, target.name);
+              const hop = fold.first ?? local;
+              const id = link(step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
+              record(fold.node, local, guards, { step: known.id, link: id }, a.trigger);
             }
             continue;
           }
@@ -1144,13 +1203,15 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             continue;
           }
           visited.add(target.id);
-          const when = await whenAt(fold.node, { line: e.line, column: e.column });
-          const first =
-            fold.first ??
-            (e.kind === 'calls' || e.kind === 'instantiates'
-              ? await hopAt(fold.node, { line: e.line, column: e.column }, target.name)
-              : pointHop(fold.node, { line: e.line, column: e.column }));
-          next.push({ node: target, chain: [...fold.chain, target], whens: [...fold.whens, when], first });
+          const at = { line: e.line, column: e.column };
+          const guards = await guardsAt(fold.node, at);
+          const local =
+            e.kind === 'calls' || e.kind === 'instantiates' ? await hopAt(fold.node, at, target.name) : pointHop(fold.node, at);
+          const first = fold.first ?? local;
+          // The helper is drawn where it is CALLED: its own records are its
+          // body, and this is the site the rail nests them under.
+          record(fold.node, local, guards, { into: target.id }, a.trigger);
+          next.push({ node: target, chain: [...fold.chain, target], whens: [...fold.whens, guardLabel(guards)], first });
         }
       }
       frontier = next;
@@ -1201,12 +1262,37 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   }
 
   const ordered = [...steps.values()].sort((a, b) => a.depth - b.depth || (a.order ?? 0) - (b.order ?? 0) || a.id.localeCompare(b.id));
+
+  // The second reading: the same steps in the code's order. A step the walk
+  // ENTERED reads on into its own body; a boundary (another screen, an
+  // endpoint across a tier) does not — it is a chapter of its own, exactly as
+  // on the picture.
+  const nodesById = new Map<string, Node>();
+  for (const s of steps.values()) if (s.root) nodesById.set(s.root.id, s.root);
+  const program = buildProgram({
+    sites: new Map([...programs].map(([fn, sites]) => [fn, [...sites.values()]])),
+    root: first.root?.id ?? null,
+    node: (id) => {
+      const found = nodesById.get(id) ?? cg.getNode(id);
+      return found ? toNodeRef(found) : null;
+    },
+    step: (id) => {
+      const s = steps.get(id);
+      if (!s) return null;
+      return { reply: s.effect?.category === 'response', into: s.cut === null && s.root ? s.root.id : null };
+    },
+  });
+
   return {
     anchor: toNodeRef(anchor),
     ambiguous,
     project,
     steps: ordered.map(({ root: _root, first: _first, ...step }) => step),
     links: [...links.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    program,
+    // A screen is a set of handlers with no order between them; anything with a
+    // body — a handler, an endpoint, any function — reads in the code's order.
+    defaultView: program !== null && !(first.kind === 'screen' && !first.screen?.endpoint) ? 'order' : 'tree',
     depth: depthCap,
     limit,
     through,
