@@ -26,7 +26,7 @@
  * string can never say.
  */
 
-import { guardLabel, type BranchGuard } from '../../graph/branch-guards';
+import { guardLabel, type BranchGuard, type SiteLoop } from '../../graph/branch-guards';
 import type { WireNodeRef } from './wire';
 
 // =============================================================================
@@ -63,7 +63,17 @@ export type WireItem =
    * after this function returns (`later`), or calls started together
    * (`together`).
    */
-  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; by?: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
+  | {
+      kind: 'block';
+      block: 'inline' | 'loop' | 'later' | 'together';
+      by?: string;
+      /** For a loop: whether it runs once per item or while a condition holds. */
+      loop?: 'each' | 'while';
+      via?: WireNodeRef;
+      within?: string;
+      body: WireBlock;
+      again?: true;
+    }
   /** Where the reading stopped: a helper that calls itself, or a cap the walk hit. */
   | { kind: 'cut'; why: 'folded' | 'depth' };
 
@@ -91,6 +101,8 @@ export interface ProgramSite {
   within?: string;
   /** The conditions it runs under, outermost first. */
   guards: BranchGuard[];
+  /** The loops it is written inside, outermost first. */
+  loops?: SiteLoop[];
   /** What fires it, when something binds it — a callback runs LATER. */
   trigger?: { kind: string; name: string; of?: string | null };
 }
@@ -151,56 +163,102 @@ function blockFor(input: ProgramInput, fn: string, path: readonly string[], stat
   if (sites.length === 0) return [];
 
   const root: WireBlock = [];
-  /** The forks open at the site being placed, outermost first. */
-  const stack: Array<{ branch: string; fork: Extract<WireItem, { kind: 'fork' }>; armKey: string; arm: WireArm; exit?: WireArmEnd }> = [];
-  const blockAt = (depth: number): WireBlock => (depth === 0 ? root : stack[depth - 1]!.arm.body);
+  /** The constructs open at the site being placed, outermost first. */
+  const stack: Open[] = [];
+  const bodyAt = (depth: number): WireBlock => (depth === 0 ? root : stack[depth - 1]!.body);
 
   for (const site of sites) {
-    const guards = site.guards;
+    const scopes = scopesOf(site);
 
-    // The longest prefix of open forks the site still sits under, arm and all.
+    // The longest run of open constructs the site still sits inside — same
+    // construct AND, for a fork, the same arm of it.
     let keep = 0;
-    while (keep < stack.length && keep < guards.length && stack[keep]!.branch === guards[keep]!.branch && stack[keep]!.armKey === armKey(guards[keep]!)) {
-      keep++;
-    }
-    // The level after it may still be the SAME decision taken the other way —
-    // an `else`, another `case`, the code after an early exit. That keeps the
-    // fork and opens its other arm; anything deeper is closed either way.
-    if (keep < stack.length && keep < guards.length && stack[keep]!.branch === guards[keep]!.branch) {
+    while (keep < stack.length && keep < scopes.length && sameScope(stack[keep]!, scopes[keep]!)) keep++;
+    // The construct after it may still be the SAME decision taken the other
+    // way — an `else`, another `case`, the code after an early exit. That keeps
+    // the fork and opens its other arm; anything deeper is closed either way.
+    const open = stack[keep];
+    const scope = scopes[keep];
+    if (open && scope && open.branch === scope.branch && open.fork && scope.kind === 'guard') {
       stack.length = keep + 1;
-      const open = stack[keep]!;
-      open.armKey = armKey(guards[keep]!);
-      open.arm = armFor(open.fork, guards[keep]!);
+      open.armKey = armKey(scope.guard);
+      open.body = armFor(open.fork, scope.guard).body;
       keep++;
     } else {
       stack.length = keep;
     }
-    for (let i = keep; i < guards.length; i++) {
-      const g = guards[i]!;
-      // The decision as a reader says it, not as the guard stores it: a
-      // disjunction keeps the parentheses that stop `a || b` from reading as
-      // two ways of arriving (`guardLabel` is the one place that decides).
-      const fork: Extract<WireItem, { kind: 'fork' }> = { kind: 'fork', on: guardLabel([{ ...g, negated: false }]), form: formOf(g), arms: [] };
-      // An early exit is a fork whose OTHER arm left before this site could
-      // run: `if (!product) throw` — the throw is written first, so it is the
-      // first arm, and it is empty because nothing in the picture happens there.
-      if (g.form === 'guard' && g.negated) {
-        fork.arms.push({ when: guardLabel([{ ...g, negated: false }]), ends: g.exit ?? 'return', body: [] });
-      }
-      blockAt(i).push(fork);
-      stack.push({ branch: g.branch, fork, armKey: armKey(g), arm: armFor(fork, g) });
-    }
+    for (let i = keep; i < scopes.length; i++) stack.push(openScope(bodyAt(i), scopes[i]!));
 
     const item = itemFor(input, site, path, state);
     if (item !== null) {
       state.items++;
-      place(blockAt(guards.length), item, site);
+      place(bodyAt(scopes.length), item, site);
     }
   }
 
   // An arm that answers the request, or whose code leaves, stops there.
   seal(input, root);
   return root;
+}
+
+/** A construct the reading is inside: a loop, or one arm of a fork. */
+interface Open {
+  branch: string;
+  /** Set for a fork; a loop has only its body. */
+  fork?: Extract<WireItem, { kind: 'fork' }>;
+  armKey?: string;
+  /** Where items at this level go. */
+  body: WireBlock;
+}
+
+type Scope = { kind: 'guard'; branch: string; guard: BranchGuard } | { kind: 'loop'; branch: string; loop: SiteLoop };
+
+/**
+ * The constructs a site is written inside, outermost first: its guards and its
+ * loops merged by where each one STARTS. Both were read by the same climb up
+ * the same ancestors, and on one ancestor chain an outer construct always
+ * begins before an inner one — so the positions alone rebuild the nesting,
+ * without either reading having to know about the other.
+ */
+function scopesOf(site: ProgramSite): Scope[] {
+  const guards: Scope[] = site.guards.map((guard) => ({ kind: 'guard' as const, branch: guard.branch, guard }));
+  const loops: Scope[] = (site.loops ?? []).map((loop) => ({ kind: 'loop' as const, branch: loop.branch, loop }));
+  if (loops.length === 0) return guards;
+  return [...guards, ...loops].sort((a, b) => at(a.branch) - at(b.branch) || a.branch.localeCompare(b.branch));
+}
+
+/** A `line:column` branch as one number, for ordering constructs by where they start. */
+function at(branch: string): number {
+  const [line, column] = branch.split(':');
+  return (Number(line) || 0) * 10000 + (Number(column) || 0);
+}
+
+function sameScope(open: Open, scope: Scope): boolean {
+  if (open.branch !== scope.branch) return false;
+  if (scope.kind === 'loop') return !open.fork;
+  return !!open.fork && open.armKey === armKey(scope.guard);
+}
+
+/** Open a construct: a bracketed loop, or a fork with the arm this site is in. */
+function openScope(into: WireBlock, scope: Scope): Open {
+  if (scope.kind === 'loop') {
+    const block: WireItem = { kind: 'block', block: 'loop', by: scope.loop.text, loop: scope.loop.kind, body: [] };
+    into.push(block);
+    return { branch: scope.branch, body: (block as Extract<WireItem, { kind: 'block' }>).body };
+  }
+  const g = scope.guard;
+  // The decision as a reader says it, not as the guard stores it: a
+  // disjunction keeps the parentheses that stop `a || b` from reading as two
+  // ways of arriving (`guardLabel` is the one place that decides).
+  const fork: Extract<WireItem, { kind: 'fork' }> = { kind: 'fork', on: guardLabel([{ ...g, negated: false }]), form: formOf(g), arms: [] };
+  // An early exit is a fork whose OTHER arm left before this site could run:
+  // `if (!product) throw` — the throw is written first, so it is the first arm,
+  // and it is empty because nothing in the picture happens there.
+  if (g.form === 'guard' && g.negated) {
+    fork.arms.push({ when: guardLabel([{ ...g, negated: false }]), ends: g.exit ?? 'return', body: [] });
+  }
+  into.push(fork);
+  return { branch: scope.branch, fork, armKey: armKey(g), body: armFor(fork, g).body };
 }
 
 /** What one recorded site draws as. */

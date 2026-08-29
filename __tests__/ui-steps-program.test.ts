@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { BranchGuard } from '../src/graph/branch-guards';
+import type { BranchGuard, SiteLoop } from '../src/graph/branch-guards';
 import { buildProgram, type ProgramInput, type ProgramSite, type WireBlock, type WireItem } from '../src/ui-server/api/program';
 
 /* ------------------------------------------------------------ material -- */
@@ -25,6 +25,11 @@ function g(text: string, opts: Partial<BranchGuard> = {}): BranchGuard {
 function at(step: string, guards: BranchGuard[] = [], extra: Partial<ProgramSite> = {}): ProgramSite {
   const line = nextLine++;
   return { step, link: `l:${step}`, at: { line, column: 0, end: { line, column: 40 } }, guards, ...extra };
+}
+
+/** A loop the site is written inside. */
+function loop(text: string, kind: SiteLoop['kind'] = 'each', branch = `l:${text}`): SiteLoop {
+  return { text, kind, branch };
 }
 
 /** A site that folds into a helper. */
@@ -233,6 +238,28 @@ describe('buildProgram', () => {
       root: [at('a', [], { within: 'Promise.all' }), at('b', [], { within: 'Promise.all' }), at('c')],
     });
     expect(shape(p!.root)).toEqual(['together Promise.all', '  a inside Promise.all', '  b inside Promise.all', 'c']);
+  });
+
+  it('says a run of calls happens once per item', () => {
+    const p = program({
+      root: [at('before'), at('each', [], { loops: [loop('item of items')] }), at('after')],
+    });
+    expect(shape(p!.root)).toEqual(['before', 'loop item of items', '  each', 'after']);
+  });
+
+  it('nests a loop and a fork by which one is written outside the other', () => {
+    // `for (…) { if (ready) { go() } }` — the loop starts first, so it is
+    // outside; the guard's own branch position is what decides, not its order
+    // in the chain.
+    const inner = g('ready', { branch: '9:4' });
+    const p = program({ root: [at('go', [inner], { loops: [loop('item of items', 'each', '8:2')] })] });
+    expect(shape(p!.root)).toEqual(['loop item of items', '  if ready', '    arm ready', '      go']);
+
+    // `if (ready) { for (…) { go() } }` — the same two constructs, the other
+    // way round, told apart by where each begins.
+    const outer = g('ready', { branch: '8:2' });
+    const q = program({ root: [at('go', [outer], { loops: [loop('item of items', 'each', '9:4')] })] });
+    expect(shape(q!.root)).toEqual(['if ready', '  arm ready', '    loop item of items', '      go']);
   });
 
   it('closes a fork when the code leaves it', () => {

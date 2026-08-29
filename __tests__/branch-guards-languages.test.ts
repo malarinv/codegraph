@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initGrammars } from '../src/extraction/grammars';
-import { callSiteInSource, decoratorsInSource, guardsInSource, guardLabel, memberTypesInSource, supportsBranchGuards } from '../src/graph/branch-guards';
+import { callSiteInSource, decoratorsInSource, guardsInSource, guardLabel, loopsInSource, memberTypesInSource, supportsBranchGuards } from '../src/graph/branch-guards';
 import type { Language } from '../src/types';
 
 beforeAll(async () => {
@@ -332,5 +332,120 @@ public class OrderService : IOrderService {
 `;
     const types = await memberTypesInSource(src, 'csharp', lineOf(src, 'public async Task Create'));
     expect(Object.fromEntries(types)).toEqual({ _orderRepository: 'IRepository<Order>', Mailer: 'IEmailSender', orderRepository: 'IRepository<Order>', uriComposer: 'IUriComposer' });
+  });
+});
+
+describe('loops a site is written inside', () => {
+  /** The loop headers at the site, outermost first, as `<kind> <text>`. */
+  async function loopsAt(src: string, needle: string, language: Language) {
+    const line = lineOf(src, needle);
+    const column = src.split('\n')[line - 1]!.indexOf(needle);
+    return (await loopsInSource(src, language, line, column)).map((l) => `${l.kind} ${l.text}`);
+  }
+
+  it('reads a JS for-of and a while', async () => {
+    const src = `
+function run(items) {
+  for (const item of items) {
+    save(item)
+  }
+  while (queue.length > 0) {
+    drain()
+  }
+}`;
+    expect(await loopsAt(src, 'save(item)', 'javascript')).toEqual(['each item of items']);
+    expect(await loopsAt(src, 'drain()', 'javascript')).toEqual(['while queue.length > 0']);
+  });
+
+  it('reads nested loops outermost first', async () => {
+    const src = `
+function run(rows) {
+  for (const row of rows) {
+    for (const cell of row) {
+      draw(cell)
+    }
+  }
+}`;
+    expect(await loopsAt(src, 'draw(cell)', 'javascript')).toEqual(['each row of rows', 'each cell of row']);
+  });
+
+  it('reads nothing for a site outside every loop', async () => {
+    const src = `
+function run(items) {
+  begin()
+  for (const item of items) { save(item) }
+}`;
+    expect(await loopsAt(src, 'begin()', 'javascript')).toEqual([]);
+  });
+
+  it('reads a Python for and a while', async () => {
+    const src = `
+def run(items):
+    for item in items:
+        save(item)
+    while pending:
+        drain()
+`;
+    expect(await loopsAt(src, 'save(item)', 'python')).toEqual(['each item in items']);
+    expect(await loopsAt(src, 'drain()', 'python')).toEqual(['while pending']);
+  });
+
+  it('reads a Java enhanced for', async () => {
+    const src = `
+class A {
+  void run(List<Item> items) {
+    for (Item item : items) {
+      save(item);
+    }
+  }
+}`;
+    expect(await loopsAt(src, 'save(item)', 'java')).toEqual(['each Item item : items']);
+  });
+
+  it('reads a Go range loop', async () => {
+    const src = `
+func run(items []Item) {
+	for _, item := range items {
+		save(item)
+	}
+}`;
+    expect(await loopsAt(src, 'save(item)', 'go')).toEqual(['each _, item := range items']);
+  });
+
+  it('reads a C# foreach', async () => {
+    const src = `
+class A {
+  void Run(List<Item> items) {
+    foreach (var item in items) {
+      Save(item);
+    }
+  }
+}`;
+    // The binding word is noise in a header a person reads: `var` goes.
+    expect(await loopsAt(src, 'Save(item)', 'csharp')).toEqual(['each item in items']);
+  });
+
+  it('reads a Swift for-in', async () => {
+    const src = `
+func run(items: [Item]) {
+  for item in items {
+    save(item)
+  }
+}`;
+    expect(await loopsAt(src, 'save(item)', 'swift')).toEqual(['each item in items']);
+  });
+
+  it('reads a Kotlin for', async () => {
+    const src = `
+fun run(items: List<Item>) {
+    for (item in items) {
+        save(item)
+    }
+}`;
+    expect(await loopsAt(src, 'save(item)', 'kotlin')).toEqual(['each item in items']);
+  });
+
+  it('reads nothing for a language without rules', async () => {
+    expect(await loopsInSource('def f\n  xs.each { save }\nend\n', 'ruby', 2, 2)).toEqual([]);
   });
 });

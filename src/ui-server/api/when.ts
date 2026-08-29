@@ -19,6 +19,7 @@ import {
   decoratorsForFile,
   guardLabel,
   guardsForFile,
+  loopsForFile,
   memberTypesForFile,
   siteKey,
   supportsBranchGuards,
@@ -26,6 +27,7 @@ import {
   type BranchGuard,
   type CallSiteText,
   type DefinitionDecorators,
+  type SiteLoop,
   type SiteTrigger,
 } from '../../graph/branch-guards';
 import { resolveProjectFile } from '../security';
@@ -106,6 +108,8 @@ export interface SiteReader {
    * What {@link SiteReader.when} joins; empty when unconditional or unreadable.
    */
   guards(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<BranchGuard[]>;
+  /** The loops the site is written inside, outermost first — a run of calls that happens once per item. */
+  loops(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<SiteLoop[]>;
   /** What the site passes, abbreviated (`'userEmail', values.email`); null when unreadable. '' for an empty list. */
   args(caller: { filePath: string; language: Language }, site: { line?: number; column?: number }): Promise<string | null>;
   /** What fires the site — the JSX prop, `on*` option or runs-later call it is written under; null when nothing binds it. */
@@ -174,6 +178,15 @@ export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 
     guards,
     async when(caller, site) {
       return guardLabel(await guards(caller, site));
+    },
+    async loops(caller, site) {
+      // Not counted against the budget: the tree is parsed for the site's
+      // guards anyway, and this is a second climb up the same nodes.
+      if (!site.line || !supportsBranchGuards(caller.language)) return [];
+      const file = resolve(caller);
+      if (!file) return [];
+      const key = { line: site.line, column: typeof site.column === 'number' ? site.column : null };
+      return (await loopsForFile(file.abs, file.language, [key])).get(siteKey(key)) ?? [];
     },
     async args(caller, site) {
       if (!site.line || sites >= maxSites || !supportsBranchGuards(caller.language)) return null;

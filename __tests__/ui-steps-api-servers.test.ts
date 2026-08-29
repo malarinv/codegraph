@@ -13,6 +13,7 @@ import * as path from 'path';
 import { CodeGraph } from '../src';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
 import { buildSteps, projectKind } from '../src/ui-server/api/steps';
+import type { WireBlock } from '../src/ui-server/api/program';
 import { routeRoots } from '../src/ui-server/api/route-roots';
 
 let tmpDir: string;
@@ -278,6 +279,110 @@ const route = (name: string) => {
   return r;
 };
 const effect = (p: Awaited<ReturnType<typeof buildSteps>>, category: string) => p.steps.find((s) => s.kind === 'effect' && s.effect?.category === category);
+
+/**
+ * The `program` reading, one line per item, indented — the rail as a reader
+ * meets it. A step prints its label, a fork its condition and each arm's, a
+ * bracketed run its words.
+ */
+function inOrder(p: Awaited<ReturnType<typeof buildSteps>>): string[] {
+  const label = (id: string) => p.steps.find((s) => s.id === id)?.label ?? id;
+  const out: string[] = [];
+  const walk = (block: WireBlock, indent: string): void => {
+    for (const item of block) {
+      if (item.kind === 'step') {
+        out.push(`${indent}${label(item.step)}${item.again ? ' (again)' : ''}`);
+        if (item.body) walk(item.body, `${indent}  `);
+      } else if (item.kind === 'fork') {
+        out.push(`${indent}${item.form} ${item.on}`);
+        for (const arm of item.arms) {
+          out.push(`${indent}  ${arm.when}${arm.ends ? ` → ${arm.ends}` : ''}`);
+          walk(arm.body, `${indent}    `);
+        }
+      } else if (item.kind === 'block') {
+        out.push(`${indent}${item.block} ${item.via?.name ?? item.by ?? ''}`.trimEnd());
+        walk(item.body, `${indent}  `);
+      } else out.push(`${indent}cut ${item.why}`);
+    }
+  };
+  if (p.program) walk(p.program.root, '');
+  return out;
+}
+
+describe('in the code’s order', () => {
+  it('reads an Express handler as it is written, helper and all', async () => {
+    // `create` → `emailQueue.add` → `if (!user.verified) sendVerification(user)`
+    // → `res.status(201).json({ token: signToken(user.id) })`. The token is
+    // signed INSIDE the reply, so it is drawn before the 201, not beside it.
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /users').id }));
+    expect(p.defaultView).toBe('order');
+    expect(inOrder(p)).toEqual([
+      'prisma.user.create({ data })',
+      "emailQueue.add('welcome', { userId })",
+      'if !user.verified',
+      '  !user.verified',
+      '    inline sendVerification',
+      '      transporter.sendMail({ to })',
+      'inline signToken',
+      '  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn })',
+      '201',
+    ]);
+  });
+
+  it('reads a Python handler, its raise ending the arm it is in', async () => {
+    // `session.add` / `session.commit` are one database box drawn at both its
+    // sites; `raise HTTPException(422)` is an early exit, so the arm that
+    // raises answers there and the Celery job is on the other one.
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /items').id }));
+    expect(inOrder(p)).toEqual([
+      'session.add +1',
+      'session.add +1',
+      'if item.price < 0',
+      '  item.price < 0 → reply',
+      '    422',
+      '  !(item.price < 0)',
+      '    send_welcome.delay(item.id)',
+    ]);
+  });
+
+  it('reads a Java handler, its early return as the fork’s other arm', async () => {
+    // `if (owner.getName() == null) return badRequest();` — one comparison
+    // flips rather than wrapping, so the arm that runs on says `!= null`.
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /owners/new').id }));
+    expect(inOrder(p)).toEqual([
+      'if owner.getName() == null',
+      '  owner.getName() == null → reply',
+      '    400',
+      '  owner.getName() != null → reply',
+      '    owners.save(owner)',
+      '    201',
+    ]);
+  });
+
+  it('reads a C# handler’s two outcomes', async () => {
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('PUT /api/TodoItems/{id}').id }));
+    expect(inOrder(p)).toEqual([
+      'if id != command.Id',
+      '  id != command.Id → reply',
+      '    400',
+      '  id == command.Id → reply',
+      '    204',
+    ]);
+  });
+
+  it('reads a Nest handler through the service it delegates to', async () => {
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /cats').id }));
+    expect(inOrder(p)).toEqual(['inline create', '  this.catsRepository.save(dto)', '  handleIndex']);
+  });
+
+  it('has no order to read for a screen, and says so', async () => {
+    // A route with an inline handler still has a body; what has none is a
+    // symbol nothing in the picture happens inside.
+    const p = await buildSteps(cg, tmpDir, q({ symbol: 'RolesGuard' }));
+    expect(p.program).toBeNull();
+    expect(p.defaultView).toBe('tree');
+  });
+});
 
 describe('route roots', () => {
   it('names the handler an API route runs, the route itself for an inline handler', () => {

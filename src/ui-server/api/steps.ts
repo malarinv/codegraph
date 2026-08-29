@@ -41,7 +41,7 @@ import type CodeGraph from '../../index';
 import type { Edge, Language, Node, UnresolvedReference } from '../../types';
 import { badRequest, intParam, notFound } from './respond';
 import { createSiteReader } from './when';
-import type { BranchGuard, SiteTrigger } from '../../graph/branch-guards';
+import type { BranchGuard, SiteLoop, SiteTrigger } from '../../graph/branch-guards';
 import { buildProgram, type ProgramSite, type WireProgram } from './program';
 import { classifyEffect, implicitResponseStatus, responseStatus, type Effect } from './effects';
 import { guardLabel } from '../../graph/branch-guards';
@@ -383,6 +383,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   const calls = createSiteReader(cg, projectRoot, MAX_CALL_SITES);
   /** The conditions a site runs under, structured — one read, joined where a string is wanted. */
   const guardsAt = (caller: Node, site: { line?: number; column?: number }) => reader.guards(caller, site);
+  /** The loops a site is written inside — a run of calls that happens once per item. */
+  const loopsAt = (caller: Node, site: { line?: number; column?: number }) => reader.loops(caller, site);
   const argsAt = (caller: Node, site: { line?: number; column?: number }) => reader.args(caller, site);
   const withArgs = async (site: WireStepSite, caller: Node, at: { line?: number; column?: number }): Promise<WireStepSite> => {
     const args = await argsAt(caller, at);
@@ -553,7 +555,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     hop: HopSite,
     guards: readonly BranchGuard[],
     what: { step?: string; link?: string; into?: string },
-    trigger: WireStepTrigger | null = null
+    trigger: WireStepTrigger | null = null,
+    loops: readonly SiteLoop[] = []
   ): void => {
     let sites = programs.get(fn.id);
     if (!sites) {
@@ -567,6 +570,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       at: { line: hop.line, column: hop.column, end: hop.end },
       ...(hop.within ? { within: hop.within } : {}),
       guards: [...guards],
+      ...(loops.length > 0 ? { loops: [...loops] } : {}),
       ...(trigger ? { trigger } : {}),
     });
   };
@@ -754,7 +758,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     if (!target.first) target.first = hop;
     const fired = trigger ?? (await triggerAt(fold.node, at));
     const id = link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, fired, hop.within);
-    record(fold.node, local, guards, { step: target.id, link: id }, fired);
+    record(fold.node, local, guards, { step: target.id, link: id }, fired, await loopsAt(fold.node, at));
     return true;
   };
 
@@ -1145,7 +1149,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const hop = fold.first ?? local;
           if (!to.first) to.first = hop;
           const id = link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
-          record(fold.node, local, guards, { step: to.id, link: id }, a.trigger);
+          record(fold.node, local, guards, { step: to.id, link: id }, a.trigger, await loopsAt(fold.node, at));
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
             queue.push(to);
@@ -1183,7 +1187,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
               const local = await hopAt(fold.node, at, target.name);
               const hop = fold.first ?? local;
               const id = link(step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
-              record(fold.node, local, guards, { step: known.id, link: id }, a.trigger);
+              record(fold.node, local, guards, { step: known.id, link: id }, a.trigger, await loopsAt(fold.node, at));
             }
             continue;
           }
@@ -1210,7 +1214,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const first = fold.first ?? local;
           // The helper is drawn where it is CALLED: its own records are its
           // body, and this is the site the rail nests them under.
-          record(fold.node, local, guards, { into: target.id }, a.trigger);
+          record(fold.node, local, guards, { into: target.id }, a.trigger, await loopsAt(fold.node, at));
           next.push({ node: target, chain: [...fold.chain, target], whens: [...fold.whens, guardLabel(guards)], first });
         }
       }

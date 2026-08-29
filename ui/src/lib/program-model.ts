@@ -174,7 +174,8 @@ export function groupLabel(item: Extract<WireItem, { kind: 'block' }>): string {
     case 'inline':
       return item.via ? `via ${item.via.name}` : 'via a helper';
     case 'loop':
-      return item.by ? `for each ${item.by}` : 'for each';
+      if (!item.by) return item.loop === 'while' ? 'again and again' : 'for each item';
+      return item.loop === 'while' ? `again while ${item.by}` : `for each ${item.by}`;
     case 'later':
       return item.by ? `later · ${item.by}` : 'later';
     default:

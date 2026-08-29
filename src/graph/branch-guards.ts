@@ -947,6 +947,114 @@ export async function guardsInSource(
   }
 }
 
+/** Loops for one site in source text — the test seam; production reads files. */
+export async function loopsInSource(source: string, language: Language, line: number, column: number | null = null): Promise<SiteLoop[]> {
+  if (!supportsBranchGuards(language)) return [];
+  const tree = await parse(source, language);
+  if (!tree) return [];
+  try {
+    return loopsInTree(tree.rootNode, source, language, line, column);
+  } finally {
+    tree.delete();
+  }
+}
+
+/** A loop a site is written inside: its header as written, and where the loop starts. */
+export interface SiteLoop {
+  /** `const item of items`, `i = 0; i < n; i++`, `queue.length > 0` — the header, without its keyword. */
+  text: string;
+  /** `each` for a `for` / `foreach` / `for … in`, `while` for a `while` / `do` / `repeat`. */
+  kind: 'each' | 'while';
+  /** Where the loop starts, `line:column` — the same identity a guard's `branch` carries. */
+  branch: string;
+}
+
+/** Loop node types across the grammars with rules here. A type absent yields nothing, never a wrong label. */
+const LOOP_TYPES: ReadonlyMap<string, 'each' | 'while'> = new Map([
+  ['for_statement', 'each'],
+  ['for_in_statement', 'each'],
+  ['for_of_statement', 'each'],
+  ['for_each_statement', 'each'],
+  ['enhanced_for_statement', 'each'],
+  ['foreach_statement', 'each'],
+  ['for_range_loop', 'each'],
+  ['for_expression', 'each'],
+  ['while_statement', 'while'],
+  ['while_expression', 'while'],
+  ['do_statement', 'while'],
+  ['do_while_statement', 'while'],
+  ['repeat_while_statement', 'while'],
+]);
+
+/**
+ * The loops a site is written inside, outermost first — what tells a reading in
+ * the code's order that a run of calls happens once PER ITEM rather than once.
+ * The climb is the guards' climb (the same boundaries, the same transparent
+ * inline functions), so a callback's body is read in its own function and a
+ * `.forEach` body under the loop it is written in.
+ */
+export function loopsInTree(root: SyntaxNode, source: string, language: Language, line: number, column: number | null): SiteLoop[] {
+  const rules = RULES_BY_LANGUAGE.get(language);
+  if (!rules) return [];
+  const row = line - 1;
+  if (row < 0) return [];
+  let col = column ?? 0;
+  if (column === null) {
+    const text = source.split('\n')[row] ?? '';
+    const first = text.search(/\S/);
+    col = first < 0 ? 0 : first;
+  }
+  let node: SyntaxNode | null = innermostAt(root, row, col);
+  if (!node) return [];
+  const found: SiteLoop[] = [];
+  while (node) {
+    const parent: SyntaxNode | null = node.parent;
+    if (!parent || rules.boundaries.has(parent.type)) break;
+    if (rules.inlineFunctions.has(parent.type)) {
+      const holder = parent.parent?.type ?? '';
+      if (rules.bindingParents.has(holder)) break;
+      node = parent;
+      continue;
+    }
+    const kind = LOOP_TYPES.get(parent.type);
+    // The header, not the body: a site is in the loop only when it is under it.
+    if (kind && !isField(parent, 'condition', node) && !isField(parent, 'value', node)) {
+      const text = loopHeader(parent);
+      if (text) found.push({ text, kind, branch: branchKey(parent) });
+    }
+    node = parent;
+  }
+  found.reverse();
+  return found;
+}
+
+/** Loops for many sites in one file, keyed by {@link siteKey}. */
+export async function loopsForFile(absPath: string, language: Language, sites: readonly CallSite[]): Promise<Map<string, SiteLoop[]>> {
+  const out = new Map<string, SiteLoop[]>();
+  if (!supportsBranchGuards(language) || sites.length === 0) return out;
+  const cached = await treeFor(absPath, language);
+  if (!cached) return out;
+  for (const site of sites) {
+    const key = siteKey(site);
+    if (!out.has(key)) out.set(key, loopsInTree(cached.tree.rootNode, cached.source, language, site.line, site.column ?? null));
+  }
+  return out;
+}
+
+/** A loop's header as written, keyword and braces dropped: `item of items`, `queue.length > 0`. */
+function loopHeader(loop: SyntaxNode): string {
+  const body = loop.childForFieldName('body') ?? namedChildren(loop).find((c) => BLOCKISH.has(c.type)) ?? null;
+  const raw = body && body.startIndex > loop.startIndex ? loop.text.slice(0, body.startIndex - loop.startIndex) : loop.text;
+  let text = raw.replace(/\s+/g, ' ').trim();
+  text = text.replace(/^(?:for|foreach|while|do|repeat)\b\s*/i, '');
+  text = text.replace(/[{:]\s*$/, '').trim();
+  const inner = /^\((.*)\)$/s.exec(text);
+  if (inner) text = inner[1]!.trim();
+  // `const item of items` reads as `item of items`; the binding word is noise here.
+  text = text.replace(/^(?:const|let|var|val|final)\s+/, '');
+  return cut(text, 60);
+}
+
 /**
  * The walk. `line` is 1-based, `column` 0-based (null → first non-blank).
  * Returns the guards outermost first — execution order, the way a reader

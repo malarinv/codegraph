@@ -838,7 +838,17 @@ export type WireItem =
    * after this function returns (`later`), or calls started together
    * (`together`).
    */
-  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; by?: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
+  | {
+      kind: 'block';
+      block: 'inline' | 'loop' | 'later' | 'together';
+      by?: string;
+      /** For a loop: whether it runs once per item or while a condition holds. */
+      loop?: 'each' | 'while';
+      via?: WireNodeRef;
+      within?: string;
+      body: WireBlock;
+      again?: true;
+    }
   /** Where the reading stopped: a helper that calls itself, or a cap the walk hit. */
   | { kind: 'cut'; why: 'folded' | 'depth' };
 
