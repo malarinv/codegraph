@@ -58,6 +58,11 @@ beforeAll(async () => {
       '}\n' +
       'async function sendVerification(user) {\n' +
       '  await transporter.sendMail({ to: user.email })\n' +
+      '}\n' +
+      'export async function acceptUser(req, res) {\n' +
+      '  const user = await prisma.user.update({ where: { id: req.params.id }, data: { accepted: true } })\n' +
+      '  res.status(202)\n' +
+      '  res.json(user)\n' +
       '}\n'
   );
   write(
@@ -65,9 +70,10 @@ beforeAll(async () => {
     "import { Router } from 'express'\n" +
       "import { authenticate } from './auth'\n" +
       "import { validate } from './validate'\n" +
-      "import { createUser, getUser } from './users.service'\n" +
+      "import { createUser, getUser, acceptUser } from './users.service'\n" +
       'const router = Router()\n' +
       "router.post('/users', authenticate, validate(userSchema), createUser)\n" +
+      "router.post('/users/:id/accept', authenticate, acceptUser)\n" +
       "router.get('/users/:id', authenticate, async (req, res) => {\n" +
       '  const user = await getUser(req.params.id)\n' +
       '  res.json(user)\n' +
@@ -316,11 +322,29 @@ describe('Express', () => {
     expect(anchor.trigger).toMatchObject({ kind: 'request', name: 'GET', of: '/users/:id', after: ['authenticate'] });
     const db = effect(p, 'database')!;
     expect(db.effect).toMatchObject({ model: 'user', access: 'read', by: { name: 'getUser' } });
+    // `res.json(user)` in the inline handler sets no status: a 200, the
+    // route's own reply box; the service's `NotFoundError` is `getUser`'s box.
+    const replies = p.steps.filter((s) => s.kind === 'effect' && s.effect?.category === 'response');
+    expect(replies.map((s) => [s.effect!.by.name, s.label]).sort()).toEqual([
+      ['GET /users/:id', '200'],
+      ['getUser', '404'],
+    ]);
+    const own = replies.find((s) => s.effect!.by.name === 'GET /users/:id')!;
+    expect(p.links.find((l) => l.to === own.id)!.sites[0]).toMatchObject({ text: 'res.json', args: 'user', status: 200 });
+    const notFound = replies.find((s) => s.effect!.by.name === 'getUser')!;
+    const link = p.links.find((l) => l.to === notFound.id)!;
+    expect(link.sites[0]).toMatchObject({ text: 'NotFoundError', status: 404, when: '!user' });
+    expect(link.via.map((v) => v.name)).toEqual(['getUser']);
+  });
+
+  it('a status set by the statement before the reply is that reply’s, not a 200', async () => {
+    const p = await buildSteps(cg, tmpDir, q({ anchor: route('POST /users/:id/accept').id }));
     const res = effect(p, 'response')!;
-    expect(res.label).toBe('404');
-    const resLink = p.links.find((l) => l.to === res.id)!;
-    expect(resLink.sites[0]).toMatchObject({ text: 'NotFoundError', status: 404, when: '!user' });
-    expect(resLink.via.map((v) => v.name)).toEqual(['getUser']);
+    expect(res.label).toBe('202');
+    expect(p.links.find((l) => l.to === res.id)!.sites.map((x) => [x.text, x.status])).toEqual([
+      ['res.status', 202],
+      ['res.json', 202],
+    ]);
   });
 });
 

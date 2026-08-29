@@ -49,6 +49,34 @@ const RESERVED_CALLS = new Set([
   'Date', 'Math', 'JSON', 'Promise', 'require', 'fail', 'redirect',
 ]);
 
+/**
+ * The replies an inline handler makes — `res.status(404).json({…})`,
+ * `res.json(user)`, `reply.send(…)`, `ctx.body = …` aside — as references the
+ * Steps view's effect table reads at their own line and column. The body's
+ * plain calls above skip these names as framework noise on purpose (they are
+ * not the business flow); for the endpoint's contract they are the point.
+ */
+const REPLY_CALL = /\b(res|response|reply|rep|ctx)\s*\.\s*(?:[A-Za-z_$][\w$]*\s*\([^()]*\)\s*\.\s*)*([A-Za-z_$][\w$]*)\s*\(/g;
+function replyRefs(safe: string, bodyStart: number, bodyEnd: number, fromNodeId: string, filePath: string, language: 'typescript' | 'javascript'): UnresolvedRef[] {
+  const out: UnresolvedRef[] = [];
+  const body = safe.slice(bodyStart, bodyEnd);
+  REPLY_CALL.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = REPLY_CALL.exec(body)) !== null) {
+    const at = bodyStart + m.index;
+    out.push({
+      fromNodeId,
+      referenceName: `${m[1]}.${m[2]}`,
+      referenceKind: 'calls',
+      line: safe.slice(0, at).split('\n').length,
+      column: at - (safe.lastIndexOf('\n', at - 1) + 1),
+      filePath,
+      language,
+    });
+  }
+  return out;
+}
+
 export const expressResolver: FrameworkResolver = {
   name: 'express',
   languages: ['javascript', 'typescript'],
@@ -169,9 +197,13 @@ export const expressResolver: FrameworkResolver = {
         const afterArrow = args.slice(arrowAt + 2);
         const braceAt = afterArrow.indexOf('{');
         let body = afterArrow;
+        let bodyStart = openParen + 1 + arrowAt + 2;
         if (braceAt >= 0 && afterArrow.slice(0, braceAt).trim() === '') {
           const end = matchDelim(afterArrow, braceAt, '{', '}');
-          if (end > braceAt) body = afterArrow.slice(braceAt + 1, end);
+          if (end > braceAt) {
+            body = afterArrow.slice(braceAt + 1, end);
+            bodyStart += braceAt + 1;
+          }
         }
         const callRe = /\b([A-Za-z_$][\w$]*)\s*\(/g;
         const seen = new Set<string>();
@@ -190,6 +222,7 @@ export const expressResolver: FrameworkResolver = {
             language: lang,
           });
         }
+        references.push(...replyRefs(safe, bodyStart, bodyStart + body.length, routeNode.id, filePath, lang));
       } else {
         // Named handler: the LAST comma-separated arg (earlier ones are middleware).
         const parts = args.split(',').map((s) => s.trim()).filter(Boolean);
@@ -248,6 +281,7 @@ export const expressResolver: FrameworkResolver = {
             seen.add(name);
             references.push({ fromNodeId: routeNode.id, referenceName: name, referenceKind: 'calls', line, column: 0, filePath, language: lang });
           }
+          references.push(...replyRefs(safe, openParen + 1, closeParen, routeNode.id, filePath, lang));
         } else {
           const parts = splitTopLevel(args).map((s) => s.trim()).filter(Boolean);
           const last = parts[parts.length - 1];

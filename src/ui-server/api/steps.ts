@@ -42,7 +42,7 @@ import type { Edge, Language, Node, UnresolvedReference } from '../../types';
 import { badRequest, intParam, notFound } from './respond';
 import { createSiteReader } from './when';
 import type { SiteTrigger } from '../../graph/branch-guards';
-import { classifyEffect, responseStatus, type Effect } from './effects';
+import { classifyEffect, implicitResponseStatus, responseStatus, type Effect } from './effects';
 import { looksLikeComponent, routeRoots } from './route-roots';
 import { nextRouteForFile } from '../../resolution/frameworks/nextjs';
 import { splitRouteName } from './routes';
@@ -639,7 +639,10 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     if (effect.category === 'response') {
       // `NextResponse.json(user, { status: 201 })`: the code sits in an object
       // the abbreviation reduced to its keys; the site reader kept it.
-      const status = responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null);
+      // — and a body-sending reply that sets none is a 200, so a success row
+      // says so beside the 401s.
+      const status =
+        responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null) ?? implicitResponseStatus(text);
       if (status !== null) wireSite.status = status;
     }
     link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)));

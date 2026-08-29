@@ -450,6 +450,28 @@ export function responseStatus(text: string, args: string | null | undefined, _k
   return null;
 }
 
+/**
+ * The status a reply sends when it sets none — 200 — for the calls that send a
+ * body and default to it: Express / Koa / Fastify / Hono `res.json`,
+ * `res.send`, `res.render`, `reply.send`, `c.json`; `NextResponse.json`;
+ * Python's `JSONResponse`, `jsonify`, `render_template`, `HttpResponse`;
+ * Rails' `render`; Laravel's `response()->json`. Null when the chain sets a
+ * status of its own (`res.status(code).json` — a variable code is unknown,
+ * not 200), when the call ends a response without a body (`end`,
+ * `sendStatus`), or when the call is not one of these.
+ */
+export function implicitResponseStatus(text: string): number | null {
+  const call = normaliseCall(text);
+  if (/(?:^|\.)(?:status|sendStatus|code|Status|StatusCode|SendStatus|withStatus|with_status|writeHead)\(/.test(call)) return null;
+  const bare = call.replace(/\([^()]*\)/g, '');
+  if (/^(?:res|response|reply|rep|ctx|c|context)(?:\.(?:type|set|header|headers|append|cookie|clearCookie|vary|location|links|format))*\.(?:json|jsonp|send|render|sendFile|download|text|html|body|stream|file|view)$/.test(bare)) return 200;
+  if (/^(?:NextResponse|Response)\.json$/.test(bare)) return 200;
+  if (/^(?:JSONResponse|HTMLResponse|PlainTextResponse|ORJSONResponse|UJSONResponse|jsonify|render_template|render|make_response|HttpResponse|JsonResponse|send_file|send_from_directory)$/.test(bare)) return 200;
+  if (/^(?:render|render_to_string|respond_with)$/.test(bare)) return 200;
+  if (/^response\(\)->(?:json|view)$|^response->json$|^view$/.test(call.replace(/\s+/g, ''))) return 200;
+  return null;
+}
+
 /** The abbreviated argument list split on its top-level commas. */
 function splitArgs(args: string): string[] {
   const out: string[] = [];

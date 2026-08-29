@@ -4,7 +4,7 @@
  * access a database call names; the status a response site sends.
  */
 import { describe, it, expect } from 'vitest';
-import { classifyEffect, responseStatus } from '../src/ui-server/api/effects';
+import { classifyEffect, implicitResponseStatus, responseStatus } from '../src/ui-server/api/effects';
 
 const c = (text: string, language?: string, extra: Partial<Parameters<typeof classifyEffect>[0]> = {}) =>
   classifyEffect({ text, kind: 'calls', language: language as never, project: 'api', ...extra });
@@ -242,5 +242,27 @@ describe('responseStatus', () => {
     expect(responseStatus('render', 'json: user, status: :created')).toBeNull();
     expect(responseStatus('res.status', 'code')).toBeNull();
     expect(responseStatus('res.json', '')).toBeNull();
+  });
+});
+
+describe('implicitResponseStatus', () => {
+  it('a body-sending reply that sets no status is a 200', () => {
+    expect(implicitResponseStatus('res.json')).toBe(200);
+    expect(implicitResponseStatus('res.send')).toBe(200);
+    expect(implicitResponseStatus('res.render')).toBe(200);
+    expect(implicitResponseStatus('reply.send')).toBe(200);
+    expect(implicitResponseStatus('c.json')).toBe(200);
+    expect(implicitResponseStatus('NextResponse.json')).toBe(200);
+    expect(implicitResponseStatus('JSONResponse')).toBe(200);
+    expect(implicitResponseStatus('jsonify')).toBe(200);
+  });
+  it('is null when the chain sets a status — literal or not — or ends without a body', () => {
+    expect(implicitResponseStatus('res.status(404).json')).toBeNull();
+    expect(implicitResponseStatus('res.status(code).json')).toBeNull();
+    expect(implicitResponseStatus('res.sendStatus(204)')).toBeNull();
+    expect(implicitResponseStatus('res.end')).toBeNull();
+    expect(implicitResponseStatus('res.redirect')).toBeNull();
+    expect(implicitResponseStatus('NotFoundException')).toBeNull();
+    expect(implicitResponseStatus('prisma.user.create')).toBeNull();
   });
 });

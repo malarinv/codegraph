@@ -501,7 +501,35 @@ export function callSiteInTree(root: SyntaxNode, source: string, line: number, c
     if (status === null && c.type !== 'comment') status = statusPropertyIn(c);
   }
   const text = parts.join(', ');
+  if (status === null) status = statusSetBefore(call, callee);
   return { callee, args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text, argList: parts, ...(status !== null ? { status } : {}) };
+}
+
+const BODY_REPLY = /^(?:res|response|reply|rep|ctx|c|context)\.(?:json|jsonp|send|render|sendFile|download|end|text|html|body)$/;
+const STATEMENT_BLOCKS: ReadonlySet<string> = new Set(['statement_block', 'program', 'block', 'class_body', 'module']);
+/** Statements looked back through for a status the reply's own chain does not carry. */
+const STATUS_LOOKBACK = 6;
+
+/**
+ * `res.status(202); res.json(user)` — the status set by an earlier statement
+ * in the same block, when the reply's own chain sets none. Only a statement
+ * that IS the status call counts (`res.status(404)` inside an `if` before it
+ * is another path, not this reply's); the first one found walking back wins.
+ */
+function statusSetBefore(call: SyntaxNode, callee: string): number | null {
+  const bare = callee.replace(/\([^()]*\)/g, '');
+  if (!BODY_REPLY.test(bare) || /\b(?:status|code|sendStatus|writeHead)\(/.test(callee)) return null;
+  const receiver = bare.split('.')[0]!;
+  let statement: SyntaxNode | null = call;
+  while (statement.parent && !STATEMENT_BLOCKS.has(statement.parent.type)) statement = statement.parent;
+  const re = new RegExp(`^\\s*(?:await\\s+)?${receiver}\\s*\\.\\s*(?:status|code)\\s*\\(\\s*([1-5]\\d{2})\\s*\\)\\s*;?\\s*$|^\\s*${receiver}\\s*\\.\\s*statusCode\\s*=\\s*([1-5]\\d{2})\\s*;?\\s*$`);
+  let prev: SyntaxNode | null = statement.previousNamedSibling;
+  for (let i = 0; prev && i < STATUS_LOOKBACK; i++, prev = prev.previousNamedSibling) {
+    if (prev.type === 'comment') continue;
+    const m = re.exec(prev.text);
+    if (m) return Number(m[1] ?? m[2]);
+  }
+  return null;
 }
 
 /** The text of a call before its arguments, normalised to a member chain. */

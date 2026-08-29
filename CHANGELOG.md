@@ -46,6 +46,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A server action written through a wrapper starts its transition on the right page.** `export const signIn = validatedAction(schema, async (data) => { … redirect('/dashboard') })` — the arrow inside is no symbol of its own — now belongs to `signIn` on the Screens tab, and `signIn` is attributed to the page whose component hands it to `useActionState(signIn, …)`, read from the source when the graph holds no such edge.
 
+- **A reply that sets no status is a 200.** `res.json(user)`, `res.send(…)`, `reply.send(…)`, `NextResponse.json(…)`, a `JSONResponse` or `jsonify(…)` with no status in the chain now count as `200`, so an endpoint's response box reads `200 · 401` instead of `401` alone and the success row carries its code; a status set by the statement just before (`res.status(202); res.json(user)`) is that reply's. An Express handler written inline at the registration keeps its own replies too — they were filtered out with the framework noise.
+
 - **Files under an `e2e/` directory count as tests.** Their calls no longer appear as production callers in Steps, dead-code and test badges.
 
 - **Production code under a `samples` or `examples` package path is no longer treated as test code.** A Kotlin or Java project whose package path runs through `com/google/samples/…` (Now in Android, for one) had nearly every file counted as a fixture, so the Map opened on `build-logic`, the entry points hid the app, and dead-code and test badges were wrong. Only the project layout above a `src/` folder decides now; the package path below it never does.
