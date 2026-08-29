@@ -513,10 +513,13 @@ leaves the index through it (`OwnerRepository owners` in a Spring controller, `R
 from the class body, `graph/branch-guards.ts`'s `memberTypesInTree`, the index keeps none of it); and, in a project with
 endpoints, on a thrown web exception (`throw new NotFoundException(…)`, `raise HTTPException(…)`). The same declared type
 sends `this.usersService.findByEmail(…)` into the class the type names instead of the name-only guess the graph holds — the
-panel says `by the receiver's declared type` on that hop. A **response** box is the endpoint's contract as the code has it:
-its label is the status codes its sites send when they are literal (`201 · 404`, read out of `status(404)`,
-`HttpStatus.CREATED`, `http.StatusNotFound`, `status_code=422`, `NotFoundException`, `TypedResults.NoContent`, `.notFound`),
-and the panel prints one row per site — `WHEN NOT user → 404 · NotFoundException('no such user')`. The payload says what the
+panel says `by the receiver's declared type` on that hop. A **response** box is one outcome of the endpoint's contract as the
+code has it — one box per (function, status), so a handler answering 200 or 404 is two boxes and each line into them carries
+its own condition on the picture, the Screens view's idiom; its label is the status when it is literal (read out of
+`status(404)`, `HttpStatus.CREATED`, `http.StatusNotFound`, `status_code=422`, `NotFoundException`, `TypedResults.NoContent`,
+`.notFound`, `{ status: 201 }`, a `res.status(202)` the statement before, or the 200 a body-sending reply implies), and the
+panel prints one row per site — `WHEN NOT user → 404 · NotFoundException('no such user')`; the sites whose status the code does
+not spell out share one box labelled by their call. The payload says what the
 index is a picture of (`project: 'app' | 'api' | 'web'`, from the routes: endpoints make an API, endpoints beside pages or
 navigation a web app) and the viewer's words follow it in one place (`kindWord` / `kindWords` in `steps-model.ts`):
 endpoint / page / screen, data call / store action, a call to another tier / to the server / a native call; a route that

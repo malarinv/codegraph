@@ -423,12 +423,12 @@ describe('ASP.NET endpoint groups', () => {
     const anchor = p.steps.find((s) => s.anchor)!;
     expect(anchor.sub).toBe('UpdateTodoItem');
     expect(anchor.trigger).toMatchObject({ kind: 'request', name: 'PUT', of: '/api/TodoItems/{id}' });
-    const res = effect(p, 'response')!;
-    expect(res.label).toBe('204 · 400');
-    const rows = p.links.find((l) => l.to === res.id)!.sites.map((s) => [s.status, s.when]);
-    expect(rows).toEqual([
-      [400, 'id != command.Id'],
-      [204, 'id == command.Id'],
+    // One box per outcome, each line carrying its own condition.
+    const replies = p.steps.filter((s) => s.kind === 'effect' && s.effect?.category === 'response');
+    const outcomes = replies.map((s) => [s.label, p.links.find((l) => l.to === s.id)!.when]).sort();
+    expect(outcomes).toEqual([
+      ['204', 'id == command.Id'],
+      ['400', 'id != command.Id'],
     ]);
   });
 });
@@ -444,12 +444,11 @@ describe('Spring', () => {
     expect(db.effect).toMatchObject({ model: 'Owner', access: 'write' });
     const dbLink = p.links.find((l) => l.to === db.id)!;
     expect(dbLink.when).toBe('owner.getName() != null');
-    const res = effect(p, 'response')!;
-    expect(res.label).toBe('201 · 400');
-    const rows = p.links.find((l) => l.to === res.id)!.sites.map((s) => [s.status, s.when]);
-    expect(rows).toEqual([
-      [400, 'owner.getName() == null'],
-      [201, 'owner.getName() != null'],
+    const replies = p.steps.filter((s) => s.kind === 'effect' && s.effect?.category === 'response');
+    const outcomes = replies.map((s) => [s.label, s.effect!.statuses, p.links.find((l) => l.to === s.id)!.when]).sort();
+    expect(outcomes).toEqual([
+      ['201', [201], 'owner.getName() != null'],
+      ['400', [400], 'owner.getName() == null'],
     ]);
   });
 });

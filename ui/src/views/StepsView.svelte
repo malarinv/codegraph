@@ -635,7 +635,7 @@
           <p class="dim note mono">{selectedInfo.step.effect.apis.join(' · ')}</p>
         {/if}
         {#if selectedInfo.step.effect?.category === 'response'}
-          <p class="dim note">The endpoint’s contract as the code has it: each row below is one way it answers, with the condition it answers under.</p>
+          <p class="dim note">{selectedInfo.step.effect.statuses?.length ? 'One way the endpoint answers — each row below is a site that sends it, with the condition it answers under; its other outcomes are the boxes beside it.' : 'Replies whose status the code does not spell out — each row below is one, with the condition it answers under.'}</p>
         {/if}
         {#if selectedInfo.step.events && selectedInfo.step.events.length > 1}
           <p class="dim note mono">⇠ {selectedInfo.step.events.join(' · ')}</p>

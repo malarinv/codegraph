@@ -211,7 +211,7 @@ row, and that the walk reaches the service and the repository call.
 
 *Built* — `src/ui-server/api/effects.ts` (`classifyEffect`, `responseStatus`; rules per language family,
 `process` and Android rows added beyond the plan; `effect.model` / `access`, `site.status`, a response box
-labelled by its codes); tests `__tests__/ui-effects.test.ts`. Matching is on the call as written and on the
+per status since 2026-08-29 — the outcome is the box's identity, the line's pill its condition); tests `__tests__/ui-effects.test.ts`. Matching is on the call as written and on the
 receiver's declared type when the call leaves the index through it — see the status note at the top.
 
 *Where:* `EFFECTS` in `steps.ts` (make it a module of its own, `api/effects.ts`, with a table per

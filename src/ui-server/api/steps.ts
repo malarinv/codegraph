@@ -547,12 +547,16 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
   // One box per (function, category): `uploadARCapture` makes one network
   // call, three storage calls and three telemetry calls — three boxes, each
-  // listing its calls, not seven.
+  // listing its calls, not seven. A reply is the exception: its identity is
+  // the outcome, so `authUser` answering 200 or 401 is two boxes — each
+  // line into them then carries its own condition on the picture, the
+  // Screens view's idiom — and the sites whose status cannot be read share
+  // one `response` box labelled by the call.
   const effectSub = (e: NonNullable<WireStep['effect']>, by: Node): string =>
     [e.category, e.model, e.access, by.name].filter((x): x is string => !!x).join(' · ');
-  const effectStep = (by: Node, ref: { referenceName: string; line: number }, effect: Effect, depth: number): StepRecord | null => {
+  const effectStep = (by: Node, ref: { referenceName: string; line: number }, effect: Effect, depth: number, status: number | null = null): StepRecord | null => {
     const category = effect.category;
-    const id = `effect:${by.id}:${category}`;
+    const id = status !== null ? `effect:${by.id}:${category}:${status}` : `effect:${by.id}:${category}`;
     const existing = steps.get(id);
     if (existing) {
       const e = existing.effect!;
@@ -631,20 +635,21 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       args,
     });
     if (effect === null) return false;
-    const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, step.depth + 1);
+    // A reply's status, read before its box exists — the box is per outcome.
+    // `NextResponse.json(user, { status: 201 })`: the code sits in an object
+    // the abbreviation reduced to its keys; the site reader kept it. And a
+    // body-sending reply that sets none is a 200, so a success has a box of
+    // its own beside the 401's.
+    const status =
+      effect.category === 'response'
+        ? (responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null) ?? implicitResponseStatus(text))
+        : null;
+    const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, step.depth + 1, status);
     if (target === null) return true;
     const when = await whenAt(fold.node, at);
     const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
     if (args !== null) wireSite.args = args;
-    if (effect.category === 'response') {
-      // `NextResponse.json(user, { status: 201 })`: the code sits in an object
-      // the abbreviation reduced to its keys; the site reader kept it.
-      // — and a body-sending reply that sets none is a 200, so a success row
-      // says so beside the 401s.
-      const status =
-        responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null) ?? implicitResponseStatus(text);
-      if (status !== null) wireSite.status = status;
-    }
+    if (status !== null) wireSite.status = status;
     link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)));
     return true;
   };
@@ -1099,8 +1104,10 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   for (const step of steps.values()) {
     if (step.kind !== 'effect' || !step.effect) continue;
     const sites = sitesByStep.get(step.id) ?? [];
-    // A response box is the endpoint's contract: the status codes it can
-    // send, when they are literal, are its label; the rows say when.
+    // A response box is one outcome of the endpoint's contract: its status,
+    // when literal, is its label (one per box by construction); the rows say
+    // when. The box of unreadable statuses holds none and is labelled by its
+    // call below.
     if (step.effect.category === 'response') {
       const statuses = [...new Set(sites.map((s) => s.status).filter((x): x is number => typeof x === 'number'))].sort((a, b) => a - b);
       if (statuses.length > 0) {
