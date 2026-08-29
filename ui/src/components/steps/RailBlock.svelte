@@ -58,20 +58,38 @@
         </div>
       {/if}
     {:else if item.kind === 'fork'}
-      <div class="fork">
-        <div class="cond mono">{@render words(item.words)}</div>
-        <div class="arms">
-          {#each item.arms as arm, a (a)}
-            <div class="arm">
-              <div class="armh mono">{@render words(arm.words)}</div>
-              {#if arm.body.length > 0}
-                <Self items={arm.body} {project} {selected} {lit} {onSelect} {onStart} {canStart} />
-              {/if}
-              {#if arm.ends}<div class="ends">{arm.ends}</div>{/if}
-            </div>
-          {/each}
+      {@const guard = item.arms.length <= 2 && item.arms[0]?.body.length === 0 && item.arms[0]?.ends !== null}
+      {#if guard}
+        <!--
+          An early exit is a fork with nothing on one side: `if (!user) return`.
+          A reader takes it as a guard, not as a branch — one line saying where
+          the code leaves, and everything below it running when it did not — so
+          it is drawn as one, and the rail does not step right for it.
+        -->
+        <div class="guard">
+          <span class="cond mono">{@render words(item.words)}</span>
+          <span class="ends inline">{item.arms[0]!.ends}</span>
         </div>
-      </div>
+        {#if item.arms[1] && item.arms[1].body.length > 0}
+          <Self items={item.arms[1].body} {project} {selected} {lit} {onSelect} {onStart} {canStart} />
+        {/if}
+        {#if item.arms[1]?.ends}<div class="ends">{item.arms[1].ends}</div>{/if}
+      {:else}
+        <div class="fork">
+          <div class="cond mono">{@render words(item.words)}</div>
+          <div class="arms">
+            {#each item.arms as arm, a (a)}
+              <div class="arm">
+                <div class="armh mono">{@render words(arm.words)}</div>
+                {#if arm.body.length > 0}
+                  <Self items={arm.body} {project} {selected} {lit} {onSelect} {onStart} {canStart} />
+                {/if}
+                {#if arm.ends}<div class="ends">{arm.ends}</div>{/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {:else if item.kind === 'group'}
       <div class="group" class:again={item.again}>
         <div class="label">
@@ -177,6 +195,20 @@
     border-top: 1px solid var(--rule-faint);
     padding-top: 4px;
     align-self: stretch;
+  }
+  /* An early exit: the condition and where it leaves, on one line. */
+  .guard {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .ends.inline {
+    border-top: 0;
+    padding-top: 0;
+    align-self: auto;
+    white-space: nowrap;
   }
   .kw {
     font-weight: 600;

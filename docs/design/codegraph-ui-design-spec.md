@@ -623,8 +623,11 @@ layout engine, a column of boxes with a hairline down its left and a fork as a r
 `StepBox.svelte`, the canvas's box exactly (the canvas wraps it in handles; the rail lets it size to its words), and so
 are the click, the double-click-to-start-here and the panel. The fork's head says the decision once and its arms say
 only which side they are — **WHEN** / **WHEN NOT** — except a `switch`, whose arms each have a case to say, and a
-`try`, which says `on error` once. `StepsKey.svelte` is the key: floating over the canvas, last in the document on the
-rail, which scrolls and cannot have things sitting on it.
+`try`, which says `on error` once. **An early exit is drawn as a guard clause, not as a branch** — a fork with nothing on
+one side (`if (!user) return`) is one line, the condition and where the code leaves (`userWithTeam.length === 0
+· returns here`), with everything below it running because it did not; a rail of guard clauses would otherwise step
+right once per guard and a handler with four of them would read as four nested branches. `StepsKey.svelte` is the key:
+floating over the canvas, last in the document on the rail, which scrolls and cannot have things sitting on it.
 
 **Which reading opens** travels in the URL (`&view=order` / `&view=tree`) and the summary offers both; without one the
 answer's own `defaultView` decides — the code's order for a handler, an endpoint or any function, the tree for a
