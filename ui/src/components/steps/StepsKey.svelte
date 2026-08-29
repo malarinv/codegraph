@@ -87,16 +87,20 @@
       {/if}
       {#if order}
         <div class="lrow">
-          <span class="k-label mono">WHEN x</span>
-          <span>A fork — an <span class="mono">if</span>, a <span class="mono">switch</span>, a <span class="mono">try</span> or an early exit — with its arms side by side under the condition</span>
+          <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line" /></svg>
+          <span>And then — the step at the other end happens after this one; the plumbing between them is folded into the line</span>
         </div>
         <div class="lrow">
-          <span class="k-label">answers here</span>
-          <span>The arm stops there: it answers the request, returns or throws, and nothing below it runs</span>
+          <span class="k-label mono">WHEN x</span>
+          <span>Where the code forks — an <span class="mono">if</span>, a <span class="mono">switch</span>, a <span class="mono">try</span>, an early exit: what has to hold for the step at the other end. No label = it happens either way</span>
         </div>
         <div class="lrow">
           <span class="k-label">via x</span>
-          <span>A helper drawn where it is called; <span class="mono">later</span> runs after this returns, <span class="mono">together</span> starts at once, <span class="mono">for each</span> repeats</span>
+          <span>Written inside a helper drawn where it is called; <span class="mono">later</span> runs after this returns, <span class="mono">together</span> starts at once, <span class="mono">for each</span> repeats</span>
+        </div>
+        <div class="lrow">
+          <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-synth" /></svg>
+          <span>Established by a synthesized hop (an event channel, a callback, a helper's return value)</span>
         </div>
         <div class="lrow">
           <span class="k-label mono">name …</span>

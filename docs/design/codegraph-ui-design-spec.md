@@ -571,29 +571,38 @@ one is fitted to the whole stage. `Picture` (`screens-model.ts`) is the structur
 the shared machinery works over; `steps-model.ts` builds one. Pure model tests: `ui-steps-model.test.ts`; the
 endpoint against a real RN + Expo fixture: `ui-steps-api.test.ts`.
 
-#### 3.13.1 In order — the same walk as the code reads (`&view=order`)
+#### 3.13.1 In order — the same picture, laid out by when things happen (`&view=order`)
 Rows-by-distance is the right picture for a screen, where handlers fire on events and nothing orders them. It is the
 wrong one for a handler: on proshop's `POST /api/users/login` the tree puts `User.findOne`, `jwt.sign`, `200` and `401`
 side by side — each is one step from the anchor — when the code says *look the user up, then IF the password matches
 sign a token and answer 200, ELSE answer 401*, and the signing happens INSIDE the reply that carries it. So the same
-walk has a second reading: the anchor, then its body top to bottom.
+walk has a second reading, on **the same canvas, with the same boxes**: only the graph changes.
 
 ```
-● POST /api/users/login · authUser        FIRES FROM POST /api/users/login
-│ User.findOne({ email })                 database · User · read · authUser
-│ user AND (await user.matchPassword(password))
-│   ┌ WHEN ───────────────────────┐  ┌ WHEN NOT ──────────┐
-│   │ via generateToken · inside res.json(…)              │
-│   │   jwt.sign({ id }, …)  auth │  │ 401  response      │
-│   │ 200  response               │  │ answers here       │
-│   │ answers here                │  └────────────────────┘
+                POST /api/users/login · authUser
+                            │
+                    User.findOne({ email })
+        ┌───────────────────┴────────────────────┐
+  → WHEN user AND (await …)              → WHEN NOT (user && …)
+        │                                         │
+  jwt.sign({ id }, …)  auth                 401  response
+        │
+   200  response
 ```
+
+**A line means "and then", not "leads to"** — that is the whole difference from the other reading, and the key says so.
+A row down is one more thing that has already happened, so the `200` sits below the `jwt.sign` it is built from and the
+`401` branches at the fork. Where the code forks the line carries what has to hold, **drawn at rest** rather than only
+for a selected box (`placeLabels(model, selected, atRest)`) — on this picture the conditions ARE the content. An arm
+that answers, returns or throws simply has nothing leaving it.
 
 **What it is made of.** Every hop the walk makes is recorded where the code writes it — the step it reached (or the
 helper it folded into), the call's position and span, the branch guards, the loops, what fires it — by the SAME pass
 that makes the links, so the two readings can never hold different steps (`WireStepsPayload.program`, built by
 `src/ui-server/api/program.ts` from the records `steps.ts` keeps; `ProgramSite` is one such record). `buildProgram` is
-pure over them: no graph, no source, no control-flow graph.
+pure over them: no graph, no source, no control-flow graph. `ui/src/lib/program-model.ts` then walks that block tree
+carrying a set of *tails* — the steps a next step would follow — and emits one edge per "and then"; the row of a step is
+the longest run of them from the anchor, settled by relaxation because a step reached twice can make the graph cyclic.
 
 **What makes the fold possible** is that a guard names the DECISION it belongs to and not only its own words
 (`BranchGuard.branch` — where the branching construct starts): the `if` and the `else` of one statement carry the same
@@ -601,38 +610,27 @@ branch with `negated` flipped, an early exit carries the branch of the `if` that
 carries the branch of the switch, and two `try`/`catch` blocks in one function stay apart. Two sites are arms of ONE
 fork when they agree on the branch and disagree on the arm — which a joined condition string can never say. A guard
 also carries how the arm it is in leaves (`armExit`) and, for an early exit, how the arm that was not taken leaves
-(`exit`), so an arm ends with the word the code uses.
+(`exit`); that is `WireArm.ends`, and an arm that ends is an arm nothing leaves.
 
-**The items** (`WireItem`): a **step**, where the code writes it — with `inside res.json(…)` when it is written in
+**The block tree** (`WireItem`): a **step**, where the code writes it — with `inside res.json(…)` when it is written in
 another call's arguments, its own body under it when the walk entered it, and `again` when the same function has
-already been read (a function is read once in a rail, however many times it is called); a **fork** — `if` / `switch` /
-`ternary` / `try` / an early exit — carrying its condition once, with an arm per side, each ending `reply` / `return` /
-`throw` / `exit` when it stops there; a bracketed **block** — a helper drawn in place (`via generateToken`), a body that
-runs per item (`for each item of items`, read by `loopsForFile`, which loops and forks nest by which construct BEGINS
-first), work registered to run later (`later · then`), calls started together (`together · Promise.all`); and a **cut**
-where the reading stopped. Source order is execution order for straight-line code and for arguments before their call
-(so the token is signed before the reply); where it is not — a callback, concurrency — the block says so rather than
-pretending.
+already been read (a function is read once per picture, however many times it is called); a **fork** — `if` / `switch` /
+`ternary` / `try` / an early exit — carrying its condition once, with an arm per side; a **run** that is not plain
+sequence, said on the line into it — a helper drawn in place (`via generateToken`), a body that repeats (`for each item
+of items`, read by `loopsForFile`; loops and forks nest by which construct BEGINS first), work registered to run later
+(`later · then`), calls started together (`together · Promise.all`); and a **cut** where the reading stopped. Source
+order is execution order for straight-line code and for arguments before their call; where it is not — a callback,
+concurrency — the line says so rather than pretending. A helper that answers on one path still returns on another, so
+the code after the call follows the call; what comes after is not inside it.
 
 **Honest by construction.** A fork exists only where a guard was READ: a language without rules, or a file that changed
-since the index sync, reads as a plain sequence rather than an invented structure. Every cap is announced
-(`program.truncated`).
-
-**The view.** `ui/src/lib/program-model.ts` decides the words, `StepsRail.svelte` + `RailBlock.svelte` draw them — no
-layout engine, a column of boxes with a hairline down its left and a fork as a row of arm columns. The box is
-`StepBox.svelte`, the canvas's box exactly (the canvas wraps it in handles; the rail lets it size to its words), and so
-are the click, the double-click-to-start-here and the panel. The fork's head says the decision once and its arms say
-only which side they are — **WHEN** / **WHEN NOT** — except a `switch`, whose arms each have a case to say, and a
-`try`, which says `on error` once. **An early exit is drawn as a guard clause, not as a branch** — a fork with nothing on
-one side (`if (!user) return`) is one line, the condition and where the code leaves (`userWithTeam.length === 0
-· returns here`), with everything below it running because it did not; a rail of guard clauses would otherwise step
-right once per guard and a handler with four of them would read as four nested branches. `StepsKey.svelte` is the key:
-floating over the canvas, last in the document on the rail, which scrolls and cannot have things sitting on it.
+since the index sync, draws a plain sequence rather than an invented structure. Every cap is announced
+(`program.truncated`), and nothing floats — a step the fold could not place follows the anchor unconditionally.
 
 **Which reading opens** travels in the URL (`&view=order` / `&view=tree`) and the summary offers both; without one the
 answer's own `defaultView` decides — the code's order for a handler, an endpoint or any function, the tree for a
-screen. Tests: `ui-steps-program.test.ts` (the fold, over hand-made records), `ui-program-model.test.ts` (the words),
-and one `in order` reading per framework in `ui-steps-api-servers.test.ts`.
+screen. Tests: `ui-steps-program.test.ts` (the fold, over hand-made records), `ui-program-model.test.ts` (the graph and
+its rows), and one `in order` reading per framework in `ui-steps-api-servers.test.ts`.
 
 ## 4. Libraries and versions
 - Svelte 5 (≥ 5.25) + Vite (workspace `ui/`), Svelte Flow `@xyflow/svelte` ^1.6 for the Map and Flow canvases only (custom nodes/edges,

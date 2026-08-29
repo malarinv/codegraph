@@ -757,18 +757,22 @@ function layPill(
  * pill: the pill for a hovered edge that is not the selected screen's is
  * placed separately by {@link hoverPill}.
  */
-export function placeLabels(model: Picture, selected: string | null): PillLayout {
+export function placeLabels(model: Picture, selected: string | null, atRest = false): PillLayout {
   const pills = new Map<string, PillPlacement>();
-  if (selected === null) return { pills, hidden: 0 };
+  if (selected === null && !atRest) return { pills, hidden: 0 };
   const nodes = new Map(model.layout.nodes.map((n) => [n.id, n]));
   const lanes = laneCount(model.layerGap);
   const bounds = { width: model.layout.width, height: model.layout.height };
   const taken: Rect[] = model.layout.nodes.map((n) => ({ x: n.x, y: n.y, w: n.width, h: n.height }));
 
+  // At rest, only the selected screen's lines are labelled — a picture with a
+  // label on every line is unreadable, and the reader has asked about one box.
+  // A picture whose labels ARE its content says so (`atRest`): the Steps view
+  // in the code's order, where the conditions on the lines are the flow.
   const candidates = model.layout.edges
-    .filter((e) => e.source === selected || e.target === selected)
+    .filter((e) => atRest || e.source === selected || e.target === selected)
     .map((edge) => {
-      const end: 'source' | 'target' = edge.source === selected ? 'target' : 'source';
+      const end: 'source' | 'target' = selected !== null && edge.target === selected ? 'source' : 'target';
       const far = nodes.get(end === 'source' ? edge.source : edge.target);
       const anchor = far ? portPoint(far, edge.id, end) : { x: 0, y: 0 };
       return { edge, end, anchor };

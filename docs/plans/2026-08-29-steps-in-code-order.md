@@ -16,6 +16,13 @@ spec §3.13.1 is the description of what was built.
   (§4.1.7 only said this for boundaries under `through`).
 - **`WireItem`'s blocks are one kind with a discriminator** (`block: 'inline' | 'loop' | 'later' | 'together'`) rather
   than four item kinds, and they carry facts (`by`, `via`, `loop`) rather than words — the viewer says them.
+- **The reading is drawn on the CANVAS, not as a nested document.** §4.2's rail — a column of boxes with forks as rows
+  of arm columns — was built first and rejected on sight by the maintainer: *"this is very hard to read… go back to the
+  way it looked, but since the 200 and 401 come after the signing of the jwt those should branch out of it."* The right
+  picture is the same Svelte Flow canvas with the same boxes, laid out by WHEN things happen: a line means **and then**,
+  a row down is one more thing already done, and the fork's condition rides on the line (drawn at rest — on this
+  picture the conditions are the content). `ui/src/lib/program-model.ts` turns the block tree into that graph;
+  `StepsRail`/`RailBlock` are gone.
 - **Loops needed their own reading** (`loopsForFile`), and loops and forks nest by which construct BEGINS first, since
   neither reading knows about the other.
 - The open questions of §7 were answered: order for functions/endpoints and the tree for screens (1); read each
@@ -309,6 +316,12 @@ Read against the source, endpoint by endpoint. Every reading below is the one th
 | `leerob/next-saas-starter` | `signIn` (server action) | drizzle `select`, `length === 0` → return, `!isPasswordValid` → return, **`together Promise.all`** of `setSession` (→ `signToken` → `SignJWT`) and `logActivity` (→ `db.insert`), then `redirectTo === 'checkout'` → the whole checkout session \| `/dashboard` | right, after the lending fix |
 | `fastapi/full-stack-fastapi-template` | `POST /login/access-token` | `via authenticate` → `session.exec`, `not db_user` → return, `not verified` → return, `updated_password_hash` → `session.add`/`commit`/`refresh`; then `not user` → `400`, `elif not user.is_active` → `400`; then `via create_access_token` → `jwt.encode` | right, after the `elif` fix |
 | `amniservices-mobile-app` | `/capture/review` | unchanged: 87 steps, 160 links, the tree, `defaultView: 'tree'` | the regression check |
+
+Each of those was read first as the rejected rail and then as the canvas graph; the readings are the same, the picture
+is not. What the canvas gives that the rail could not: proshop's login fits the sketch the maintainer drew
+(`User.findOne` → the fork → `jwt.sign` → `200` | `401`), and nest-boilerplate's login reads down the page —
+`findByEmail` → `WHEN NOT user → 422` | `WHEN user AND user.provider === …` → `bcrypt.compare` → `WHEN
+isValidPassword` → `sessionRepository.create` → `together · Promise.all` → `jwtService.signAsync`.
 
 **Three defects the pictures caught, all in the walk and both readings** — a hop's span taken from a call that was not
 the one asked for (an inline Express handler's edges carry the route's line, so the registration's span swallowed the

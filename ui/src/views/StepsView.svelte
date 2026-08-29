@@ -17,7 +17,6 @@
   import { SvelteFlow, Controls, type Node, type Edge, type Viewport } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import StepNode from '../components/steps/StepNode.svelte';
-  import StepsRail from '../components/steps/StepsRail.svelte';
   import StepsKey from '../components/steps/StepsKey.svelte';
   import ScreenEdge from '../components/screens/ScreenEdge.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
@@ -46,7 +45,7 @@
     triggerWords,
     type StepsModel,
   } from '../lib/steps-model';
-  import { buildRailModel } from '../lib/program-model';
+  import { buildOrderModel } from '../lib/program-model';
 
   interface Props {
     anchor: string | null;
@@ -192,37 +191,24 @@
     return () => controller.abort();
   });
 
-  const model = $derived<StepsModel | null>(payload === null ? null : buildStepsModel(payload));
-
   /**
    * Which reading is on screen. The URL wins; otherwise the answer's own
    * default — the code's order for a handler, an endpoint or any function, the
    * tree for a screen, where handlers fire on events and have nothing to order.
    */
   const readAs = $derived<'order' | 'tree'>(reading ?? payload?.defaultView ?? 'tree');
-  const rail = $derived(payload === null || readAs !== 'order' ? [] : buildRailModel(payload));
-  /** The rail can be asked for and have nothing to show: say so rather than drawing an empty page. */
-  const railReadable = $derived(payload?.program != null);
-  /** The steps on the selected step's own lines — everything else on the rail is dimmed. */
-  const litOnRail = $derived.by(() => {
-    if (payload === null || selected === null) return null;
-    const set = new Set<string>([selected]);
-    for (const l of payload.links) {
-      if (l.from === selected) set.add(l.to);
-      if (l.to === selected) set.add(l.from);
-    }
-    return set;
-  });
-  /** A step with a symbol behind it can become the next anchor. */
-  function canStart(id: string): boolean {
-    const step = payload?.steps.find((s) => s.id === id);
-    return !!step?.node && !step.anchor;
-  }
-  function selectOnRail(id: string): void {
-    selected = selected === id ? null : id;
-    hovered = null;
-    panelHot = null;
-  }
+
+  /**
+   * The picture. Both readings are the same canvas over the same boxes; what
+   * differs is the graph — in the code's order a line means "and then" and the
+   * rows are how much has already happened, in the tree it means "leads to" and
+   * the rows are distance from the anchor.
+   */
+  const model = $derived<StepsModel | null>(
+    payload === null ? null : (readAs === 'order' ? buildOrderModel(payload) : null) ?? buildStepsModel(payload)
+  );
+  /** The order can be asked for and have nothing to read: the view then says so. */
+  const orderReadable = $derived(payload?.program != null);
 
   const neighbours = $derived.by(() => {
     if (model === null || selected === null) return null;
@@ -234,7 +220,9 @@
     return set;
   });
 
-  const pills = $derived(model === null ? null : placeLabels(model, selected));
+  // In the code's order the conditions ON the lines are the picture: they are
+  // drawn at rest, not only for the step the reader selected.
+  const pills = $derived(model === null ? null : placeLabels(model, selected, readAs === 'order'));
   const focusId = $derived(hovered?.edge.id ?? panelHot?.edge ?? null);
   const focusPill = $derived.by(() => {
     if (model === null || focusId === null || pills?.pills.has(focusId)) return null;
@@ -349,7 +337,7 @@
   }
 
   function onStageMove(event: MouseEvent): void {
-    if (model === null || stage === null || readAs === 'order') return;
+    if (model === null || stage === null) return;
     const target = event.target as Element | null;
     if (target?.closest('.spill')) return;
     if (target?.closest('.snode, .legend, .tip, .svelte-flow__controls')) {
@@ -491,37 +479,15 @@
       </div>
     {:else if loading && payload === null}
       <div class="state"><p class="dim">Walking from the anchor…</p></div>
-    {:else if model !== null && payload !== null && readAs === 'order'}
-      {#if railReadable}
-        <StepsRail
-          anchor={model.nodes.get(payload.anchor.id) ?? [...model.nodes.values()][0]!}
-          items={rail}
-          project={payload.project}
-          {selected}
-          lit={litOnRail}
-          truncated={payload.program?.truncated ?? 0}
-          onSelect={selectOnRail}
-          onStart={(id) => startHere(id)}
-          {canStart}
-        >
-          <StepsKey
-            project={payload.project}
-            order={true}
-            flow={true}
-            open={legendOpen}
-            onToggle={(next) => (legendOpen = next)}
-          />
-        </StepsRail>
-      {:else}
-        <div class="state">
-          <h2>This has no body to read in order</h2>
-          <p>
-            Nothing the picture holds is written inside this symbol — a screen renders handlers that fire on
-            events, and they have no order between them. Read it as what it sets in motion instead.
-          </p>
-          <p><a class="pick" href={rewrite({ view: 'tree' })}>What it sets in motion →</a></p>
-        </div>
-      {/if}
+    {:else if model !== null && payload !== null && readAs === 'order' && !orderReadable}
+      <div class="state">
+        <h2>This has no body to read in order</h2>
+        <p>
+          Nothing the picture holds is written inside this symbol — a screen renders handlers that fire on
+          events, and they have no order between them. Read it as what it sets in motion instead.
+        </p>
+        <p><a class="pick" href={rewrite({ view: 'tree' })}>What it sets in motion →</a></p>
+      </div>
     {:else if model !== null && payload !== null}
       <SvelteFlow
         {nodes}
@@ -567,8 +533,14 @@
       {/if}
     {/if}
 
-    {#if payload !== null && model !== null && readAs === 'tree'}
-      <StepsKey project={payload.project} order={false} flow={false} open={legendOpen} onToggle={(next) => (legendOpen = next)} />
+    {#if payload !== null && model !== null && (readAs === 'tree' || orderReadable)}
+      <StepsKey
+        project={payload.project}
+        order={readAs === 'order'}
+        flow={false}
+        open={legendOpen}
+        onToggle={(next) => (legendOpen = next)}
+      />
     {/if}
   </div>
 
@@ -781,11 +753,11 @@
         </p>
         {#if readAs === 'order'}
           <p class="dim">
-            <span class="mark">●</span> The anchor is at the top, then its body in the code's own order: the
-            calls as they are written, a fork where the code forks with its arms side by side, a helper drawn
-            where it is called, and an arm that answers, returns or throws ending there. A call written inside
-            another call's arguments comes first — the token is signed before the reply that carries it. Click
-            a step for its sites and conditions; a step is the next anchor.
+            <span class="mark">●</span> The anchor is at the top, and each row down is what happens next: a line
+            means <b>and then</b>, and where the code forks the line says what has to hold. A call written inside
+            another call's arguments happens first — the token is signed before the reply that carries it — and an
+            arm that answers, returns or throws simply has nothing leaving it. Click a step for its sites and the
+            whole condition; a step is the next anchor.
           </p>
         {:else}
           <p class="dim">
