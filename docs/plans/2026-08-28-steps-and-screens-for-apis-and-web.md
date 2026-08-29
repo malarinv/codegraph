@@ -3,7 +3,9 @@
 **Status:** plan, written 2026-08-28 at the end of the session that built the Steps view and the
 readings it rests on (Expo + React Native app, `amniservices-mobile-app`). **Updated the same day, later
 sessions: P0–P6 are built** (see the per-item notes marked *Built*); P7 has its first agent A/B (proshop, small) and
-the medium / large rows are open. Every claim about what a
+the medium / large rows are open.
+**Next:** `docs/plans/2026-08-29-steps-in-code-order.md` — the Steps tab reading a handler in the code's order (a rail with
+forks) instead of the tree by distance; a derivation from this walk, no new walk. Every claim about what a
 resolver emits *today* was verified against the source on this date — re-verify before building on it,
 the resolvers move. What was learned building it, beyond the plan: the index keeps only the LAST
 segment of a deep member call (`create` for `prisma.user.create`) and name-matches it — often to the
