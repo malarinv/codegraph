@@ -56,7 +56,13 @@
   class:unreached={info.unreached}
   style={`width:${layout.width}px;height:${layout.height}px`}
   onclick={() => node.onSelect(info.id)}
-  ondblclick={() => node.onOpen?.(info.id)}
+  ondblclickcapture={(e) => {
+    // The flow canvas zooms on a double-click that reaches its pane; a
+    // double-click on a box is a navigation, not a zoom — stop it here,
+    // at the target, before it bubbles. The pane's own double-click keeps zooming.
+    e.stopPropagation();
+    node.onOpen?.(info.id);
+  }}
   aria-pressed={node.selected}
   title={(info.origin
     ? `${info.label} — navigates, but no screen reaches it within the walk. In ${info.sub}.`
