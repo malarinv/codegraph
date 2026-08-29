@@ -116,6 +116,12 @@ export interface WireStep {
   /** For a handler: what fires it — the first binding the walk met. */
   trigger?: WireStepTrigger;
   /**
+   * The step's place in its row, in the code's order: by the position of the
+   * hop that first reached it, a hop written inside another site's arguments
+   * counting before that site. The viewer lays the row out in it.
+   */
+  order?: number;
+  /**
    * For a screen or an endpoint: its path and the symbol that serves it — the
    * component a screen renders, the handler an endpoint runs. `endpoint` when
    * the route leads with an HTTP verb (`POST /users`); `inline` when the
@@ -153,6 +159,8 @@ export interface WireStepLink {
   when: string;
   /** How the last hop was established when it was not a plain call — `via rn-event-channel · registered at file:line`. */
   label: string;
+  /** The call the first hop is written inside the arguments of — `res.json` for a token signed while building the reply. */
+  within?: string;
   synthesized: boolean;
   uncertain: boolean;
   sites: WireStepSite[];
@@ -309,14 +317,31 @@ function dependenciesIn(text: string): string[] {
 // The endpoint
 // =============================================================================
 
+/**
+ * Where a step is first reached from its parent's root: the hop's position,
+ * its call's span, and the call it is written inside — what orders a row the
+ * way the code reads, and says `inside res.json(…)` on the link.
+ */
+interface HopSite {
+  file: string;
+  line: number;
+  column: number;
+  end: { line: number; column: number };
+  within: string | null;
+}
+
 interface Fold {
   node: Node;
   /** [first folded node, …, this node]; empty for the step's own root. */
   chain: Node[];
   whens: string[];
+  /** The hop out of the step's root this fold descends from; null for the root itself. */
+  first: HopSite | null;
 }
 
 interface StepRecord extends WireStep {
+  /** The hop that first reached this step, for the row's order; the anchor has none. */
+  first?: HopSite;
   /** Where exploration from this step begins: a screen's component, otherwise the node itself. */
   root: Node | null;
 }
@@ -349,6 +374,24 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   };
   /** The call as written at a site, and what it passes — one read for both. */
   const callAt = (caller: Node, site: { line?: number; column?: number; callee?: string }) => calls.callSite(caller, site);
+  /** A hop's position with its call's span and enclosing call, read from the tree; the bare position when unreadable. */
+  const hopAt = async (caller: Node, at: { line?: number; column?: number }, callee?: string): Promise<HopSite> => {
+    const line = at.line ?? caller.startLine;
+    const column = at.column ?? 0;
+    const read = at.line ? await callAt(caller, { ...at, ...(callee ? { callee } : {}) }) : null;
+    return {
+      file: caller.filePath,
+      line: read?.span?.start.line ?? line,
+      column: read?.span?.start.column ?? column,
+      end: read?.span?.end ?? { line, column },
+      within: read?.within ?? null,
+    };
+  };
+  const pointHop = (caller: Node, at: { line?: number; column?: number }): HopSite => {
+    const line = at.line ?? caller.startLine;
+    const column = at.column ?? 0;
+    return { file: caller.filePath, line, column, end: { line, column }, within: null };
+  };
 
   // The declared type of a receiver: `OwnerRepository owners` in a Spring
   // controller makes `owners.save` the database; `private readonly
@@ -650,7 +693,15 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
     if (args !== null) wireSite.args = args;
     if (status !== null) wireSite.status = status;
-    link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)));
+    const hop: HopSite = fold.first ?? {
+      file: fold.node.filePath,
+      line: site?.span?.start.line ?? ref.line,
+      column: site?.span?.start.column ?? ref.column ?? 0,
+      end: site?.span?.end ?? { line: ref.line, column: ref.column ?? 0 },
+      within: site?.within ?? null,
+    };
+    if (!target.first) target.first = hop;
+    link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, trigger ?? (await triggerAt(fold.node, at)), hop.within);
     return true;
   };
 
@@ -662,7 +713,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     whens: string[],
     site: WireStepSite,
     edge: Edge | null,
-    trigger: WireStepTrigger | null = null
+    trigger: WireStepTrigger | null = null,
+    within: string | null = null
   ): void => {
     const meta = (edge?.metadata ?? {}) as Record<string, unknown>;
     const synthesized = edge?.provenance === 'heuristic';
@@ -687,6 +739,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
         existing.sites[sameLine] = stamped;
       }
       if (!existing.trigger && trigger) existing.trigger = trigger;
+      if (!existing.within && within) existing.within = within;
       if (when !== existing.when) {
         if (!when || !existing.when) existing.when = '';
         else if (!existing.when.split(' || ').includes(when)) existing.when = `${existing.when} || ${when}`;
@@ -705,6 +758,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       uncertain: confidence !== null && confidence < UNCERTAIN_BELOW,
       sites: [stamped],
       ...(trigger ? { trigger } : {}),
+      ...(within ? { within } : {}),
     });
     if (trigger && to.kind === 'trigger' && !to.trigger) to.trigger = trigger;
   };
@@ -758,7 +812,7 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
     // Breadth-first through the plumbing until the next steps.
     const visited = new Set<string>([step.root.id]);
-    let frontier: Fold[] = [{ node: step.root, chain: [], whens: [] }];
+    let frontier: Fold[] = [{ node: step.root, chain: [], whens: [], first: null }];
     for (let hop = 0; hop <= MAX_FOLD_DEPTH && frontier.length > 0; hop++) {
       const next: Fold[] = [];
       const ids = frontier.map((f) => f.node.id);
@@ -1029,7 +1083,12 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             const written = await callAt(fold.node, at);
             site = written && written.callee ? { ...a.site, text: written.callee, args: written.args } : await withArgs(a.site, fold.node, at);
           } else if (a.linkKind === 'bridge' || a.linkKind === 'store' || a.linkKind === 'calls') site = await withArgs(a.site, fold.node, at);
-          link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger);
+          // Where this step is first reached from: the hop out of the root
+          // this fold descends from, else this site — its position orders the row.
+          const isCallHop = a.e.kind === 'calls' || a.e.kind === 'instantiates' || a.e.kind === 'navigates';
+          const hop = fold.first ?? (isCallHop ? await hopAt(fold.node, at, a.target.name) : pointHop(fold.node, at));
+          if (!to.first) to.first = hop;
+          link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
             queue.push(to);
@@ -1064,7 +1123,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
             if (known.id !== step.id) {
               const at = { line: e.line, column: e.column };
               const when = await whenAt(fold.node, at);
-              link(step, known, 'calls', fold.chain, [...fold.whens, when], await withArgs(a.site, fold.node, at), e, a.trigger);
+              const hop = fold.first ?? (await hopAt(fold.node, at, target.name));
+              link(step, known, 'calls', fold.chain, [...fold.whens, when], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
             }
             continue;
           }
@@ -1085,7 +1145,12 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           }
           visited.add(target.id);
           const when = await whenAt(fold.node, { line: e.line, column: e.column });
-          next.push({ node: target, chain: [...fold.chain, target], whens: [...fold.whens, when] });
+          const first =
+            fold.first ??
+            (e.kind === 'calls' || e.kind === 'instantiates'
+              ? await hopAt(fold.node, { line: e.line, column: e.column }, target.name)
+              : pointHop(fold.node, { line: e.line, column: e.column }));
+          next.push({ node: target, chain: [...fold.chain, target], whens: [...fold.whens, when], first });
         }
       }
       frontier = next;
@@ -1122,12 +1187,25 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     step.label = label.length > MAX_EFFECT_LABEL ? `${label.slice(0, MAX_EFFECT_LABEL - 2)}…)` : label;
   }
 
-  const ordered = [...steps.values()].sort((a, b) => a.depth - b.depth || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+  // A row reads in the code's order: by the position of the hop that first
+  // reached each step, a hop written inside another site's arguments before
+  // that site — `generateToken(…)` in `res.json({ token: generateToken(…) })`
+  // signs the token before the 200 is sent, so it comes first.
+  const byDepth = new Map<number, StepRecord[]>();
+  for (const s of steps.values()) byDepth.set(s.depth, [...(byDepth.get(s.depth) ?? []), s]);
+  for (const row of byDepth.values()) {
+    row.sort((a, b) => hopCompare(a.first, b.first) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+    row.forEach((s, i) => {
+      s.order = i;
+    });
+  }
+
+  const ordered = [...steps.values()].sort((a, b) => a.depth - b.depth || (a.order ?? 0) - (b.order ?? 0) || a.id.localeCompare(b.id));
   return {
     anchor: toNodeRef(anchor),
     ambiguous,
     project,
-    steps: ordered.map(({ root: _root, ...step }) => step),
+    steps: ordered.map(({ root: _root, first: _first, ...step }) => step),
     links: [...links.values()].sort((a, b) => a.id.localeCompare(b.id)),
     depth: depthCap,
     limit,
@@ -1279,6 +1357,22 @@ function hopLabel(meta: Record<string, unknown>, synthesized: boolean): string {
   if (meta.bridge === 'react-native') parts.push(`React Native bridge${typeof meta.module === 'string' ? ` · ${meta.module}` : ''}`);
   if (typeof meta.registeredAt === 'string') parts.push(`registered at ${meta.registeredAt}`);
   return parts.join(' · ');
+}
+
+/** Source order of two hops: a hop written inside the other's call runs first; else by position; another file sorts after. */
+function hopCompare(a: HopSite | undefined, b: HopSite | undefined): number {
+  if (!a || !b) return a ? -1 : b ? 1 : 0;
+  if (a.file !== b.file) return a.file.localeCompare(b.file);
+  if (hopInside(a, b)) return -1;
+  if (hopInside(b, a)) return 1;
+  return a.line - b.line || a.column - b.column;
+}
+
+/** `x` starts strictly after `y` starts and before `y` ends. */
+function hopInside(x: HopSite, y: HopSite): boolean {
+  const afterStart = x.line > y.line || (x.line === y.line && x.column > y.column);
+  const beforeEnd = x.line < y.end.line || (x.line === y.end.line && x.column < y.end.column);
+  return afterStart && beforeEnd;
 }
 
 function posix(p: string): string {

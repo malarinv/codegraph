@@ -137,3 +137,16 @@ describe('words per project', () => {
     expect(triggerWords({ kind: 'load', name: 'GET', of: '/blog/[slug]', in: 'page.tsx' })).toBe('page load · /blog/[slug]');
   });
 });
+
+describe('row order', () => {
+  it('lays a row out in the order the server gave, not by id', () => {
+    const anchor = step('/login', 'screen', 0, { anchor: true });
+    const a = step('User.findOne', 'effect', 1, { order: 0 });
+    const b = step('jwt.sign', 'effect', 1, { order: 1 });
+    const c = step('200', 'effect', 1, { order: 2 });
+    const d = step('401', 'effect', 1, { order: 3 });
+    const model = buildStepsModel(payload([anchor, d, c, b, a], [link(anchor, a), link(anchor, b), link(anchor, c), link(anchor, d)]));
+    const row = model.layout.nodes.filter((n) => n.id !== anchor.id).sort((x, y) => x.x - y.x).map((n) => n.id);
+    expect(row).toEqual([a.id, b.id, c.id, d.id]);
+  });
+});

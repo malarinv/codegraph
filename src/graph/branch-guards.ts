@@ -435,6 +435,30 @@ export interface CallSiteText {
   argList: string[];
   /** A status code written as an object property in the arguments (`{ status: 201 }`), which the abbreviation to keys would hide. */
   status?: number;
+  /** Where the call starts and ends in the source (1-based lines) — the span another site may be written inside. */
+  span?: { start: { line: number; column: number }; end: { line: number; column: number } };
+  /**
+   * The call this one is written inside the arguments of — `res.json` for the
+   * `generateToken(…)` in `res.json({ token: generateToken(…) })` — normalised
+   * like `callee`. Absent at the top of a statement, and never reaching out of
+   * the function or block the call is in.
+   */
+  within?: string;
+}
+
+/** A node the climb to an enclosing call must not cross: the call is then a statement of its own inside a callback. */
+const CALL_BOUNDARY = /function|lambda|closure|block|statement|body|declaration/;
+
+/** The nearest call whose ARGUMENTS contain `call`, as its callee chain; null when there is none this side of a function or block. */
+function enclosingCallText(call: SyntaxNode): string | null {
+  for (let node = call.parent, up = 0; node && up < 12; node = node.parent, up++) {
+    if (CALL_BOUNDARY.test(node.type)) return null;
+    if (!CALL_TYPES.has(node.type)) continue;
+    const container = argumentsOf(node);
+    if (container && container.startIndex <= call.startIndex && call.endIndex <= container.endIndex) return calleeChainText(node, container);
+    return null;
+  }
+  return null;
 }
 
 const STATUS_KEY = /^(?:status|statusCode|status_code|code)$/;
@@ -502,7 +526,19 @@ export function callSiteInTree(root: SyntaxNode, source: string, line: number, c
   }
   const text = parts.join(', ');
   if (status === null) status = statusSetBefore(call, callee);
-  return { callee, args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text, argList: parts, ...(status !== null ? { status } : {}) };
+  const span = {
+    start: { line: call.startPosition.row + 1, column: call.startPosition.column },
+    end: { line: call.endPosition.row + 1, column: call.endPosition.column },
+  };
+  const within = enclosingCallText(call);
+  return {
+    callee,
+    args: text.length > MAX_ARGS_TEXT ? `${text.slice(0, MAX_ARGS_TEXT - 1)}…` : text,
+    argList: parts,
+    span,
+    ...(within ? { within } : {}),
+    ...(status !== null ? { status } : {}),
+  };
 }
 
 const BODY_REPLY = /^(?:res|response|reply|rep|ctx|c|context)\.(?:json|jsonp|send|render|sendFile|download|end|text|html|body)$/;

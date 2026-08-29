@@ -260,6 +260,8 @@ export function buildStepsModel(payload: WireStepsPayload): StepsModel {
         return { label: info?.label ?? m.id, meta: info?.sub ?? '' };
       },
       layering,
+      // The server ordered each row the way the code reads; keep it.
+      order: (id) => nodes.get(id)?.step.order ?? Number.MAX_SAFE_INTEGER,
       layerGap: SCREEN_LAYER_GAP,
       portPitch: PORT_PITCH,
       ports: 'directional',

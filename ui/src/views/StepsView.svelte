@@ -568,6 +568,7 @@
             <div class="tiprow">
               {#if link.trigger}<span class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></span>{/if}
               {#if link.via.length > 0}<span class="via">via {stepViaText(link)}</span>{/if}
+              {#if link.within}<span class="dim">inside {link.within}(…)</span>{/if}
               {#if link.sites.length > 1}<span class="dim">{link.sites.length} ways</span>{/if}
               <span class="when">{@render words(conditionTokens(link.when))}</span>
               {#if link.label}<span class="dim">{link.label}</span>{/if}
@@ -666,6 +667,7 @@
             <button class="peer mono" onclick={() => (selected = link.from)}>{nameOf(link.from)}</button>
             {#if link.trigger}<div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></div>{/if}
             {#if link.via.length > 0}<div class="via">via {stepViaText(link)}</div>{/if}
+            {#if link.within}<div class="via dim">inside {link.within}(…)</div>{/if}
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}
@@ -712,6 +714,7 @@
             <button class="peer mono" onclick={() => (selected = link.to)}>{nameOf(link.to)}</button>
             {#if link.trigger}<div class="fires"><b class="kw">FIRES FROM</b> {triggerWords(link.trigger)} <span class="dim">in {link.trigger.in}</span></div>{/if}
             {#if link.via.length > 0}<div class="via">via {stepViaText(link)}</div>{/if}
+            {#if link.within}<div class="via dim">inside {link.within}(…)</div>{/if}
             {#if sc.common.length > 0}<div class="when">{@render words(commonTokens(sc.common))}</div>{/if}
             {#if link.label}<div class="via dim">{link.label}</div>{/if}
             {#if sc.rows.length > 1}<div class="ways dim">{sc.rows.length} ways</div>{/if}

@@ -240,6 +240,13 @@ export interface MapLayoutOptions {
    */
   layering?: (ids: string[], links: ReadonlyArray<{ source: string; target: string }>) => Map<string, number>;
   /**
+   * A row order the view already knows — the Steps view's rows read in the
+   * code's order. It is the initial order, and the sweeps then move a box
+   * only to sit under its parents (a barycenter over parents alone, not
+   * children), tie-broken by this order rather than by id.
+   */
+  order?: (id: string) => number;
+  /**
    * Vertical room between two layers; {@link LAYER_GAP} unless a view says
    * otherwise. The Screens view widens it because its edges carry labels, and
    * a label needs a lane the Map's hairlines never did.
@@ -328,13 +335,16 @@ export function buildMapLayout(
   const layerCount = Math.max(1, ...[...layer.values()].map((v) => v + 1));
   const rows: string[][] = Array.from({ length: layerCount }, () => []);
   for (const module of modules) rows[layer.get(module.id) ?? 0]!.push(module.id);
-  for (const row of rows) row.sort();
+  const given = options.order;
+  for (const row of rows) row.sort(given ? (a, b) => given(a) - given(b) || a.localeCompare(b) : undefined);
 
   // --- barycenter ordering, three sweeps -----------------------------------
+  // With an order given, a box's barycenter is over its parents alone, so
+  // siblings under one parent keep the order they came in.
   const neighbours = new Map<string, string[]>(modules.map((m) => [m.id, []]));
   for (const link of acyclic) {
-    neighbours.get(link.source)?.push(link.target);
     neighbours.get(link.target)?.push(link.source);
+    if (!given) neighbours.get(link.source)?.push(link.target);
   }
   const position = new Map<string, number>();
   for (const row of rows) row.forEach((id, i) => position.set(id, i));
@@ -350,7 +360,7 @@ export function buildMapLayout(
         const bb = bary.get(b) ?? 0;
         if (ba !== bb && Number.isFinite(ba - bb)) return ba - bb;
         if (ba !== bb) return ba < bb ? -1 : 1;
-        return (position.get(a) ?? 0) - (position.get(b) ?? 0) || a.localeCompare(b);
+        return (position.get(a) ?? 0) - (position.get(b) ?? 0) || (given ? given(a) - given(b) : 0) || a.localeCompare(b);
       });
       row.forEach((id, i) => position.set(id, i));
     }

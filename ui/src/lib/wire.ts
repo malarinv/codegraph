@@ -760,6 +760,8 @@ export interface WireStep {
   events?: string[];
   /** For a handler: what fires it. */
   trigger?: WireStepTrigger;
+  /** The step's place in its row, in the code's order (a hop written inside another site's arguments before that site). */
+  order?: number;
   /**
    * For a screen or an endpoint — also a `bridge` step that is an endpoint
    * reached across a tier: its path and the symbol that serves it.
@@ -795,6 +797,8 @@ export interface WireStepLink {
   when: string;
   /** How the last hop was established when it was not a plain call. */
   label: string;
+  /** The call the first hop is written inside the arguments of — `res.json` for a token signed while building the reply. */
+  within?: string;
   synthesized: boolean;
   uncertain: boolean;
   sites: WireStepSite[];

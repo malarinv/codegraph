@@ -49,7 +49,13 @@ beforeAll(async () => {
       '  if (!user.verified) {\n' +
       '    await sendVerification(user)\n' +
       '  }\n' +
-      '  res.status(201).json(user)\n' +
+      '  res.status(201).json({\n' +
+      '    id: user.id,\n' +
+      '    token: signToken(user.id),\n' +
+      '  })\n' +
+      '}\n' +
+      'function signToken(id) {\n' +
+      "  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '1d' })\n" +
       '}\n' +
       'export async function getUser(id: string) {\n' +
       '  const user = await prisma.user.findUnique({ where: { id } })\n' +
@@ -312,7 +318,24 @@ describe('Express', () => {
     expect(res.label).toBe('201');
     expect(res.effect?.statuses).toEqual([201]);
     const resLink = p.links.find((l) => l.to === res.id)!;
-    expect(resLink.sites[0]).toMatchObject({ text: 'res.status(201).json', args: 'user', status: 201 });
+    expect(resLink.sites[0]).toMatchObject({ text: 'res.status(201).json', args: '{ id, token }', status: 201 });
+    // The token is signed while the reply is built: the link says so, and
+    // the row reads in the code's order — the write, the job, the mail, the
+    // signing (inside the reply's arguments), then the reply.
+    const auth = effect(p, 'auth')!;
+    expect(auth.label).toBe('jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn })');
+    const authLink = p.links.find((l) => l.to === auth.id)!;
+    expect(authLink.via.map((v) => v.name)).toEqual(['signToken']);
+    expect(authLink.within).toBe('res.status(201).json');
+    expect(resLink.within).toBeUndefined();
+    const row = p.steps.filter((s) => s.depth === 1).sort((a, b) => a.order! - b.order!).map((s) => s.label);
+    expect(row).toEqual([
+      'prisma.user.create({ data })',
+      "emailQueue.add('welcome', { userId })",
+      'transporter.sendMail({ to })',
+      'jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn })',
+      '201',
+    ]);
   });
 
   it('walks an inline handler as the route itself, into the service’s read and its 404', async () => {

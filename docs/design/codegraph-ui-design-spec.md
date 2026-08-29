@@ -551,7 +551,12 @@ going on into the handler; a job, an event or a message arriving draws as `⇠ w
 within its lines, so the landing walks on into what the handler does. Test suites and generated files are never sources: forty supertest
 calls would make a route a hub. A mounted Express router (`app.use('/api', routes)`, nested) names its routes by the path a request takes.
 
-Rows = distance from the anchor as the server counted it (first discovery), anchor on top with the entry mark. Boxes:
+Rows = distance from the anchor as the server counted it (first discovery), anchor on top with the entry mark; **within a row,
+the code's order** — each step carries the position of the hop that first reached it (`WireStep.order`), a hop written inside
+another site's arguments counting before that site, so `generateToken(…)` in `res.json({ token: generateToken(…) })` sits left
+of the `200` it is part of; the layout (`map-model.ts` `order`) takes that as the row's initial order and its sweeps move a box
+only to sit under its parents. A link whose first hop is written inside another call's arguments says so (`WireStepLink.within`,
+`inside res.json(…)` in the panel and the tooltip) — the nesting is stated, never drawn as an edge out of an effect. Boxes:
 the §3.12 screen box for a screen or a handler; **bridge / event** add a 3px `--accent` left rule (the language
 changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits on `--paper-2`; **effect** is dashed
 `--ink-3` (a place the graph cannot follow into), labelled by the API (`client.post`) over `category · caller`. Edges,
