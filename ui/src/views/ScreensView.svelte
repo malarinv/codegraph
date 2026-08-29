@@ -24,7 +24,7 @@
   import KindGlyph from '../components/KindGlyph.svelte';
   import { fetchScreens, type WireScreensPayload, type WireScreenLink } from '../lib/api';
   import { live } from '../lib/live.svelte';
-  import { symbolHref, fileHref, stepsHref } from '../lib/navigation';
+  import { symbolHref, fileHref, navigate, stepsHref } from '../lib/navigation';
   import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
   import { commonTokens, conditionTokens, restTokens, scenarios, whenWords, type WordToken } from '../lib/conditions';
   import {
@@ -71,6 +71,9 @@
   });
 
   const FIT = { fitViewOptions: { padding: 0.1, maxZoom: 1, minZoom: 0.4 } };
+  /** Two clicks on one box closer than this are a double-click. */
+  const DOUBLE_CLICK_MS = 400;
+  let lastClick: { id: string; at: number } | null = null;
   const nodeTypes = { screen: ScreenNode };
   const edgeTypes = { screen: ScreenEdge };
 
@@ -133,10 +136,22 @@
         selected: selected === node.id,
         dimmed: neighbours !== null && !neighbours.has(node.id),
         onSelect: (id: string) => {
+          // Two clicks on the same box within a beat are a double-click: what
+          // happens from here. Read here rather than off the DOM's `dblclick`,
+          // which the flow canvas does not always pass on.
+          const now = performance.now();
+          if (lastClick !== null && lastClick.id === id && now - lastClick.at < DOUBLE_CLICK_MS) {
+            lastClick = null;
+            navigate(stepsHref({ anchor: id }));
+            return;
+          }
+          lastClick = { id, at: now };
           selected = selected === id ? null : id;
           hovered = null;
           panelHot = null;
         },
+        // Double-click: what happens from here — the screen's (or an origin's) Steps picture.
+        onOpen: (id: string) => navigate(stepsHref({ anchor: id })),
       },
     }));
   });

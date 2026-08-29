@@ -118,6 +118,17 @@
       : { padding: 0.1, maxZoom: 1, minZoom: 0.4 }
   );
   const nodeTypes = { step: StepNode };
+
+  /** Two clicks on one box closer than this are a double-click. */
+  const DOUBLE_CLICK_MS = 400;
+  let lastClick: { id: string; at: number } | null = null;
+  /** Start the picture at a step — the panel's *Start here →*. False for a step with no symbol, or the anchor. */
+  function startHere(id: string): boolean {
+    const step = model?.nodes.get(id)?.step;
+    if (!step || !step.node || step.anchor) return false;
+    navigate(stepsHref({ anchor: step.node.id }));
+    return true;
+  }
   const edgeTypes = { screen: ScreenEdge };
   const DEPTHS = [4, 6, 8, 10, 12];
 
@@ -208,10 +219,23 @@
         selected: selected === node.id,
         dimmed: neighbours !== null && !neighbours.has(node.id),
         onSelect: (id: string) => {
+          // Two clicks on the same box within a beat are a double-click:
+          // the picture starts there. Read here rather than off the DOM's
+          // `dblclick`, which the flow canvas does not always pass on.
+          const now = performance.now();
+          if (lastClick !== null && lastClick.id === id && now - lastClick.at < DOUBLE_CLICK_MS) {
+            lastClick = null;
+            if (startHere(id)) return;
+          }
+          lastClick = { id, at: now };
           selected = selected === id ? null : id;
           hovered = null;
           panelHot = null;
         },
+        // Double-click: the picture starts here — an endpoint or another
+        // screen drawn as a boundary opens as its own chapter. An effect has
+        // no symbol to start from.
+        ...(model.nodes.get(node.id)?.step.node && !model.nodes.get(node.id)?.step.anchor ? { onStart: startHere } : {}),
       },
     }));
   });
@@ -593,9 +617,9 @@
           <button class="clear" onclick={() => (selected = null)}>clear</button>
         </div>
         {#if selectedInfo.step.cut === 'screen'}
-          <p class="dim note">Another {kindWord('screen', payload.project, selectedInfo.step)} — a chapter of its own. Start here to see what happens on it, or continue through {kindWords('screen', payload.project)[1]} from the summary.</p>
+          <p class="dim note">Another {kindWord('screen', payload.project, selectedInfo.step)} — a chapter of its own. Start here (or double-click its box) to see what happens on it, or continue through {kindWords('screen', payload.project)[1]} from the summary.</p>
         {:else if selectedInfo.step.cut === 'component'}
-          <p class="dim note">The event lands in a component of another screen — a picture of its own. Start here to see it, or continue through screens from the summary.</p>
+          <p class="dim note">The event lands in a component of another screen — a picture of its own. Start here (or double-click its box) to see it, or continue through screens from the summary.</p>
         {:else if selectedInfo.step.cut !== null}
           <p class="dim note">
             The walk was cut at this step ({selectedInfo.step.cut === 'depth'
@@ -666,7 +690,11 @@
         <h4>Leads to <span class="dim">{lists.leadsTo.length}</span></h4>
         {#if lists.leadsTo.length === 0}
           <p class="dim">
-            {selectedInfo.step.kind === 'effect' ? 'Outside the index: the graph cannot follow it further.' : 'Nothing the walk follows leaves this step.'}
+            {selectedInfo.step.kind === 'effect'
+              ? 'Outside the index: the graph cannot follow it further.'
+              : selectedInfo.step.cut === 'screen' || selectedInfo.step.cut === 'component'
+                ? 'Not entered — a boundary. Start here for its own picture, or continue through from the summary.'
+                : 'Nothing the walk follows leaves this step.'}
           </p>
         {/if}
         {#each lists.leadsTo as link (link.id)}

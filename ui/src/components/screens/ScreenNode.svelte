@@ -25,6 +25,8 @@
       selected: boolean;
       dimmed: boolean;
       onSelect: (id: string) => void;
+      /** Open what happens from this screen (the Steps picture) — a double-click. */
+      onOpen?: (id: string) => void;
     }
   );
   const layout = $derived(node.layout);
@@ -54,12 +56,13 @@
   class:unreached={info.unreached}
   style={`width:${layout.width}px;height:${layout.height}px`}
   onclick={() => node.onSelect(info.id)}
+  ondblclick={() => node.onOpen?.(info.id)}
   aria-pressed={node.selected}
-  title={info.origin
+  title={(info.origin
     ? `${info.label} — navigates, but no screen reaches it within the walk. In ${info.sub}.`
     : `${info.label} — rendered by ${info.sub}${info.entry ? '. The entry screen.' : ''}${
         info.unreached ? '. No transition in the graph reaches it from the entry.' : ''
-      }`}
+      }`) + (node.onOpen ? ' Double-click for what happens here.' : '')}
 >
   <span class="name">{#if info.entry}<span class="mark" aria-hidden="true">●</span>{/if}{info.label}</span>
   <span class="sub">{info.sub}</span>

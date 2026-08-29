@@ -553,7 +553,9 @@ the §3.12 screen box for a screen or a handler; **bridge / event** add a 3px `-
 changes under the code) and lead with `⇢` / `⇠ <event name>`; **store** sits on `--paper-2`; **effect** is dashed
 `--ink-3` (a place the graph cannot follow into), labelled by the API (`client.post`) over `category · caller`. Edges,
 pills, tooltip and the panel's hover contract are §3.12's verbatim; the panel adds *Start here →* (re-anchor) on any
-step with a symbol, *Open as a flow →* on any link whose ends are both symbols (`#/flow?from=&to=`), a depth `<select>`
+step with a symbol — and a **double-click on a step's box does the same**, so an endpoint or another screen reached as a
+boundary opens as its own chapter without a trip to the panel (a double-click on a Screens-tab box opens that screen's
+Steps picture likewise) — *Open as a flow →* on any link whose ends are both symbols (`#/flow?from=&to=`), a depth `<select>`
 (4–12) that rewrites the URL, per-kind counts, and the `truncated` notes. The bare tab (`#/steps`) is a chooser: the
 project's screens by connectivity, else its endpoints by router file, or a hint to search. A picture of at most 24 boxes
 is fitted to the right of the key (a per-side `fitView` padding) so its second row never sits under the legend; a larger

@@ -12,7 +12,9 @@
    * ellipsis, and its tooltip says which cap.
    *
    * Hidden handles along the top and bottom, one per port the layout decided
-   * (`directional` ports), exactly as the screen box.
+   * (`directional` ports), exactly as the screen box. A click selects the step;
+   * a double-click starts the picture there (the panel's *Start here →*) — an
+   * endpoint or another screen reached as a boundary opens as its own chapter.
    */
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
   import type { MapNodeLayout } from '../../lib/map-model';
@@ -28,6 +30,8 @@
       selected: boolean;
       dimmed: boolean;
       onSelect: (id: string) => void;
+      /** Re-anchor the picture on this step — a double-click; absent for a step with no symbol. */
+      onStart?: (id: string) => void;
     }
   );
   const layout = $derived(node.layout);
@@ -75,8 +79,9 @@
   class:anchor={step.anchor}
   style={`width:${layout.width}px;height:${layout.height}px`}
   onclick={() => node.onSelect(info.id)}
+  ondblclick={() => node.onStart?.(info.id)}
   aria-pressed={node.selected}
-  title={`${info.label} — ${step.anchor ? 'where this picture starts; ' : ''}${kindWord(step.kind, node.project, step)}. ${info.sub}.${cutNote}`}
+  title={`${info.label} — ${step.anchor ? 'where this picture starts; ' : ''}${kindWord(step.kind, node.project, step)}. ${info.sub}.${cutNote}${node.onStart && !step.anchor ? ' Double-click to start here.' : ''}`}
 >
   <span class="name"
     >{#if step.anchor}<span class="mark" aria-hidden="true">●</span>{/if}{info.label}{#if step.cut !== null}<span
