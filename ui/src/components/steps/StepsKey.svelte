@@ -1,0 +1,216 @@
+<script lang="ts">
+  /**
+   * The Steps view's key.
+   *
+   * The same rows for both readings, worded for the one on screen: the kinds of
+   * box are the same either way, and only the last rows differ — the canvas
+   * explains its lines and pills, the rail its forks and terminals. On the
+   * canvas it floats over the picture, bottom left; on the rail it is the last
+   * thing in the document, because a rail scrolls and an overlay would sit on
+   * top of the code it is explaining.
+   */
+  import { kindWord, type ProjectKind } from '../../lib/steps-model';
+
+  interface Props {
+    project: ProjectKind;
+    /** The reading on screen: the rail's rows, or the canvas's. */
+    order: boolean;
+    /** In the flow of a scrolling rail rather than floating over a canvas. */
+    flow: boolean;
+    open: boolean;
+    onToggle: (open: boolean) => void;
+  }
+  let { project, order, flow, open, onToggle }: Props = $props();
+</script>
+
+<div class="legend" class:open class:flow>
+  <button class="legend-h" onclick={() => onToggle(!open)} aria-expanded={open}>
+    Key <span class="dim">{open ? '▾' : '▸'}</span>
+  </button>
+  {#if open}
+    <div class="legend-body">
+      <div class="lrow">
+        <span class="k-box k-anchor mono"><span class="mark">●</span>start</span>
+        <span>{order ? 'Where the picture starts; below it, what it does in the code’s own order' : 'Where the picture starts; each row down is one more step away'}</span>
+      </div>
+      {#if project === 'api'}
+        <div class="lrow">
+          <span class="k-box mono">POST /x</span>
+          <span>An endpoint — its verb and path — or a handler: a function a request, a job, an event or a schedule fires; its line says which</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-cross mono">⇢ fn</span>
+          <span>The code crosses a tier: a call into another service or a job put on a queue (⇢), or a job, an event, a message arriving (⇠)</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-store mono">set</span>
+          <span>A data call — a function in a store or state file</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-effect mono">db</span>
+          <span>A call that leaves the index: the database, the response, a queue, email, payments, a cache, auth, the network</span>
+        </div>
+      {:else if project === 'web'}
+        <div class="lrow">
+          <span class="k-box mono">/path</span>
+          <span>A page, an endpoint, or a handler — a function an event, a request or a page load fires; its line says which</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-cross mono">⇢ fn</span>
+          <span>The code crosses to the server (⇢ a request, a server action) or comes back from it (⇠ a push, a stream)</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-store mono">set</span>
+          <span>A store action — a function in a store file</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-effect mono">api</span>
+          <span>A call that leaves the index: the network, the database, the response, storage, a queue, email</span>
+        </div>
+      {:else}
+        <div class="lrow">
+          <span class="k-box mono">/path</span>
+          <span>A screen, or a handler — a function fired from a tap, an option, a listener; its line says the event</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-cross mono">⇢ fn</span>
+          <span>The code crosses into native (⇢ a bridge call) or comes back from it (⇠ an event)</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-store mono">set</span>
+          <span>A store action — a function in a store file</span>
+        </div>
+        <div class="lrow">
+          <span class="k-box k-effect mono">api</span>
+          <span>A call that leaves the index: the network, storage, the device, telemetry</span>
+        </div>
+      {/if}
+      {#if order}
+        <div class="lrow">
+          <span class="k-label mono">WHEN x</span>
+          <span>A fork — an <span class="mono">if</span>, a <span class="mono">switch</span>, a <span class="mono">try</span> or an early exit — with its arms side by side under the condition</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label">answers here</span>
+          <span>The arm stops there: it answers the request, returns or throws, and nothing below it runs</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label">via x</span>
+          <span>A helper drawn where it is called; <span class="mono">later</span> runs after this returns, <span class="mono">together</span> starts at once, <span class="mono">for each</span> repeats</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label mono">name …</span>
+          <span>Not entered: another {kindWord('screen', project)} (a chapter of its own), or a cap the walk hit — start there to see on</span>
+        </div>
+      {:else}
+        <div class="lrow">
+          <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line" /></svg>
+          <span>Leads to — the plumbing between the two is folded into the line</span>
+        </div>
+        <div class="lrow">
+          <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-synth" /></svg>
+          <span>Established by a synthesized hop (an event channel, a callback, a helper's return value)</span>
+        </div>
+        <div class="lrow">
+          <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-back" /></svg>
+          <span>Goes back up the picture — leaves the top of its box, arrives at the bottom of the other</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label mono">→ …x</span>
+          <span>The last condition checked before the step, beside the box at the other end of the selected step's line; ← when it arrives there. None = always</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label mono">name …</span>
+          <span>Not entered: another screen (a chapter of its own), or a cap the walk hit — start there to see on</span>
+        </div>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<style>
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  max-width: 400px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.legend-h {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 5px 10px;
+  text-align: left;
+  color: var(--ink);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+.legend-body {
+  padding: 2px 10px 8px;
+  border-top: 1px solid var(--rule-soft);
+}
+.lrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+.lrow > :first-child {
+  flex: 0 0 44px;
+  display: inline-flex;
+  justify-content: center;
+}
+.k-line {
+  stroke: var(--ink);
+  stroke-opacity: 0.6;
+  stroke-width: 1.5;
+  fill: none;
+}
+.k-line.k-synth {
+  stroke-dasharray: 5 3;
+}
+.k-line.k-back {
+  stroke: var(--accent);
+  stroke-opacity: 0.8;
+  stroke-dasharray: 4 3;
+}
+.k-label {
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.k-box {
+  box-sizing: border-box;
+  padding: 1px 5px;
+  border: 1px solid var(--ink);
+  font-size: 10.5px;
+  color: var(--ink);
+  line-height: 14px;
+}
+.k-box.k-cross {
+  border-left: 3px solid var(--accent);
+}
+.k-box.k-store {
+  background: var(--paper-2);
+}
+.k-box.k-effect {
+  border-style: dashed;
+  border-color: var(--ink-3);
+}
+.k-anchor .mark {
+  font-size: 8px;
+  margin-right: 3px;
+  vertical-align: 1px;
+}
+  /* On the rail the key is the document's last block, not an overlay. */
+  .legend.flow {
+    position: static;
+    margin: 28px 0 0;
+    max-width: 520px;
+  }
+</style>

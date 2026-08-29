@@ -814,6 +814,8 @@ export type WireArmEnd = 'reply' | 'return' | 'throw' | 'exit';
 export interface WireArm {
   /** This arm's own condition, in the words the rest of the view uses. */
   when: string;
+  /** The arm taken when the fork's condition does NOT hold — the `else` side. */
+  not?: true;
   /** How it leaves: it answers the request, returns, or throws. Null = it runs on. */
   ends: WireArmEnd | null;
   body: WireBlock;
@@ -836,7 +838,7 @@ export type WireItem =
    * after this function returns (`later`), or calls started together
    * (`together`).
    */
-  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; label: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
+  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; by?: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
   /** Where the reading stopped: a helper that calls itself, or a cap the walk hit. */
   | { kind: 'cut'; why: 'folded' | 'depth' };
 

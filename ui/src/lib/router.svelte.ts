@@ -12,7 +12,7 @@
  *   #/flow                 flow strip       (?from=&to= | ?symbols= | ?t=<trail>)
  *   #/entry                entry points     (where a flow starts)
  *   #/screens              screens          (the app's screens and transitions)
- *   #/steps                steps            (?anchor=<id> | ?symbol=<name>: what happens from there)
+ *   #/steps                steps            (?anchor=<id> | ?symbol=<name>: what happens from there; ?view=order|tree)
  *   #/dead                 dead code        (?exported=1 widens the claim)
  *
  * Node ids are opaque engine strings shaped `<kind>:<hash>` or
@@ -87,6 +87,8 @@ export type Route =
       symbol: string | null;
       depth: number | null;
       through: boolean;
+      /** Which reading the URL asked for; null takes the answer's own default. */
+      reading: 'order' | 'tree' | null;
     }
   | {
       view: 'dead';
@@ -156,12 +158,14 @@ export function parseHash(hash: string): RouterLocation {
     // The anchor travels in the URL, so "what happens on the review screen"
     // is a link that reopens as the same picture.
     const depth = Number.parseInt(params.get('depth') ?? '', 10);
+    const reading = params.get('view');
     route = {
       view: 'steps',
       anchor: params.get('anchor'),
       symbol: params.get('symbol'),
       depth: Number.isFinite(depth) && depth >= 1 && depth <= 14 ? depth : null,
       through: params.get('through') === '1',
+      reading: reading === 'order' || reading === 'tree' ? reading : null,
     };
   } else if (head === 'dead' && rest.length === 0) {
     // The widening travels in the URL like the map's shape does: a link to

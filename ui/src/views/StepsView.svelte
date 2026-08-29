@@ -17,6 +17,8 @@
   import { SvelteFlow, Controls, type Node, type Edge, type Viewport } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import StepNode from '../components/steps/StepNode.svelte';
+  import StepsRail from '../components/steps/StepsRail.svelte';
+  import StepsKey from '../components/steps/StepsKey.svelte';
   import ScreenEdge from '../components/screens/ScreenEdge.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
   import {
@@ -44,6 +46,7 @@
     triggerWords,
     type StepsModel,
   } from '../lib/steps-model';
+  import { buildRailModel } from '../lib/program-model';
 
   interface Props {
     anchor: string | null;
@@ -51,8 +54,14 @@
     depth: number | null;
     /** Enter the screens the walk reaches, instead of drawing them as boundaries. */
     through: boolean;
+    /**
+     * Which reading the URL asked for — the code's `order` or the `tree` of
+     * what the anchor sets in motion. Null takes the answer's own default: the
+     * order for a handler or an endpoint, the tree for a screen.
+     */
+    reading: 'order' | 'tree' | null;
   }
-  let { anchor, symbol, depth, through }: Props = $props();
+  let { anchor, symbol, depth, through, reading }: Props = $props();
 
   let payload = $state<WireStepsPayload | null>(null);
   let error = $state<string | null>(null);
@@ -185,6 +194,36 @@
 
   const model = $derived<StepsModel | null>(payload === null ? null : buildStepsModel(payload));
 
+  /**
+   * Which reading is on screen. The URL wins; otherwise the answer's own
+   * default — the code's order for a handler, an endpoint or any function, the
+   * tree for a screen, where handlers fire on events and have nothing to order.
+   */
+  const readAs = $derived<'order' | 'tree'>(reading ?? payload?.defaultView ?? 'tree');
+  const rail = $derived(payload === null || readAs !== 'order' ? [] : buildRailModel(payload));
+  /** The rail can be asked for and have nothing to show: say so rather than drawing an empty page. */
+  const railReadable = $derived(payload?.program != null);
+  /** The steps on the selected step's own lines — everything else on the rail is dimmed. */
+  const litOnRail = $derived.by(() => {
+    if (payload === null || selected === null) return null;
+    const set = new Set<string>([selected]);
+    for (const l of payload.links) {
+      if (l.from === selected) set.add(l.to);
+      if (l.to === selected) set.add(l.from);
+    }
+    return set;
+  });
+  /** A step with a symbol behind it can become the next anchor. */
+  function canStart(id: string): boolean {
+    const step = payload?.steps.find((s) => s.id === id);
+    return !!step?.node && !step.anchor;
+  }
+  function selectOnRail(id: string): void {
+    selected = selected === id ? null : id;
+    hovered = null;
+    panelHot = null;
+  }
+
   const neighbours = $derived.by(() => {
     if (model === null || selected === null) return null;
     const set = new Set<string>([selected]);
@@ -284,14 +323,16 @@
   const visibleIds = $derived(new Set(edges.map((e) => e.id)));
 
   /** The same picture with one setting changed: the anchor as the URL asked for it, the rest kept. */
-  function rewrite(changes: { depth?: number; through?: boolean }): string {
-    const opts = {
+  function rewrite(changes: { depth?: number; through?: boolean; view?: 'order' | 'tree' }): string {
+    return stepsHref({
       anchor: anchor ?? undefined,
       symbol: anchor === null ? (symbol ?? undefined) : undefined,
       depth: changes.depth ?? depth ?? undefined,
       through: changes.through ?? through,
-    };
-    return stepsHref(opts);
+      // The reading travels in the URL once it has been chosen, so a link to
+      // "the login endpoint in the code's order" reopens as that.
+      view: changes.view ?? reading ?? undefined,
+    });
   }
 
   function onEdgeHover(edge: MapEdgeLayout | null, event: MouseEvent | null): void {
@@ -308,7 +349,7 @@
   }
 
   function onStageMove(event: MouseEvent): void {
-    if (model === null || stage === null) return;
+    if (model === null || stage === null || readAs === 'order') return;
     const target = event.target as Element | null;
     if (target?.closest('.spill')) return;
     if (target?.closest('.snode, .legend, .tip, .svelte-flow__controls')) {
@@ -450,6 +491,37 @@
       </div>
     {:else if loading && payload === null}
       <div class="state"><p class="dim">Walking from the anchor…</p></div>
+    {:else if model !== null && payload !== null && readAs === 'order'}
+      {#if railReadable}
+        <StepsRail
+          anchor={model.nodes.get(payload.anchor.id) ?? [...model.nodes.values()][0]!}
+          items={rail}
+          project={payload.project}
+          {selected}
+          lit={litOnRail}
+          truncated={payload.program?.truncated ?? 0}
+          onSelect={selectOnRail}
+          onStart={(id) => startHere(id)}
+          {canStart}
+        >
+          <StepsKey
+            project={payload.project}
+            order={true}
+            flow={true}
+            open={legendOpen}
+            onToggle={(next) => (legendOpen = next)}
+          />
+        </StepsRail>
+      {:else}
+        <div class="state">
+          <h2>This has no body to read in order</h2>
+          <p>
+            Nothing the picture holds is written inside this symbol — a screen renders handlers that fire on
+            events, and they have no order between them. Read it as what it sets in motion instead.
+          </p>
+          <p><a class="pick" href={rewrite({ view: 'tree' })}>What it sets in motion →</a></p>
+        </div>
+      {/if}
     {:else if model !== null && payload !== null}
       <SvelteFlow
         {nodes}
@@ -475,91 +547,6 @@
         <Controls position="bottom-right" showLock={false} />
       </SvelteFlow>
 
-      <div class="legend" class:open={legendOpen}>
-        <button class="legend-h" onclick={() => (legendOpen = !legendOpen)} aria-expanded={legendOpen}>
-          Key <span class="dim">{legendOpen ? '▾' : '▸'}</span>
-        </button>
-        {#if legendOpen}
-          <div class="legend-body">
-            <div class="lrow">
-              <span class="k-box k-anchor mono"><span class="mark">●</span>start</span>
-              <span>Where the picture starts; each row down is one more step away</span>
-            </div>
-            {#if payload.project === 'api'}
-              <div class="lrow">
-                <span class="k-box mono">POST /x</span>
-                <span>An endpoint — its verb and path — or a handler: a function a request, a job, an event or a schedule fires; its line says which</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-cross mono">⇢ fn</span>
-                <span>The code crosses a tier: a call into another service or a job put on a queue (⇢), or a job, an event, a message arriving (⇠)</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-store mono">set</span>
-                <span>A data call — a function in a store or state file</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-effect mono">db</span>
-                <span>A call that leaves the index: the database, the response, a queue, email, payments, a cache, auth, the network</span>
-              </div>
-            {:else if payload.project === 'web'}
-              <div class="lrow">
-                <span class="k-box mono">/path</span>
-                <span>A page, an endpoint, or a handler — a function an event, a request or a page load fires; its line says which</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-cross mono">⇢ fn</span>
-                <span>The code crosses to the server (⇢ a request, a server action) or comes back from it (⇠ a push, a stream)</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-store mono">set</span>
-                <span>A store action — a function in a store file</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-effect mono">api</span>
-                <span>A call that leaves the index: the network, the database, the response, storage, a queue, email</span>
-              </div>
-            {:else}
-              <div class="lrow">
-                <span class="k-box mono">/path</span>
-                <span>A screen, or a handler — a function fired from a tap, an option, a listener; its line says the event</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-cross mono">⇢ fn</span>
-                <span>The code crosses into native (⇢ a bridge call) or comes back from it (⇠ an event)</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-store mono">set</span>
-                <span>A store action — a function in a store file</span>
-              </div>
-              <div class="lrow">
-                <span class="k-box k-effect mono">api</span>
-                <span>A call that leaves the index: the network, storage, the device, telemetry</span>
-              </div>
-            {/if}
-            <div class="lrow">
-              <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line" /></svg>
-              <span>Leads to — the plumbing between the two is folded into the line</span>
-            </div>
-            <div class="lrow">
-              <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-synth" /></svg>
-              <span>Established by a synthesized hop (an event channel, a callback, a helper's return value)</span>
-            </div>
-            <div class="lrow">
-              <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-back" /></svg>
-              <span>Goes back up the picture — leaves the top of its box, arrives at the bottom of the other</span>
-            </div>
-            <div class="lrow">
-              <span class="k-label mono">→ …x</span>
-              <span>The last condition checked before the step, beside the box at the other end of the selected step's line; ← when it arrives there. None = always</span>
-            </div>
-            <div class="lrow">
-              <span class="k-label mono">name …</span>
-              <span>Not entered: another screen (a chapter of its own), or a cap the walk hit — start there to see on</span>
-            </div>
-          </div>
-        {/if}
-      </div>
 
       {#if hovered !== null && hoveredInfo !== null}
         <div class="tip" style={`left:${hovered.x}px;top:${hovered.y}px`}>
@@ -578,6 +565,10 @@
           {#if hoveredInfo.links.length > 5}<div class="dim">+{hoveredInfo.links.length - 5} more</div>{/if}
         </div>
       {/if}
+    {/if}
+
+    {#if payload !== null && model !== null && readAs === 'tree'}
+      <StepsKey project={payload.project} order={false} flow={false} open={legendOpen} onToggle={(next) => (legendOpen = next)} />
     {/if}
   </div>
 
@@ -755,6 +746,11 @@
             {/each}
           </p>
         {/if}
+        <p class="reading">
+          Read as:
+          <a class="tab" class:on={readAs === 'order'} href={rewrite({ view: 'order' })}>in order</a>
+          <a class="tab" class:on={readAs === 'tree'} href={rewrite({ view: 'tree' })}>what it sets in motion</a>
+        </p>
         <p>
           <b>{payload.steps.length}</b> steps · <b>{payload.links.length}</b> links · depth
           <select
@@ -783,12 +779,22 @@
             {/if}
           {/each}
         </p>
-        <p class="dim">
-          <span class="mark">●</span> The anchor is at the top; each row down is one more step away from
-          it. Click a step and each of its links is labelled at the far end of its line with the last
-          condition checked before it happens; hover the line, or its row here, for the whole chain and the
-          plumbing it travels through. A step is the next anchor, and any link opens as a Flow strip.
-        </p>
+        {#if readAs === 'order'}
+          <p class="dim">
+            <span class="mark">●</span> The anchor is at the top, then its body in the code's own order: the
+            calls as they are written, a fork where the code forks with its arms side by side, a helper drawn
+            where it is called, and an arm that answers, returns or throws ending there. A call written inside
+            another call's arguments comes first — the token is signed before the reply that carries it. Click
+            a step for its sites and conditions; a step is the next anchor.
+          </p>
+        {:else}
+          <p class="dim">
+            <span class="mark">●</span> The anchor is at the top; each row down is one more step away from
+            it. Click a step and each of its links is labelled at the far end of its line with the last
+            condition checked before it happens; hover the line, or its row here, for the whole chain and the
+            plumbing it travels through. A step is the next anchor, and any link opens as a Flow strip.
+          </p>
+        {/if}
         {#if payload.truncated.steps > 0 || payload.truncated.hubs > 0 || payload.truncated.chrome > 0}
           <p class="dim">
             Not drawn:
@@ -888,84 +894,6 @@
   .pick:hover {
     background: var(--press);
   }
-  .legend {
-    position: absolute;
-    left: 12px;
-    bottom: 12px;
-    z-index: 4;
-    max-width: 400px;
-    border: 1px solid var(--rule);
-    background: var(--paper);
-    font-size: 11.5px;
-    color: var(--ink-2);
-  }
-  .legend-h {
-    display: block;
-    width: 100%;
-    border: 0;
-    background: transparent;
-    padding: 5px 10px;
-    text-align: left;
-    color: var(--ink);
-    font: 600 12px var(--sans);
-    cursor: pointer;
-  }
-  .legend-body {
-    padding: 2px 10px 8px;
-    border-top: 1px solid var(--rule-soft);
-  }
-  .lrow {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 3px 0;
-  }
-  .lrow > :first-child {
-    flex: 0 0 44px;
-    display: inline-flex;
-    justify-content: center;
-  }
-  .k-line {
-    stroke: var(--ink);
-    stroke-opacity: 0.6;
-    stroke-width: 1.5;
-    fill: none;
-  }
-  .k-line.k-synth {
-    stroke-dasharray: 5 3;
-  }
-  .k-line.k-back {
-    stroke: var(--accent);
-    stroke-opacity: 0.8;
-    stroke-dasharray: 4 3;
-  }
-  .k-label {
-    font-size: 10.5px;
-    color: var(--ink-3);
-  }
-  .k-box {
-    box-sizing: border-box;
-    padding: 1px 5px;
-    border: 1px solid var(--ink);
-    font-size: 10.5px;
-    color: var(--ink);
-    line-height: 14px;
-  }
-  .k-box.k-cross {
-    border-left: 3px solid var(--accent);
-  }
-  .k-box.k-store {
-    background: var(--paper-2);
-  }
-  .k-box.k-effect {
-    border-style: dashed;
-    border-color: var(--ink-3);
-  }
-  .k-anchor .mark {
-    font-size: 8px;
-    margin-right: 3px;
-    vertical-align: 1px;
-  }
   .tip {
     position: absolute;
     z-index: 5;
@@ -1047,6 +975,27 @@
   .opt input {
     margin: 0;
     accent-color: var(--accent);
+  }
+  .reading {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--ink-3);
+  }
+  .tab {
+    color: var(--ink-2);
+    text-decoration: none;
+    border-bottom: 1px solid var(--rule-soft);
+    padding-bottom: 1px;
+  }
+  .tab:hover {
+    color: var(--ink);
+    border-bottom-color: var(--ink-3);
+  }
+  .tab.on {
+    color: var(--ink);
+    font-weight: 600;
+    border-bottom-color: var(--accent);
   }
   .depth {
     font: inherit;

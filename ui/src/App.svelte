@@ -177,7 +177,7 @@
   {:else if route.view === 'screens' || (route.view === 'home' && hasScreens)}
     <ScreensView />
   {:else if route.view === 'steps'}
-    <StepsView anchor={route.anchor} symbol={route.symbol} depth={route.depth} through={route.through} />
+    <StepsView anchor={route.anchor} symbol={route.symbol} depth={route.depth} through={route.through} reading={route.reading} />
   {:else if route.view === 'dead'}
     <DeadCodeView exported={route.exported} />
   {:else if route.view === 'unknown'}

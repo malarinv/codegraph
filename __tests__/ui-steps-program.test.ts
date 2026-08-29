@@ -58,7 +58,7 @@ function shape(block: WireBlock, indent = ''): string[] {
         out.push(...shape(arm.body, `${indent}    `));
       }
     } else if (item.kind === 'block') {
-      out.push(`${indent}${item.block} ${item.label}${item.again ? ' (again)' : ''}`);
+      out.push(`${indent}${item.block}${item.via ? ` via ${item.via.name}` : item.by ? ` ${item.by}` : ''}${item.again ? ' (again)' : ''}`);
       out.push(...shape(item.body, `${indent}  `));
     } else out.push(`${indent}cut ${item.why}`);
   }
@@ -157,8 +157,9 @@ describe('buildProgram', () => {
         at('d', [g('kind: default', { form: 'case', branch })]),
       ],
     });
+    // The head says what is being decided on; each arm its own case.
     expect(shape(p!.root)).toEqual([
-      "switch kind === 'a'",
+      'switch kind',
       "  arm kind === 'a'",
       '    a',
       "  arm kind === 'b'",
@@ -224,14 +225,14 @@ describe('buildProgram', () => {
     const p = program({
       root: [at('now'), at('afterwards', [], { trigger: { kind: 'callback', name: 'then', of: null } })],
     });
-    expect(shape(p!.root)).toEqual(['now', 'later later · then', '  afterwards']);
+    expect(shape(p!.root)).toEqual(['now', 'later then', '  afterwards']);
   });
 
   it('puts calls started together in one block', () => {
     const p = program({
       root: [at('a', [], { within: 'Promise.all' }), at('b', [], { within: 'Promise.all' }), at('c')],
     });
-    expect(shape(p!.root)).toEqual(['together together', '  a inside Promise.all', '  b inside Promise.all', 'c']);
+    expect(shape(p!.root)).toEqual(['together Promise.all', '  a inside Promise.all', '  b inside Promise.all', 'c']);
   });
 
   it('closes a fork when the code leaves it', () => {

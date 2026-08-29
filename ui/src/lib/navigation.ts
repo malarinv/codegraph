@@ -63,6 +63,12 @@ export interface StepsHrefOptions {
   depth?: number;
   /** Enter the screens the walk reaches, instead of drawing them as boundaries. */
   through?: boolean;
+  /**
+   * Which reading: the code's `order` — the anchor's body as a rail — or the
+   * `tree` of what it sets in motion. Absent takes the answer's own default:
+   * the order for a handler or an endpoint, the tree for a screen.
+   */
+  view?: 'order' | 'tree';
 }
 
 /**
@@ -155,6 +161,7 @@ export const hashNavigation: NavigationDriver = {
     else if (opts.symbol) params.set('symbol', opts.symbol);
     if (opts.depth) params.set('depth', String(opts.depth));
     if (opts.through) params.set('through', '1');
+    if (opts.view) params.set('view', opts.view);
     return `#/steps${query(params)}`;
   },
 

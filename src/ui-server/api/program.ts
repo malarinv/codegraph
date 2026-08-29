@@ -39,6 +39,8 @@ export type WireArmEnd = 'reply' | 'return' | 'throw' | 'exit';
 export interface WireArm {
   /** This arm's own condition, in the words the rest of the view uses. */
   when: string;
+  /** The arm taken when the fork's condition does NOT hold — the `else` side. */
+  not?: true;
   /** How it leaves: it answers the request, returns, or throws. Null = it runs on. */
   ends: WireArmEnd | null;
   body: WireBlock;
@@ -61,7 +63,7 @@ export type WireItem =
    * after this function returns (`later`), or calls started together
    * (`together`).
    */
-  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; label: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
+  | { kind: 'block'; block: 'inline' | 'loop' | 'later' | 'together'; by?: string; via?: WireNodeRef; within?: string; body: WireBlock; again?: true }
   /** Where the reading stopped: a helper that calls itself, or a cap the walk hit. */
   | { kind: 'cut'; why: 'folded' | 'depth' };
 
@@ -175,7 +177,10 @@ function blockFor(input: ProgramInput, fn: string, path: readonly string[], stat
     }
     for (let i = keep; i < guards.length; i++) {
       const g = guards[i]!;
-      const fork: Extract<WireItem, { kind: 'fork' }> = { kind: 'fork', on: g.text, form: formOf(g), arms: [] };
+      // The decision as a reader says it, not as the guard stores it: a
+      // disjunction keeps the parentheses that stop `a || b` from reading as
+      // two ways of arriving (`guardLabel` is the one place that decides).
+      const fork: Extract<WireItem, { kind: 'fork' }> = { kind: 'fork', on: guardLabel([{ ...g, negated: false }]), form: formOf(g), arms: [] };
       // An early exit is a fork whose OTHER arm left before this site could
       // run: `if (!product) throw` — the throw is written first, so it is the
       // first arm, and it is empty because nothing in the picture happens there.
@@ -206,7 +211,6 @@ function itemFor(input: ProgramInput, site: ProgramSite, path: readonly string[]
     const block: Extract<WireItem, { kind: 'block' }> = {
       kind: 'block',
       block: 'inline',
-      label: via ? `via ${via.name}` : 'via a helper',
       ...(via ? { via } : {}),
       ...(site.within ? { within: site.within } : {}),
       body: [],
@@ -265,18 +269,18 @@ function place(block: WireBlock, item: WireItem, site: ProgramSite): void {
     return;
   }
   const last = block[block.length - 1];
-  if (last && last.kind === 'block' && last.block === run.block && last.label === run.label) {
+  if (last && last.kind === 'block' && last.block === run.block && last.by === run.by) {
     last.body.push(item);
     return;
   }
-  block.push({ kind: 'block', block: run.block, label: run.label, body: [item] });
+  block.push({ kind: 'block', block: run.block, ...(run.by ? { by: run.by } : {}), body: [item] });
 }
 
-/** The run a site belongs to — `later · then`, `together` — or null for plain sequence. */
-function runFor(site: ProgramSite): { block: 'later' | 'together'; label: string } | null {
+/** The run a site belongs to — registered to run later, started together — or null for plain sequence. */
+function runFor(site: ProgramSite): { block: 'later' | 'together'; by?: string } | null {
   const fires = site.trigger;
-  if (fires && fires.kind === 'callback' && LATER_OF.test(fires.name)) return { block: 'later', label: `later · ${fires.name}` };
-  if (site.within && TOGETHER.test(site.within)) return { block: 'together', label: 'together' };
+  if (fires && fires.kind === 'callback' && LATER_OF.test(fires.name)) return { block: 'later', by: fires.name };
+  if (site.within && TOGETHER.test(site.within)) return { block: 'together', by: site.within };
   return null;
 }
 
@@ -285,7 +289,7 @@ function armFor(fork: Extract<WireItem, { kind: 'fork' }>, g: BranchGuard): Wire
   const when = guardLabel([g]);
   const found = fork.arms.find((a) => a.when === when);
   if (found) return found;
-  const arm: WireArm = { when, ends: g.armExit ?? null, body: [] };
+  const arm: WireArm = { when, ...(g.negated ? { not: true as const } : {}), ends: g.armExit ?? null, body: [] };
   fork.arms.push(arm);
   return arm;
 }
@@ -317,6 +321,9 @@ function formOf(g: BranchGuard): 'if' | 'switch' | 'ternary' | 'try' {
 function seal(input: ProgramInput, block: WireBlock): void {
   for (const item of block) {
     if (item.kind === 'fork') {
+      // A switch's head is the thing being decided on, which only its arms
+      // together say: every case was written `<subject> === <value>`.
+      if (item.form === 'switch') item.on = subjectOf(item.arms.map((a) => a.when));
       for (const arm of item.arms) {
         seal(input, arm.body);
         if (repliesLast(input, arm.body)) arm.ends = 'reply';
@@ -324,6 +331,22 @@ function seal(input: ProgramInput, block: WireBlock): void {
     } else if (item.kind === 'block') seal(input, item.body);
     else if (item.kind === 'step' && item.body) seal(input, item.body);
   }
+}
+
+/**
+ * What every arm of a switch is deciding on: the longest start they share, cut
+ * at a word. '' when they share nothing — then the head says nothing and each
+ * arm says its own condition, which is never wrong.
+ */
+function subjectOf(arms: readonly string[]): string {
+  if (arms.length < 2) return '';
+  let common = arms[0]!;
+  for (const arm of arms.slice(1)) {
+    let i = 0;
+    while (i < common.length && i < arm.length && common[i] === arm[i]) i++;
+    common = common.slice(0, i);
+  }
+  return /^[\w$.?[\]'"]+/.exec(common.trim())?.[0] ?? '';
 }
 
 /** Whether the last thing a block does is answer the request. */
