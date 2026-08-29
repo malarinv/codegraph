@@ -4,8 +4,11 @@
 readings it rests on (Expo + React Native app, `amniservices-mobile-app`). **Updated the same day, later
 sessions: P0–P6 are built** (see the per-item notes marked *Built*); P7 has its first agent A/B (proshop, small) and
 the medium / large rows are open.
-**Next:** `docs/plans/2026-08-29-steps-in-code-order.md` — the Steps tab reading a handler in the code's order (a rail with
-forks) instead of the tree by distance; a derivation from this walk, no new walk. Every claim about what a
+**Next: BUILT (2026-08-29).** `docs/plans/2026-08-29-steps-in-code-order.md` — the Steps tab reading a handler in the
+code's order (a rail with forks) instead of the tree by distance; a derivation from this walk, no new walk. P0–P6 are
+in (`src/ui-server/api/program.ts`, `ui/src/lib/program-model.ts`, spec §3.13.1); validating it against four real
+servers also fixed three defects in THIS walk — a hop's span read from the wrong call, a name-match the call as
+written disproves, and a value with one `references` edge going unlent the file's calls. Every claim about what a
 resolver emits *today* was verified against the source on this date — re-verify before building on it,
 the resolvers move. What was learned building it, beyond the plan: the index keeps only the LAST
 segment of a deep member call (`create` for `prisma.user.create`) and name-matches it — often to the

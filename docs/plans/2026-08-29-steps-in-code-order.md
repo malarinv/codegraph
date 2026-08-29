@@ -1,8 +1,29 @@
 # Steps, in the code's order — plan
 
-**Status:** plan, written 2026-08-29 on `feature/steps-servers` (tip `5797d7e`), for a fresh session. Nothing
-below is built. The Steps tab as it stands (spec §3.13, `src/ui-server/api/steps.ts`, `ui/src/views/StepsView.svelte`)
-is the base; everything here is a second *reading* of the same walk, not a new walk.
+**Status: BUILT** 2026-08-29 on `feature/steps-servers`, P0–P6. Written the same day (at tip `5797d7e`) as a plan for a
+fresh session; what follows is that plan, kept as written, with the notes below on where the build differs from it.
+The reading is `&view=order` on the Steps tab, `src/ui-server/api/program.ts` + `ui/src/lib/program-model.ts`, and
+spec §3.13.1 is the description of what was built.
+
+**Where the build differs from the plan:**
+- **A guard carries the decision it belongs to** (`BranchGuard.branch`), not just its text and line — §4.1's
+  "same `line`, same `text`" pairing does not tell one `switch` case from another, nor two `try`/`catch` blocks apart.
+  It also carries how the arm it is in leaves (`armExit`) and, for an early exit, how the arm not taken leaves (`exit`),
+  which is where `WireArm.ends` comes from.
+- **A function is read ONCE per rail** (`again` on the item), not redrawn at every call: expanding per path turned an
+  87-step screen into 3,849 items and 618 KB. Once-only is 476 items and 94 KB (+3% wall clock on that picture).
+- **A step the walk entered reads on into its own body** under its box, so the rail holds the same steps the tree does
+  (§4.1.7 only said this for boundaries under `through`).
+- **`WireItem`'s blocks are one kind with a discriminator** (`block: 'inline' | 'loop' | 'later' | 'together'`) rather
+  than four item kinds, and they carry facts (`by`, `via`, `loop`) rather than words — the viewer says them.
+- **Loops needed their own reading** (`loopsForFile`), and loops and forks nest by which construct BEGINS first, since
+  neither reading knows about the other.
+- The open questions of §7 were answered: order for functions/endpoints and the tree for screens (1); read each
+  function once rather than capping the fold depth (2); a loop's body once, marked (3); the fork carries its condition
+  and the arms say WHEN / WHEN NOT (4).
+
+The Steps tab as it stood (spec §3.13, `src/ui-server/api/steps.ts`, `ui/src/views/StepsView.svelte`) is the base;
+everything here is a second *reading* of the same walk, not a new walk.
 
 **The ask, in the maintainer's words:** on proshop's `POST /api/users/login` the picture draws `User.findOne · jwt.sign ·
 200 · 401` in one row under the handler. That is true — all four are one step from `authUser` — and it is not what a
@@ -272,3 +293,36 @@ early exit, and the tree mode is byte-for-byte the picture it is today.
 3. **Loops.** Body once with `for each …`, or unrolled never. Proposal: once, marked.
 4. **Should the rail replace the pills' "→ …x" placement rule?** The rail's forks carry the condition once, on the
    fork; the arm's `WHEN` / `WHEN NOT` is the pill. The scenario rows in the panel stay as they are.
+
+---
+
+## 8. What the validation pictures found (2026-08-29, P5)
+
+Read against the source, endpoint by endpoint. Every reading below is the one the rail draws today.
+
+| Repo | Anchor | Reads as | Verdict |
+|---|---|---|---|
+| `bradtraversy/proshop_mern` | `POST /api/users/login` | `User.findOne` · fork on the password check · [`via generateToken` → `jwt.sign`, then `200`] \| [`401`], both arms answering | §1 exactly |
+| " | `POST /api/products/:id/reviews` | `Product.findById` · fork on `product` · [fork on `alreadyReviewed` → `400` \| `201`] \| [`404`] | three outcomes, right |
+| `gothinkster/node-express-realworld-example-app` | `POST /users/login` | `via login` → two `422` guards, `prisma.user.findUnique`, `if user` → `bcrypt.compare` → `if match` → `via generateToken`, then `403`; then the handler's own `200` | right, after the span fix |
+| `brocoders/nestjs-boilerplate` | `POST /auth/email/login` | `via validateLogin` → `findByEmail`, `!user` → `422`, two throwing guards, `bcrypt.compare`, then `sessionRepository.create` and `via getTokensData` → **`together Promise.all`** of two `jwtService.signAsync` | right, after dropping the `update` name-match |
+| `leerob/next-saas-starter` | `signIn` (server action) | drizzle `select`, `length === 0` → return, `!isPasswordValid` → return, **`together Promise.all`** of `setSession` (→ `signToken` → `SignJWT`) and `logActivity` (→ `db.insert`), then `redirectTo === 'checkout'` → the whole checkout session \| `/dashboard` | right, after the lending fix |
+| `fastapi/full-stack-fastapi-template` | `POST /login/access-token` | `via authenticate` → `session.exec`, `not db_user` → return, `not verified` → return, `updated_password_hash` → `session.add`/`commit`/`refresh`; then `not user` → `400`, `elif not user.is_active` → `400`; then `via create_access_token` → `jwt.encode` | right, after the `elif` fix |
+| `amniservices-mobile-app` | `/capture/review` | unchanged: 87 steps, 160 links, the tree, `defaultView: 'tree'` | the regression check |
+
+**Three defects the pictures caught, all in the walk and both readings** — a hop's span taken from a call that was not
+the one asked for (an inline Express handler's edges carry the route's line, so the registration's span swallowed the
+body); a name-match the call as written disproves (`crypto.createHash('sha256').update(…)` followed into the caller's
+own `AuthService.update`); and a value lent nothing because one plain `references` edge counted as a body of its own
+(`const signIn = validatedAction(schema, async (data) => { … })` drew one call out of nine). Plus an `elif` whose body
+raises being read as ending the arm it is written in.
+
+**Left open, deliberately:**
+- **A mongoose document's `product.save()` is not in the effects table** (`api/effects.ts`), so proshop's review
+  endpoint draws its `201` but not the write before it. A JS rule for `<lowercase receiver>.save` would catch it and
+  would also catch `canvas.save()` / `ctx.save()` / `sharp(...).toFile`-adjacent idioms in any web app — a call for
+  the maintainer, not a silent widening.
+- **A nested `const handleX = async () => …` is still not a node** (the plan's §6): its sites belong to the enclosing
+  component. Fixing it is an extractor change with a Rust kernel twin.
+- The **`via` name of an inlined helper is its bare name** (`via create`), which is ambiguous when two classes have a
+  `create`. The panel disambiguates; the rail could say the class.
