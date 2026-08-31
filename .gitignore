@@ -82,3 +82,8 @@ target-linux/
 .kommandr/kommandr.db
 .kommandr/kommandr.db-wal
 .kommandr/kommandr.db-shm
+
+# Stray git bundles from the Windows VM transfer (a lost `:` in an scp target
+# once committed three of these, 7.9 MB, into a feature branch).
+*.bundle
+*.gitbundle
