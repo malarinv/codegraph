@@ -12,7 +12,8 @@
  * are the links into and out of the selected step.
  */
 
-import type { WireMapLink, WireMapModule, WireStep, WireStepLink, WireStepTrigger, WireStepsPayload } from './wire';
+import { whenWords } from './conditions';
+import type { WireMapLink, WireMapModule, WireStep, WireStepDecision, WireStepLink, WireStepTrigger, WireStepsPayload } from './wire';
 import {
   buildMapLayout,
   linkId,
@@ -59,6 +60,25 @@ export interface StepEdgeInfo {
   synthesized: boolean;
   /** The kind the links agree on, or `calls` when they differ. */
   kind: WireStepLink['kind'];
+  /**
+   * The one way of a decision this connector is — `yes`, `no`, a case's
+   * value — when it and a sibling out of the same box are arms of one fork.
+   * The condition itself is said once, under the box ({@link StepDecision}).
+   */
+  arm?: string;
+}
+
+/**
+ * A decision drawn where it is made: the condition said ONCE, under the box
+ * that decides it, while each line out of that box says only which way it is.
+ */
+export interface StepDecision {
+  id: string;
+  /** The condition as a reader says it, asking: `await hasSeenWelcome(…)?`. */
+  label: string;
+  x: number;
+  y: number;
+  width: number;
 }
 
 export interface StepsModel extends Picture {
@@ -78,6 +98,34 @@ export interface StepsModel extends Picture {
   regions: StepRegionZone[] | null;
   /** The first box of each region — where the anchor's at-rest line arrives. */
   regionEntries: ReadonlySet<string> | null;
+  /**
+   * The order reading only: its decisions, each drawn as a point of its own
+   * where the arms diverge (`fork:N` in the layout). Null on the tree, whose
+   * decisions are made INSIDE a box and drawn under it ({@link decisions}).
+   */
+  forks: Map<string, StepForkInfo> | null;
+  /**
+   * The tree reading's decisions: a condition said once under the box that
+   * decides it, its arms labelled on the lines out. Empty when the picture
+   * holds none.
+   */
+  decisions: StepDecision[];
+}
+
+/**
+ * A decision on the order reading's canvas — a fork of the code with two or
+ * more arms that lead somewhere. The condition is said ONCE, on the point,
+ * and each line out answers it (`yes`, `no`, a case's value): two lines that
+ * each carried the whole predicate, one of them negated, never said they were
+ * the same choice.
+ */
+export interface StepForkInfo {
+  id: string;
+  /** The condition in positive words — a switch's subject; '' when the arms share none. */
+  on: string;
+  form: 'if' | 'switch' | 'ternary' | 'try';
+  /** The point's words: the condition, asked — `user AND (await …)?`. */
+  label: string;
 }
 
 /** One region of a screen's picture: its caption, and the space its boxes hold. */
@@ -202,6 +250,105 @@ export function stepSub(step: WireStep, project: ProjectKind = 'app'): string {
       // The anchor: its file, at the size of a box; the panel prints the whole path.
       return step.node && step.sub === step.node.file ? file : step.sub;
   }
+}
+
+/* ------------------------------------------------------------- decisions -- */
+
+/** A case value longer than this is cut on the line; the whole condition is a hover away. */
+const ARM_WORD_MAX = 24;
+/** Room for one line of a decision's caption under its box. */
+const DECISION_LINE = 15;
+/** Advance of the caption's 10.5px mono, and the room it may take past its box. */
+const DECISION_CHAR = 6.3;
+const DECISION_MAX_WIDTH = 320;
+
+/**
+ * The word a line out of a decision says — the ONE place that decides it, so
+ * the two readings can never word an arm differently. `yes` / `no` for an
+ * `if` or a ternary; a case's own value for a switch, with the subject the
+ * decision already asks stripped off (`status === 'expired'` → `'expired'`),
+ * and `else` for its default; a `try`'s arms keep their own words.
+ */
+export function armWords(d: { on: string; arm: string; form: 'if' | 'switch' | 'ternary' | 'try'; not?: true }): string {
+  if (d.form === 'if' || d.form === 'ternary') return d.not ? 'no' : 'yes';
+  if (d.not) return 'else';
+  let text = d.arm;
+  if (d.on && text.startsWith(d.on)) text = text.slice(d.on.length).trim().replace(/^===?\s*/, '');
+  if (!text) return 'yes';
+  return text.length > ARM_WORD_MAX ? `${text.slice(0, ARM_WORD_MAX - 1)}…` : text;
+}
+
+/**
+ * The one arm of one decision a connector is, when EVERY site behind it
+ * agrees. A connector with a site that runs under no condition is not
+ * exclusively an arm — the step happens either way — and one whose sites
+ * disagree is several stories; both stay plain lines rather than claim a side.
+ */
+function edgeArm(info: StepEdgeInfo): WireStepDecision | null {
+  let found: WireStepDecision | null = null;
+  for (const link of info.links) {
+    for (const site of link.sites) {
+      if (!site.decision) return null;
+      if (found === null) found = site.decision;
+      else if (found.branch !== site.decision.branch || found.arm !== site.decision.arm) return null;
+    }
+  }
+  return found;
+}
+
+/**
+ * Sibling connectors out of one box that are arms of ONE fork, marked as the
+ * choice they are: each line says only which way it is, and the condition is
+ * said once under the box that decides it. Two lines that each carried the
+ * whole predicate — one of them the other's negation, both truncated to the
+ * same forty characters — never said they were the same choice, and at rest
+ * the tree drew them with no label at all.
+ *
+ * A fork with ONE drawn arm is a guard clause, not a choice, and keeps its
+ * condition on the line: the decision has to have at least two ways drawn
+ * before it is worth a caption.
+ */
+function markDecisions(edges: Map<string, StepEdgeInfo>, layout: MapLayout): StepDecision[] {
+  const groups = new Map<string, Array<{ info: StepEdgeInfo; decision: WireStepDecision }>>();
+  for (const info of edges.values()) {
+    const decision = edgeArm(info);
+    if (decision === null) continue;
+    const key = `${info.from} ${decision.branch}`;
+    const list = groups.get(key) ?? [];
+    list.push({ info, decision });
+    groups.set(key, list);
+  }
+
+  const boxes = new Map(layout.nodes.map((n) => [n.id, n]));
+  const out: StepDecision[] = [];
+  /** Two decisions made in one box stack under it rather than sitting on each other. */
+  const perBox = new Map<string, number>();
+  for (const [key, group] of groups) {
+    if (new Set(group.map((g) => g.decision.arm)).size < 2) continue;
+    const box = boxes.get(group[0]!.info.from);
+    if (!box) continue;
+    for (const { info, decision } of group) {
+      info.arm = armWords(decision);
+      // The connector's label IS the arm now: the decision says the rest.
+      info.label = info.arm;
+    }
+    const nth = perBox.get(box.id) ?? 0;
+    perBox.set(box.id, nth + 1);
+    const on = group[0]!.decision.on;
+    const label = `${whenWords(on) || on}?`;
+    // The condition is the whole point of the caption, so it may take a
+    // little more room than the box it sits under — centred on it, and capped
+    // so a long predicate cannot reach across its neighbours.
+    const width = Math.max(box.width, Math.min(label.length * DECISION_CHAR + 8, DECISION_MAX_WIDTH));
+    out.push({
+      id: key,
+      label,
+      x: box.x + (box.width - width) / 2,
+      y: box.y + box.height + 4 + nth * DECISION_LINE,
+      width,
+    });
+  }
+  return out;
 }
 
 /* ---------------------------------------------------------------- build -- */
@@ -332,6 +479,10 @@ export function buildStepsModel(payload: WireStepsPayload): StepsModel {
     counts,
     regions: zones,
     regionEntries: zones === null ? null : new Set(zones.map((z) => z.entry)),
+    forks: null,
+    // Placed against the finished layout: a decision is drawn under the box
+    // that makes it, so it needs to know where that box ended up.
+    decisions: markDecisions(edges, layout),
   };
 }
 
@@ -652,20 +803,55 @@ function packRegions(
 }
 
 /**
- * Which edges draw, given the selection. Selecting a step says "show me
- * everything about this one" — every line touching it comes out. At rest a
- * regioned picture hides exactly two things: the anchor's own fan — the
- * anchor leads to everything by definition, and a hundred and four ways of
- * saying so were the whole canvas, so one line into each region stands in for
- * it — and, as everywhere, what points back up the layering. Every other
- * lead-to draws, a line between two regions included: the empty state's
- * prompt firing the same handler as the header's is the picture, and hiding
- * it made a box that leads three places read as wired to nothing. A shared
- * step fed from below (the toast every handler calls) stays quiet through the
- * back rule alone. An unregioned picture keeps the Map's rule.
+ * The selection, extended through decisions: a fork's point is not a step —
+ * it belongs to the steps around it — so selecting the step before a fork, or
+ * one of its arms, reaches the point and, through it, the fork's other lines.
+ * The set holds the selected id and every point connected to it through
+ * points alone; a picture without forks is just the selection.
  */
-export function stepEdgeVisible(model: StepsModel, edge: MapEdgeLayout, selected: string | null): boolean {
-  if (selected !== null) return edge.source === selected || edge.target === selected;
+export function selectionReach(model: StepsModel, selected: string): ReadonlySet<string> {
+  const reach = new Set([selected]);
+  if (model.forks === null || model.forks.size === 0) return reach;
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const e of model.layout.edges) {
+      const from = reach.has(e.source);
+      const to = reach.has(e.target);
+      if (from === to) continue;
+      const other = from ? e.target : e.source;
+      if (model.forks.has(other) && !reach.has(other)) {
+        reach.add(other);
+        grew = true;
+      }
+    }
+  }
+  return reach;
+}
+
+/**
+ * Which edges draw, given the selection. Selecting a step says "show me
+ * everything about this one" — every line touching it comes out, a decision's
+ * lines through its point ({@link selectionReach}). At rest a regioned
+ * picture hides exactly two things: the anchor's own fan — the anchor leads
+ * to everything by definition, and a hundred and four ways of saying so were
+ * the whole canvas, so one line into each region stands in for it — and, as
+ * everywhere, what points back up the layering. Every other lead-to draws, a
+ * line between two regions included: the empty state's prompt firing the same
+ * handler as the header's is the picture, and hiding it made a box that leads
+ * three places read as wired to nothing. A shared step fed from below (the
+ * toast every handler calls) stays quiet through the back rule alone. An
+ * unregioned picture keeps the Map's rule.
+ */
+export function stepEdgeVisible(
+  model: StepsModel,
+  edge: MapEdgeLayout,
+  selected: string | null,
+  reach?: ReadonlySet<string>
+): boolean {
+  if (selected !== null) {
+    const r = reach ?? selectionReach(model, selected);
+    return r.has(edge.source) || r.has(edge.target);
+  }
   if (edge.thin || edge.back) return false;
   if (model.regions === null) return true;
   const from = model.nodes.get(edge.source)?.step;

@@ -565,6 +565,28 @@ tracked curves (over a tighter in-region gap), same pills, pointer and panel. Re
 picture ~3,400px (was 28,452), at-rest lines on `/home` 80 of 190 — the region-local structure plus 11 lines between
 regions — with zero boxes that lead somewhere while drawing nothing.
 
+**Decisions — a choice made inside a box, said under it.** A fork the tree can see is written *inside* a box and its
+arms *leave* that box: `resolvePostLoginRoute` ends `return (await hasSeenWelcome(id)) ? '/home/' : '/welcome/'`, so two
+`navigates` lines leave one store action. Each carried the whole predicate, one of them the other's negation, truncated
+to the same forty characters — and at rest the tree labels nothing, so the picture never said it was a choice at all.
+Now sibling connectors out of one box that are arms of ONE fork are drawn as the choice they are: the condition once,
+in a caption under the deciding box (`DecisionCaption.svelte`, centred on it and allowed a little more width, since
+reading it is the point), and each line out saying only which way it is — `yes` / `no`, a case's own value, `else` for
+a default (`armWords`, the ONE place either reading words an arm, so the tree and the order reading can never disagree).
+These are **the only lines labelled at rest** in the tree: `placeLabels`' third argument took a boolean and now takes
+a *set* of edges, so the order reading still labels everything and the tree labels exactly the arms.
+
+What makes it possible is the same one idea the order reading's fold rests on, carried one step further out — onto the
+wire. `WireStepSite.decision` (`{ branch, on, arm, form, not? }`) records the decision a site's **innermost** guard
+belongs to: the innermost is the one decided AT the call, while the guards outside it are context both arms share.
+`steps.ts` had `BranchGuard.branch` in hand at all three link paths (arrivals, the known-step re-link, `effectLink`)
+and was dropping it. Two sites agreeing on `branch` and disagreeing on `arm` are the two ways of one fork — which a
+joined condition string can never say, however exactly one reads as the other's negation, and which no amount of
+`X` vs `!(X)` string-matching may be allowed to guess. **Honest by construction, three ways:** a connector is an arm
+only when EVERY site behind it carries the same decision (one site running under no condition means the step happens
+either way, so the line claims nothing); a fork with one drawn arm is a guard clause and keeps its condition on the
+line; and an early exit (`form: 'guard'`) never becomes a decision at all.
+
 **Servers (Express, NestJS, Fastify, Koa, Hono, FastAPI, Flask, Django, Spring, ASP.NET, Vapor, Gin).** The same picture over
 the same machinery; only the facts and the words change (`src/ui-server/api/route-roots.ts`, `effects.ts`,
 `docs/plans/2026-08-28-steps-and-screens-for-apis-and-web.md` §4). A route anchor's walk starts at the symbol the route runs —
@@ -653,19 +675,39 @@ walk has a second reading, on **the same canvas, with the same boxes**: only the
                 POST /api/users/login · authUser
                             │
                     User.findOne({ email })
-        ┌───────────────────┴────────────────────┐
-  → WHEN user AND (await …)              → WHEN NOT (user && …)
-        │                                         │
-  jwt.sign({ id }, …)  auth                 401  response
-        │
-   200  response
+                            │
+            ┌ user AND (await user.matchPassword(…))? ┐
+                 │                          │
+               → yes                      → no
+                 │                          │
+        jwt.sign({ id }, …)  auth     401  response
+                 │
+            200  response
 ```
 
 **A line means "and then", not "leads to"** — that is the whole difference from the other reading, and the key says so.
 A row down is one more thing that has already happened, so the `200` sits below the `jwt.sign` it is built from and the
-`401` branches at the fork. Where the code forks the line carries what has to hold, **drawn at rest** rather than only
-for a selected box (`placeLabels(model, selected, atRest)`) — on this picture the conditions ARE the content. An arm
-that answers, returns or throws simply has nothing leaving it.
+`401` branches at the fork. The conditions are **drawn at rest** rather than only for a selected box
+(`placeLabels(model, selected, atRest)`) — on this picture the conditions ARE the content. An arm that answers, returns
+or throws simply has nothing leaving it.
+
+**A decision both of whose ways are drawn is a POINT, not two labelled lines.** Two edges that each carried the whole
+predicate — one of them negated, their chips truncated to near-identical strings — never said they were the same
+choice. (The tree answers the same problem differently, because there a fork is written INSIDE a box and its arms
+leave it: see **Decisions** in §3.13. Here the fork sits BETWEEN steps, so it gets a box of its own; either way
+`armWords` is the one place an arm is worded.) So a fork two or more of whose arms lead somewhere diverges from a
+small box of its own (`ForkPoint.svelte`,
+`fork:N` in the layout, quieter than a step: one centred line, border `--ink-2`): the box asks the condition once
+(`user AND (await …)?`; a switch asks its subject), and each line out answers with only the arm — `yes` / `no` for an
+`if` or a ternary, the case's own value with the subject stripped (`'expired'`), `else` for a default — as a pill at
+the arm's far end, the arm's full condition still riding the edge for the hover. The point is not a step: it takes no
+click, counts in no summary, and the panel lists nothing for it; selection instead reaches THROUGH it
+(`selectionReach`) — selecting the step before the fork lights both arms, selecting an arm lights its sibling — and
+the neighbour dimming follows the same closure. Client-side entirely: `orderGraph` mints the points from the fork
+items the wire already carries (`WireArm.not` marks the else side), so nothing changes on the server or in the tree
+reading. **A fork with ONE drawn arm keeps the plain line** — an early exit reads as a guard clause (`WHEN NOT
+product` on the line), never as a box with a single exit — and an arm reached from both sides of one decision drops
+the claim (`arm` is deleted on merge) rather than printing `yes` on a line that runs either way.
 
 **What it is made of.** Every hop the walk makes is recorded where the code writes it — the step it reached (or the
 helper it folded into), the call's position and span, the branch guards, the loops, what fires it — by the SAME pass
@@ -673,7 +715,12 @@ that makes the links, so the two readings can never hold different steps (`WireS
 `src/ui-server/api/program.ts` from the records `steps.ts` keeps; `ProgramSite` is one such record). `buildProgram` is
 pure over them: no graph, no source, no control-flow graph. `ui/src/lib/program-model.ts` then walks that block tree
 carrying a set of *tails* — the steps a next step would follow — and emits one edge per "and then"; the row of a step is
-the longest run of them from the anchor, settled by relaxation because a step reached twice can make the graph cyclic.
+the longest run of them from the anchor. A step reached twice (`session.add` before and after a check, a logout helper
+the code comes back to) makes the graph **cyclic**, and relaxing over a cycle never settles — it adds a row on every
+pass until the pass bound. So the lines that close a cycle are dropped before the rows are settled (`withoutBackEdges`,
+one walk from the anchor: a line back to something still open on the way here cannot be what decides its row); the
+cycle is still DRAWN, it just does not stretch the picture. Without this a real screen put sixteen boxes on sixty rows
+— a 9,400px ribbon of empty space that `fitView` opened on a gap, so the canvas came up blank.
 
 **What makes the fold possible** is that a guard names the DECISION it belongs to and not only its own words
 (`BranchGuard.branch` — where the branching construct starts): the `if` and the `else` of one statement carry the same

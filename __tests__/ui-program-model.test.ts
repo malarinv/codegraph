@@ -10,6 +10,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildOrderModel, lineWords, orderGraph, runWords } from '../ui/src/lib/program-model';
+import { selectionReach, stepEdgeVisible } from '../ui/src/lib/steps-model';
+import { placeLabels } from '../ui/src/lib/screens-model';
 import type { WireArm, WireBlock, WireItem, WireProgram, WireStep, WireStepsPayload } from '../ui/src/lib/wire';
 
 /* ------------------------------------------------------------ material -- */
@@ -65,8 +67,11 @@ describe('the picture in the code’s order', () => {
     expect(rowsOf([{ kind: 'step', step: 'a' }, { kind: 'step', step: 'b' }])).toEqual({ anchor: 0, a: 1, b: 2 });
   });
 
-  it('branches both arms off the step before the fork, and says what has to hold', () => {
+  it('diverges both arms from a point that asks the condition once', () => {
     // proshop's login: look the user up, then sign+answer 200, else answer 401.
+    // The decision is ONE choice, so it draws once — a point the arms leave,
+    // each line saying only which arm it is — not two lines that each carry
+    // the whole predicate, one of them negated.
     const on = 'user && (await user.matchPassword(password))';
     const root: WireBlock = [
       { kind: 'step', step: 'findOne' },
@@ -80,14 +85,20 @@ describe('the picture in the code’s order', () => {
         ],
       },
     ];
+    const g = orderGraph({ root, truncated: 0 } as WireProgram, 'anchor');
+    expect(g.forks).toEqual([{ id: 'fork:0', on, form: 'if' }]);
     expect(shape(root)).toEqual([
       'anchor → findOne',
-      'findOne → sign · WHEN user AND (await user.matchPassword… [via a helper]',
+      'findOne → fork:0',
+      'fork:0 → sign · yes [via a helper]',
       'sign → 200',
-      'findOne → 401 · WHEN NOT (user && (await user.matchPass…',
+      'fork:0 → 401 · no',
     ]);
-    // The 200 sits a row BELOW the signing, which is the whole point.
-    expect(rowsOf(root)).toEqual({ anchor: 0, findOne: 1, sign: 2, '200': 3, '401': 2 });
+    // The arm's own condition still rides the line, for the hover.
+    expect(g.edges.find((e) => e.to === '401')!.when).toBe(`!(${on})`);
+    // The 200 sits a row BELOW the signing, which is the whole point; the
+    // decision takes a row of its own between the lookup and the arms.
+    expect(rowsOf(root)).toEqual({ anchor: 0, findOne: 1, 'fork:0': 2, sign: 3, '200': 4, '401': 3 });
   });
 
   it('rejoins after an arm that runs on, and stops at one that ends', () => {
@@ -103,10 +114,70 @@ describe('the picture in the code’s order', () => {
     ];
     expect(shape(root)).toEqual([
       'anchor → lookup',
-      'lookup → inside · WHEN ready',
-      'lookup → bail · WHEN NOT ready',
+      'lookup → fork:0',
+      'fork:0 → inside · yes',
+      'fork:0 → bail · no',
       'inside → after',
     ]);
+  });
+
+  it('labels a switch’s arms with their own values, and its default with else', () => {
+    const root: WireBlock = [
+      { kind: 'step', step: 'load' },
+      {
+        kind: 'fork',
+        form: 'switch',
+        on: 'status',
+        arms: [
+          arm("status === 'expired'", [{ kind: 'step', step: 'refresh' }]),
+          arm("status === 'active'", [{ kind: 'step', step: 'serve' }]),
+          arm("!(status === 'expired' || status === 'active')", [{ kind: 'step', step: 'reject' }], { not: true, ends: 'reply' }),
+        ],
+      },
+    ];
+    expect(shape(root)).toEqual([
+      'anchor → load',
+      'load → fork:0',
+      "fork:0 → refresh · 'expired'",
+      "fork:0 → serve · 'active'",
+      'fork:0 → reject · else',
+    ]);
+  });
+
+  it('keeps a lone guard on the line — an early exit is not a point', () => {
+    // `if (!product) throw` — the exit arm is empty; only one arm draws, so
+    // the condition rides the line exactly as before.
+    const root: WireBlock = [
+      { kind: 'step', step: 'lookup' },
+      {
+        kind: 'fork',
+        form: 'if',
+        on: 'product',
+        arms: [arm('product', [], { ends: 'throw' }), arm('!product', [{ kind: 'step', step: 'render' }], { not: true })],
+      },
+    ];
+    const g = orderGraph({ root, truncated: 0 } as WireProgram, 'anchor');
+    expect(g.forks).toEqual([]);
+    expect(shape(root)).toEqual(['anchor → lookup', 'lookup → render · WHEN NOT product']);
+  });
+
+  it('stops claiming a side when both arms reach the same step', () => {
+    const root: WireBlock = [
+      { kind: 'step', step: 'check' },
+      {
+        kind: 'fork',
+        form: 'if',
+        on: 'a',
+        arms: [
+          arm('a', [{ kind: 'step', step: 'log' }, { kind: 'step', step: 'go' }]),
+          arm('!(a)', [{ kind: 'step', step: 'log', again: true }], { not: true }),
+        ],
+      },
+    ];
+    const g = orderGraph({ root, truncated: 0 } as WireProgram, 'anchor');
+    const toLog = g.edges.find((e) => e.to === 'log')!;
+    expect(toLog.arm).toBeUndefined();
+    expect(toLog.when).toBe('a || !(a)');
   });
 
   it('runs on either way past an `if` with no else', () => {
@@ -163,7 +234,35 @@ describe('the picture in the code’s order', () => {
   it('settles the rows of a step reached twice rather than looping', () => {
     const root: WireBlock = [{ kind: 'step', step: 'db' }, { kind: 'step', step: 'check' }, { kind: 'step', step: 'db' }];
     expect(shape(root)).toEqual(['anchor → db', 'db → check', 'check → db']);
-    expect(rowsOf(root).db).toBeGreaterThan(0);
+    expect(rowsOf(root)).toEqual({ anchor: 0, db: 1, check: 2 });
+  });
+
+  it('never spreads a cyclic reading over more rows than it has boxes', () => {
+    // A helper the code comes back to from inside a decision makes the graph
+    // cyclic. Relaxing over a cycle never settles — it added a row on every
+    // pass until the bound, so on a real screen sixteen boxes landed on sixty
+    // rows and the picture was a 9,000px ribbon of empty space that no fit
+    // could open on.
+    const root: WireBlock = [
+      { kind: 'step', step: 'logout' },
+      { kind: 'step', step: 'flags' },
+      {
+        kind: 'fork',
+        form: 'if',
+        on: 'options?.showAlert',
+        arms: [
+          arm('options?.showAlert', [{ kind: 'step', step: 'logout', again: true }]),
+          arm('!options?.showAlert', [{ kind: 'step', step: 'quiet' }], { not: true }),
+        ],
+      },
+    ];
+    const g = orderGraph({ root, truncated: 0 } as WireProgram, 'anchor');
+    // The cycle is real and still drawn — it is only the ROW that ignores it.
+    expect(g.edges.some((e) => e.to === 'logout' && e.from.startsWith('fork:'))).toBe(true);
+    const depths = [...g.depth.values()];
+    expect(Math.max(...depths)).toBeLessThan(g.depth.size);
+    // Every row between the top and the deepest holds something.
+    expect(new Set(depths).size).toBe(Math.max(...depths) + 1);
   });
 
   it('names each kind of run', () => {
@@ -189,5 +288,43 @@ describe('the picture in the code’s order', () => {
     expect(layer('anchor')).toBeGreaterThan(layer('findOne'));
     expect(layer('findOne')).toBeGreaterThan(layer('200'));
     expect(buildOrderModel({ ...payload([], []), program: null })).toBeNull();
+  });
+
+  it('draws a decision as a point, and the selection reaches through it', () => {
+    const root: WireBlock = [
+      { kind: 'step', step: 'lookup' },
+      {
+        kind: 'fork',
+        form: 'if',
+        on: 'ready',
+        arms: [arm('ready', [{ kind: 'step', step: 'inside' }]), arm('!ready', [{ kind: 'step', step: 'bail' }], { not: true, ends: 'return' })],
+      },
+    ];
+    const model = buildOrderModel(payload([step('lookup'), step('inside'), step('bail')], root))!;
+    expect(model.forks!.get('fork:0')).toEqual({ id: 'fork:0', on: 'ready', form: 'if', label: 'ready?' });
+    // The point sits between the step before the fork and the arms; it is not a step.
+    const at = (id: string) => model.layout.nodes.find((n) => n.id === id)!;
+    expect(at('fork:0').y).toBeGreaterThan(at('lookup').y);
+    expect(at('fork:0').y).toBeLessThan(at('inside').y);
+    expect(model.nodes.has('fork:0')).toBe(false);
+    expect(model.counts.effect).toBe(3);
+    // The lines out of it say the arm; the line into it says nothing.
+    const label = (to: string) => [...model.edges.values()].find((e) => e.to === to)!.label;
+    expect(label('fork:0')).toBe('');
+    expect(label('inside')).toBe('yes');
+    expect(label('bail')).toBe('no');
+    // At rest the arms are labelled — the conditions are this picture's content.
+    const pills = placeLabels(model, null, true);
+    expect([...pills.pills.values()].map((p) => p.text).sort()).toEqual(['→ no', '→ yes']);
+    // Selecting the step before the decision reaches through the point: the
+    // arms' lines light, instead of dying at a box the reader cannot click.
+    const reach = selectionReach(model, 'lookup');
+    expect(reach.has('fork:0')).toBe(true);
+    const armEdge = model.layout.edges.find((e) => e.source === 'fork:0' && e.target === 'inside')!;
+    expect(stepEdgeVisible(model, armEdge, 'lookup')).toBe(true);
+    expect(stepEdgeVisible(model, armEdge, 'lookup', reach)).toBe(true);
+    // …and selecting an arm lights its sibling, through the same point.
+    const sibling = model.layout.edges.find((e) => e.source === 'fork:0' && e.target === 'bail')!;
+    expect(stepEdgeVisible(model, sibling, 'inside')).toBe(true);
   });
 });

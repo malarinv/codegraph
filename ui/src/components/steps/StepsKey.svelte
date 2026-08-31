@@ -116,8 +116,12 @@
           <span>And then — the step at the other end happens after this one; the plumbing between them is folded into the line</span>
         </div>
         <div class="lrow">
+          <span class="k-box k-fork mono">x?</span>
+          <span>A decision both of whose ways are drawn: the box asks the condition once and each line out answers — <span class="mono">yes</span>, <span class="mono">no</span>, a case. An arm that answers or leaves ends there</span>
+        </div>
+        <div class="lrow">
           <span class="k-label mono">WHEN x</span>
-          <span>Where the code forks — an <span class="mono">if</span>, a <span class="mono">switch</span>, a <span class="mono">try</span>, an early exit: what has to hold for the step at the other end. No label = it happens either way</span>
+          <span>A lone guard — an early exit, an <span class="mono">if</span> with one drawn side: what has to hold for the step at the other end. No label = it happens either way</span>
         </div>
         <div class="lrow">
           <span class="k-label">via x</span>
@@ -143,6 +147,14 @@
         <div class="lrow">
           <svg width="44" height="12" aria-hidden="true"><path d="M2 6 H42" class="k-line k-back" /></svg>
           <span>Goes back up the picture — leaves the top of its box, arrives at the bottom of the other</span>
+        </div>
+        <div class="lrow">
+          <span class="k-label mono">x? · yes</span>
+          <span
+            >A decision made inside a box, both of whose ways are drawn: the condition is said once under the box and
+            each line out of it answers — <span class="mono">yes</span>, <span class="mono">no</span>, a case. These are
+            the only lines labelled before you select anything</span
+          >
         </div>
         <div class="lrow">
           <span class="k-label mono">→ …x</span>
@@ -236,6 +248,10 @@
 .k-box.k-effect {
   border-style: dashed;
   border-color: var(--ink-3);
+}
+/* The decision's point draws quieter than a step, on the canvas and here. */
+.k-box.k-fork {
+  border-color: var(--ink-2);
 }
 .k-anchor .mark {
   font-size: 8px;

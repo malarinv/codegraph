@@ -82,6 +82,28 @@ export interface WireStepSite {
   trigger?: WireStepTrigger;
   /** For a response site: the status code it sends, when literal (`res.status(404)`, `throw new NotFoundException`). */
   status?: number;
+  /**
+   * The decision the site's INNERMOST condition belongs to, when one was
+   * read. Two sites that agree on `branch` and disagree on `arm` are the two
+   * ways of one fork — which a joined condition string can never say, however
+   * exactly one reads as the other's negation. It is what lets a picture draw
+   * `resolvePostLoginRoute → /home` and `→ /welcome` as one choice with two
+   * answers instead of two lines that each carry the whole predicate.
+   */
+  decision?: WireStepDecision;
+}
+
+/** One arm of one decision, as the site that runs under it records it. */
+export interface WireStepDecision {
+  /** Where the branching construct starts (`line:column`) — the fork's identity. */
+  branch: string;
+  /** The decision as a reader says it, always positive: `await hasSeenWelcome(…)`. */
+  on: string;
+  /** THIS arm's own condition — an `if` and its `else` differ here and nowhere else. */
+  arm: string;
+  form: 'if' | 'switch' | 'ternary' | 'try';
+  /** The arm taken when the condition does NOT hold — the `else` side. */
+  not?: true;
 }
 
 /** What fires a step or a link: the event it is written under, and the function that writes it there. */
@@ -572,6 +594,27 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     return null;
   };
 
+  /**
+   * The decision a site's innermost condition belongs to. The innermost guard
+   * is the one decided AT the call — the ternary whose two arms return two
+   * different routes — while the ones outside it are the context both arms
+   * share, so it is the innermost that says which way this site went.
+   */
+  const decisionOf = (guards: readonly BranchGuard[]): WireStepDecision | null => {
+    const g = guards[guards.length - 1];
+    if (!g || !g.branch) return null;
+    // A one-sided guard (`if (!product) throw`) is a guard clause, not a
+    // choice with two drawn ways; it keeps its condition on the line.
+    if (g.form === 'guard') return null;
+    return {
+      branch: g.branch,
+      on: guardLabel([{ ...g, negated: false }]),
+      arm: guardLabel([g]),
+      form: g.form === 'case' ? 'switch' : g.form === 'ternary' ? 'ternary' : g.form === 'catch' ? 'try' : 'if',
+      ...(g.negated ? { not: true as const } : {}),
+    };
+  };
+
   const steps = new Map<string, StepRecord>();
   const links = new Map<string, WireStepLink>();
   /**
@@ -818,6 +861,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const wireSite: WireStepSite = { file: posix(fold.node.filePath), line: ref.line, text, when: '' };
     if (args !== null) wireSite.args = args;
     if (status !== null) wireSite.status = status;
+    const effectDecision = decisionOf(guards);
+    if (effectDecision) wireSite.decision = effectDecision;
     // Where the call is written HERE — in this function, at this line. The
     // rail places the step by it; the tree's row order uses the hop out of the
     // step's root, which is the same position when nothing was folded.
@@ -1278,6 +1323,8 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           const hop = fold.first ?? local;
           if (!to.first) to.first = hop;
           if (!to.region) to.region = regionOf(from, fold.chain);
+          const decision = decisionOf(guards);
+          if (decision) site = { ...site, decision };
           const id = link(from, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
           record(fold.node, local, guards, { step: to.id, link: id }, a.trigger, await loopsAt(fold.node, at));
           if (to.root !== null && !explored.has(to.id)) {
@@ -1317,7 +1364,9 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
               const guards = await guardsAt(fold.node, at);
               const local = await hopAt(fold.node, at, target.name);
               const hop = fold.first ?? local;
-              const id = link(firedBy ?? step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
+              const knownDecision = decisionOf(guards);
+              const knownSite = await withArgs(a.site, fold.node, at);
+              const id = link(firedBy ?? step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], knownDecision ? { ...knownSite, decision: knownDecision } : knownSite, e, a.trigger, hop.within);
               record(fold.node, local, guards, { step: known.id, link: id }, a.trigger, await loopsAt(fold.node, at));
             }
             continue;

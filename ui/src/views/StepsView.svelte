@@ -17,6 +17,8 @@
   import { SvelteFlow, Controls, type Node, type Edge, type Viewport } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import StepNode from '../components/steps/StepNode.svelte';
+  import ForkPoint from '../components/steps/ForkPoint.svelte';
+  import DecisionCaption from '../components/steps/DecisionCaption.svelte';
   import RegionCaption from '../components/steps/RegionCaption.svelte';
   import StepsKey from '../components/steps/StepsKey.svelte';
   import ScreenEdge from '../components/screens/ScreenEdge.svelte';
@@ -40,6 +42,7 @@
     buildStepsModel,
     kindWord,
     kindWords,
+    selectionReach,
     stepEdgeVisible,
     stepNeighbourhood,
     stepPairId,
@@ -130,7 +133,7 @@
       ? { padding: { left: '440px', top: '32px', right: '32px', bottom: '32px' }, maxZoom: 1, minZoom: 0.4 }
       : { padding: 0.1, maxZoom: 1, minZoom: model !== null && model.regions !== null ? 0.2 : 0.4 }
   );
-  const nodeTypes = { step: StepNode, region: RegionCaption };
+  const nodeTypes = { step: StepNode, region: RegionCaption, fork: ForkPoint, decision: DecisionCaption };
 
   /** Two clicks on one box closer than this are a double-click. */
   const DOUBLE_CLICK_MS = 400;
@@ -215,19 +218,31 @@
   /** The order can be asked for and have nothing to read: the view then says so. */
   const orderReadable = $derived(payload?.program != null);
 
+  /** The selection with the decision points it touches — what the edge filter and the dimming reason over. */
+  const reach = $derived(model === null || selected === null ? null : selectionReach(model, selected));
   const neighbours = $derived.by(() => {
-    if (model === null || selected === null) return null;
-    const set = new Set<string>([selected]);
+    if (model === null || reach === null) return null;
+    const set = new Set<string>(reach);
     for (const edge of model.layout.edges) {
-      if (edge.source === selected) set.add(edge.target);
-      if (edge.target === selected) set.add(edge.source);
+      if (reach.has(edge.source)) set.add(edge.target);
+      if (reach.has(edge.target)) set.add(edge.source);
     }
     return set;
   });
 
-  // In the code's order the conditions ON the lines are the picture: they are
-  // drawn at rest, not only for the step the reader selected.
-  const pills = $derived(model === null ? null : placeLabels(model, selected, readAs === 'order'));
+  /**
+   * Which lines are labelled before anything is selected. In the code's order
+   * that is all of them — there the conditions ARE the picture. In the tree it
+   * is the arms of a decision and nothing else: a `yes` and a `no` leaving one
+   * box are the one thing a reader cannot work out from the shape, and drawing
+   * every condition at rest is the unreadable picture the tree exists to avoid.
+   */
+  const atRestLabels = $derived.by<boolean | ReadonlySet<string>>(() => {
+    if (readAs === 'order') return true;
+    if (model === null) return false;
+    return new Set([...model.edges.values()].filter((e) => e.arm !== undefined).map((e) => e.id));
+  });
+  const pills = $derived(model === null ? null : placeLabels(model, selected, atRestLabels));
   const focusId = $derived(hovered?.edge.id ?? panelHot?.edge ?? null);
   const focusPill = $derived.by(() => {
     if (model === null || focusId === null || pills?.pills.has(focusId)) return null;
@@ -248,48 +263,79 @@
       connectable: false,
       data: { label: zone.label, width: zone.width },
     }));
-    return captions.concat(model.layout.nodes.map((node) => ({
-      id: node.id,
-      type: 'step',
-      position: { x: node.x, y: node.y },
-      draggable: false,
-      selectable: false,
-      connectable: false,
-      data: {
-        layout: node,
-        info: model.nodes.get(node.id)!,
-        project: payload?.project ?? 'app',
-        selected: selected === node.id,
-        dimmed: neighbours !== null && !neighbours.has(node.id),
-        onSelect: (id: string) => {
-          // Two clicks on the same box within a beat are a double-click:
-          // the picture starts there. Read here rather than off the DOM's
-          // `dblclick`, which the flow canvas does not always pass on.
-          const now = performance.now();
-          if (lastClick !== null && lastClick.id === id && now - lastClick.at < DOUBLE_CLICK_MS) {
-            lastClick = null;
-            if (startHere(id)) return;
-          }
-          lastClick = { id, at: now };
-          selected = selected === id ? null : id;
-          hovered = null;
-          panelHot = null;
+    // A decision made inside a box, said once under it; each line out of that
+    // box says only which way it is.
+    for (const d of model.decisions) {
+      const owner = d.id.slice(0, d.id.indexOf(' '));
+      captions.push({
+        id: `decision:${d.id}`,
+        type: 'decision',
+        position: { x: d.x, y: d.y },
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        data: { label: d.label, width: d.width, dimmed: neighbours !== null && !neighbours.has(owner) },
+      });
+    }
+    return captions.concat(model.layout.nodes.map((node) => {
+      // A decision's point: not a step — no selection, no panel; the box asks
+      // and the lines out answer.
+      const fork = model.forks?.get(node.id);
+      if (fork) {
+        return {
+          id: node.id,
+          type: 'fork',
+          position: { x: node.x, y: node.y },
+          draggable: false,
+          selectable: false,
+          connectable: false,
+          data: { layout: node, fork, dimmed: neighbours !== null && !neighbours.has(node.id) },
+        };
+      }
+      return {
+        id: node.id,
+        type: 'step',
+        position: { x: node.x, y: node.y },
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        data: {
+          layout: node,
+          info: model.nodes.get(node.id)!,
+          project: payload?.project ?? 'app',
+          selected: selected === node.id,
+          dimmed: neighbours !== null && !neighbours.has(node.id),
+          onSelect: (id: string) => {
+            // Two clicks on the same box within a beat are a double-click:
+            // the picture starts there. Read here rather than off the DOM's
+            // `dblclick`, which the flow canvas does not always pass on.
+            const now = performance.now();
+            if (lastClick !== null && lastClick.id === id && now - lastClick.at < DOUBLE_CLICK_MS) {
+              lastClick = null;
+              if (startHere(id)) return;
+            }
+            lastClick = { id, at: now };
+            selected = selected === id ? null : id;
+            hovered = null;
+            panelHot = null;
+          },
+          // Double-click: the picture starts here — an endpoint or another
+          // screen drawn as a boundary opens as its own chapter. An effect has
+          // no symbol to start from.
+          ...(model.nodes.get(node.id)?.step.node && !model.nodes.get(node.id)?.step.anchor ? { onStart: startHere } : {}),
         },
-        // Double-click: the picture starts here — an endpoint or another
-        // screen drawn as a boundary opens as its own chapter. An effect has
-        // no symbol to start from.
-        ...(model.nodes.get(node.id)?.step.node && !model.nodes.get(node.id)?.step.anchor ? { onStart: startHere } : {}),
-      },
-    })));
+      };
+    }));
   });
 
   const edges = $derived.by<Edge[]>(() => {
     if (model === null) return [];
     const focus = focusId;
     return model.layout.edges
-      .filter((edge) => stepEdgeVisible(model, edge, selected))
+      .filter((edge) => stepEdgeVisible(model, edge, selected, reach ?? undefined))
       .map((edge) => {
-        const touches = selected !== null && (edge.source === selected || edge.target === selected);
+        const touches =
+          reach !== null && (reach.has(edge.source) || reach.has(edge.target));
         const isFocus = focus === edge.id;
         const hot = isFocus || touches;
         return {
@@ -403,7 +449,7 @@
   }
 
   function nameOf(id: string): string {
-    return model?.nodes.get(id)?.label ?? id;
+    return model?.nodes.get(id)?.label ?? model?.forks?.get(id)?.label ?? id;
   }
 
   /** A Flow strip between the two symbols of a link, when both are symbols. */
@@ -771,10 +817,12 @@
         {#if readAs === 'order'}
           <p class="dim">
             <span class="mark">●</span> The anchor is at the top, and each row down is what happens next: a line
-            means <b>and then</b>, and where the code forks the line says what has to hold. A call written inside
-            another call's arguments happens first — the token is signed before the reply that carries it — and an
-            arm that answers, returns or throws simply has nothing leaving it. Click a step for its sites and the
-            whole condition; a step is the next anchor.
+            means <b>and then</b>. Where the code forks both ways, a small box asks the condition once and each
+            line out of it answers — <span class="mono">yes</span>, <span class="mono">no</span>, a case; a lone
+            guard rides its line as <span class="mono">WHEN</span>. A call written inside another call's arguments
+            happens first — the token is signed before the reply that carries it — and an arm that answers,
+            returns or throws simply has nothing leaving it. Click a step for its sites and the whole condition; a
+            step is the next anchor.
           </p>
         {:else}
           <p class="dim">

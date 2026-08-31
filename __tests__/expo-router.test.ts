@@ -580,6 +580,21 @@ describe('expo-router: end-to-end', () => {
     expect(toRoot.when).not.toMatch(/!/);
     expect(toWelcome.when).toMatch(/!\s*\(?\s*await seen\(\)/);
 
+    // …and each site names the DECISION its condition belongs to, so the two
+    // arms can be drawn as one choice rather than as two lines that happen to
+    // read as each other's negation. Same branch, opposite arms, one `on`.
+    const rootArm = toRoot.sites[0]!.decision!;
+    const welcomeArm = toWelcome.sites[0]!.decision!;
+    expect(rootArm.branch).toBe(welcomeArm.branch);
+    expect(rootArm.branch).not.toBe('');
+    expect(rootArm.form).toBe('ternary');
+    expect(rootArm.on).toBe(welcomeArm.on);
+    expect(rootArm.on).toMatch(/await seen\(\)/);
+    expect(rootArm.on).not.toMatch(/^!/);
+    expect(rootArm.not).toBeUndefined();
+    expect(welcomeArm.not).toBe(true);
+    expect(rootArm.arm).not.toBe(welcomeArm.arm);
+
     cg.close();
   });
 });

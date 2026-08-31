@@ -31,10 +31,10 @@
  * same pills, hover and panel. Only the graph changes.
  */
 
-import { conditionTokens, joinTokens, type WordToken } from './conditions';
+import { conditionTokens, joinTokens, whenWords, type WordToken } from './conditions';
 import { buildMapLayout, linkId, PORT_PITCH, type MapLayout } from './map-model';
 import { samplePolyline, trackedCurves, EDGE_LABEL_MAX, SCREEN_LAYER_GAP, type Point } from './screens-model';
-import { stepLabel, stepSub, type StepEdgeInfo, type StepNodeInfo, type StepsModel } from './steps-model';
+import { armWords, stepLabel, stepSub, type StepEdgeInfo, type StepForkInfo, type StepNodeInfo, type StepsModel } from './steps-model';
 import type { WireArm, WireBlock, WireItem, WireMapLink, WireMapModule, WireStep, WireStepsPayload } from './wire';
 
 /* ----------------------------------------------------------------- words -- */
@@ -76,6 +76,8 @@ export interface OrderEdge {
   when: string;
   /** `via generateToken`, `for each item of items`, `later · then` — the run it happens inside. */
   runs: string[];
+  /** A line out of a decision's point: which arm this is — `yes`, `no`, a case's value. */
+  arm?: string;
 }
 
 /** Where a next step would follow from, and under what. */
@@ -83,12 +85,26 @@ interface Tail {
   id: string;
   when: string[];
   runs: string[];
+  arm?: string;
+}
+
+/**
+ * A decision drawn as a point of its own: a fork two or more of whose arms
+ * lead somewhere. Its condition is said once, on the point; each line out
+ * says only which arm it is.
+ */
+export interface OrderFork {
+  id: string;
+  on: string;
+  form: ForkForm;
 }
 
 export interface OrderGraph {
   edges: OrderEdge[];
   /** How many things happen before each step: its row. */
   depth: Map<string, number>;
+  /** The decisions drawn as points, in the order the reading met them. */
+  forks: OrderFork[];
 }
 
 /**
@@ -99,6 +115,7 @@ export function orderGraph(program: NonNullable<WireStepsPayload['program']>, an
   const edges: OrderEdge[] = [];
   const seen = new Set<string>([anchor]);
   const at = new Map<string, OrderEdge>();
+  const forks: OrderFork[] = [];
 
   const join = (from: string, to: string, tail: Tail): void => {
     if (from === to) return;
@@ -110,9 +127,12 @@ export function orderGraph(program: NonNullable<WireStepsPayload['program']>, an
       // a link with several sites does.
       if (when !== found.when) found.when = !when || !found.when ? '' : `${found.when} || ${when}`;
       for (const r of tail.runs) if (!found.runs.includes(r)) found.runs.push(r);
+      // Reached as two different arms of one decision: it happens either way,
+      // and the line stops claiming a side.
+      if (found.arm !== tail.arm) delete found.arm;
       return;
     }
-    const edge: OrderEdge = { from, to, when, runs: [...tail.runs] };
+    const edge: OrderEdge = { from, to, when, runs: [...tail.runs], ...(tail.arm !== undefined ? { arm: tail.arm } : {}) };
     at.set(key, edge);
     edges.push(edge);
   };
@@ -129,11 +149,28 @@ export function orderGraph(program: NonNullable<WireStepsPayload['program']>, an
         if (item.body && item.body.length > 0) inner = flow(item.body, inner, []);
         tails = inner;
       } else if (item.kind === 'fork') {
+        // A decision two or more of whose arms lead somewhere diverges from a
+        // POINT: the condition said once, each line out an arm — instead of
+        // two lines that each carry the whole predicate, one of them negated,
+        // with nothing saying they are the same choice. A fork with one drawn
+        // arm keeps the plain line: an early exit reads as a guard clause.
+        const drawn = item.arms.filter((a) => hasStep(a.body)).length;
+        const fork: OrderFork | null =
+          drawn >= 2 && tails.length > 0 ? { id: `fork:${forks.length}`, on: item.on, form: item.form } : null;
+        if (fork !== null) {
+          forks.push(fork);
+          for (const t of tails) join(t.id, fork.id, { ...t, runs: [...t.runs, ...runs] });
+        }
         const out: Tail[] = [];
         for (const arm of item.arms) {
           // The arm's condition as the SOURCE has it: the words are made once,
           // at the end, or two ways of arriving would each carry their own WHEN.
-          const entry = tails.map((t) => ({ id: t.id, when: [...t.when, arm.when], runs: [...t.runs, ...runs] }));
+          const entry: Tail[] =
+            fork !== null && hasStep(arm.body)
+              ? // From the point: the line says the arm; the arm's own
+                // condition rides along for the hover.
+                [{ id: fork.id, when: [arm.when], runs: [...runs], arm: armWord(item, arm) }]
+              : tails.map((t) => ({ id: t.id, when: [...t.when, arm.when], runs: [...t.runs, ...runs] }));
           // An arm that answers, returns or throws does not rejoin — nothing
           // leaves the last box in it, which is what says so on a canvas.
           const armTails = flow(arm.body, entry, []);
@@ -164,22 +201,50 @@ export function orderGraph(program: NonNullable<WireStepsPayload['program']>, an
     if (id !== anchor && !edges.some((e) => e.to === id)) join(anchor, id, { id: anchor, when: [], runs: [] });
   }
 
-  return { edges, depth: rows(anchor, seen, edges) };
+  const ids = new Set(seen);
+  for (const f of forks) ids.add(f.id);
+  return { edges, depth: rows(anchor, ids, edges), forks };
+}
+
+/** Whether anything in this block draws a box — a fork with one drawn arm is a guard clause, not a point. */
+function hasStep(block: WireBlock): boolean {
+  return block.some((item) =>
+    item.kind === 'step'
+      ? true
+      : item.kind === 'fork'
+        ? item.arms.some((a) => hasStep(a.body))
+        : item.kind === 'block'
+          ? hasStep(item.body)
+          : false
+  );
+}
+
+/** The word on a line out of a decision's point — the same one the tree's arms say. */
+function armWord(fork: Extract<WireItem, { kind: 'fork' }>, arm: WireArm): string {
+  return armWords({ on: fork.on, arm: arm.when, form: fork.form, not: arm.not });
 }
 
 /**
  * The row each step sits on: the longest run of "and then" from the anchor to
- * it, so a step never draws above something that has to happen first. Settled
- * by relaxation rather than a topological sort, because a step reached twice
- * (`session.add` before and after a check) can make the graph cyclic.
+ * it, so a step never draws above something that has to happen first.
+ *
+ * A step reached twice (`session.add` before and after a check, a logout
+ * helper the code comes back to) makes the graph cyclic, and relaxing over a
+ * cycle never settles — it adds a row on every pass until the pass bound, so
+ * sixteen boxes spread over sixty rows and the picture is a mostly-empty
+ * ribbon no fit can open on. So the lines that close a cycle are dropped
+ * first: a line back to something already on the way here cannot be what
+ * decides its row. The longest path over what remains settles by relaxation,
+ * and no picture is ever taller than it has boxes.
  */
 function rows(anchor: string, nodes: ReadonlySet<string>, edges: readonly OrderEdge[]): Map<string, number> {
+  const forward = withoutBackEdges(anchor, nodes, edges);
   const depth = new Map<string, number>();
   for (const id of nodes) depth.set(id, 0);
   depth.set(anchor, 0);
   for (let pass = 0; pass < nodes.size; pass++) {
     let moved = false;
-    for (const e of edges) {
+    for (const e of forward) {
       const next = (depth.get(e.from) ?? 0) + 1;
       if (next > (depth.get(e.to) ?? 0)) {
         depth.set(e.to, next);
@@ -189,6 +254,46 @@ function rows(anchor: string, nodes: ReadonlySet<string>, edges: readonly OrderE
     if (!moved) break;
   }
   return depth;
+}
+
+/**
+ * The edges minus the ones that close a cycle — those whose end is still open
+ * on the way in, found by one walk from the anchor (then from anything it
+ * does not reach), so the reading's own order decides which way round a cycle
+ * is the forward one.
+ */
+function withoutBackEdges(anchor: string, nodes: ReadonlySet<string>, edges: readonly OrderEdge[]): OrderEdge[] {
+  const out = new Map<string, OrderEdge[]>();
+  for (const e of edges) {
+    const list = out.get(e.from);
+    if (list) list.push(e);
+    else out.set(e.from, [e]);
+  }
+  /** 1 = open on the way in, 2 = done with. */
+  const state = new Map<string, 1 | 2>();
+  const back = new Set<OrderEdge>();
+  for (const root of [anchor, ...nodes]) {
+    if (state.has(root)) continue;
+    state.set(root, 1);
+    const stack: Array<{ id: string; next: number }> = [{ id: root, next: 0 }];
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      const list = out.get(top.id) ?? [];
+      if (top.next >= list.length) {
+        state.set(top.id, 2);
+        stack.pop();
+        continue;
+      }
+      const edge = list[top.next++]!;
+      const seen = state.get(edge.to);
+      if (seen === 1) back.add(edge);
+      else if (seen === undefined) {
+        state.set(edge.to, 1);
+        stack.push({ id: edge.to, next: 0 });
+      }
+    }
+  }
+  return edges.filter((e) => !back.has(e));
 }
 
 /* ----------------------------------------------------------------- build -- */
@@ -207,6 +312,7 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
   const graph = orderGraph(payload.program, anchorStep.id);
 
   const nodes = new Map<string, StepNodeInfo>();
+  const forks = new Map<string, StepForkInfo>();
   const modules: WireMapModule[] = [];
   const counts: StepsModel['counts'] = { anchor: 0, screen: 0, trigger: 0, bridge: 0, event: 0, store: 0, effect: 0 };
   const degree = new Map<string, number>();
@@ -235,11 +341,30 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
       fileList: { total: 1, shown: 1, truncated: false, items: [step.node?.file ?? step.sub] },
     });
   }
+  // Each decision is a point of its own on the canvas: a small box asking the
+  // condition once, where the arms diverge.
+  for (const f of graph.forks) {
+    const label = forkLabel(f.on);
+    forks.set(f.id, { id: f.id, on: f.on, form: f.form, label });
+    modules.push({
+      id: f.id,
+      label,
+      files: 0,
+      symbols: degree.get(f.id) ?? 0,
+      languages: [],
+      test: false,
+      generated: 0,
+      generatedFiles: [],
+      facade: false,
+      fileList: { total: 0, shown: 0, truncated: false, items: [] },
+    });
+  }
+  const drawn = (id: string): boolean => nodes.has(id) || forks.has(id);
 
   const links: WireMapLink[] = [];
   const edges = new Map<string, StepEdgeInfo>();
   for (const e of graph.edges) {
-    if (!nodes.has(e.from) || !nodes.has(e.to)) continue;
+    if (!drawn(e.from) || !drawn(e.to)) continue;
     const key = linkId({ source: e.from, target: e.to });
     if (edges.has(key)) continue;
     links.push({ source: e.from, target: e.to, count: 1, declared: 1, byKind: [{ kind: 'calls', count: 1 }], topPairs: [] });
@@ -257,6 +382,15 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
     });
   }
 
+  // A point sits where its arms are: the leftmost of them, in the code's order.
+  const forkOrder = new Map<string, number>();
+  for (const e of graph.edges) {
+    if (!forks.has(e.from)) continue;
+    const order = byId.get(e.to)?.order;
+    if (order === undefined) continue;
+    forkOrder.set(e.from, Math.min(forkOrder.get(e.from) ?? Number.MAX_SAFE_INTEGER, order));
+  }
+
   // Row 0 is the bottom, so the anchor — nothing happens before it — is on top.
   const deepest = Math.max(0, ...graph.depth.values());
   const layering = (ids: string[]): Map<string, number> =>
@@ -268,6 +402,8 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
       includeTests: true,
       minWeight: 0,
       sizing: (m) => {
+        const fork = forks.get(m.id);
+        if (fork) return { label: fork.label, meta: '' };
         const info = nodes.get(m.id);
         // Size for the ` …` a cut step wears and the anchor's ● mark, or the
         // CSS ellipsis eats the name's tail.
@@ -276,7 +412,7 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
         return { label: mark + (info?.label ?? m.id) + cut, meta: info?.sub ?? '' };
       },
       layering,
-      order: (id) => nodes.get(id)?.step.order ?? Number.MAX_SAFE_INTEGER,
+      order: (id) => nodes.get(id)?.step.order ?? forkOrder.get(id) ?? Number.MAX_SAFE_INTEGER,
       layerGap: SCREEN_LAYER_GAP,
       portPitch: PORT_PITCH,
       ports: 'directional',
@@ -285,18 +421,29 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
   const curves = trackedCurves(layout, SCREEN_LAYER_GAP);
   const polylines = new Map<string, Point[]>();
   for (const [id, curve] of curves) polylines.set(id, samplePolyline(curve, HIT_SAMPLES));
-  // The order reading needs no regions: its rows already say when.
-  return { layout, nodes, edges, layerGap: SCREEN_LAYER_GAP, curves, polylines, counts, regions: null, regionEntries: null };
+  // The order reading needs no regions: its rows already say when. Its
+  // decisions are points between steps, not captions under a box.
+  return { layout, nodes, edges, layerGap: SCREEN_LAYER_GAP, curves, polylines, counts, regions: null, regionEntries: null, forks, decisions: [] };
 }
 
 /**
- * What a line says: the whole condition the step at its end runs under — this
- * picture's lines ARE its conditions, so they are not shortened to the last
- * clause the way the other reading's are — else the run it happens inside
- * (`via generateToken`), and nothing at all when the code simply goes on.
+ * What a line says: the arm it is, when it leaves a decision's point — the
+ * point asks, the line answers — else the whole condition the step at its end
+ * runs under (this picture's lines ARE its conditions, so they are not
+ * shortened to the last clause the way the other reading's are), else the run
+ * it happens inside (`via generateToken`), and nothing at all when the code
+ * simply goes on.
  */
 export function lineWords(e: OrderEdge): string {
+  if (e.arm) return e.arm;
   if (!e.when) return e.runs.length > 0 ? e.runs[e.runs.length - 1]! : '';
   const text = joinTokens(whenTokens(e.when));
   return text.length > EDGE_LABEL_MAX ? `${text.slice(0, EDGE_LABEL_MAX - 1)}…` : text;
+}
+
+/** The point's words: the condition once, as the view says conditions, asking. */
+function forkLabel(on: string): string {
+  const text = whenWords(on);
+  if (!text) return '?';
+  return text.length > EDGE_LABEL_MAX ? `${text.slice(0, EDGE_LABEL_MAX - 1)}…?` : `${text}?`;
 }

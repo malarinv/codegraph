@@ -714,6 +714,26 @@ export interface WireStepSite {
   trigger?: WireStepTrigger;
   /** For a response site: the status code it sends, when literal. */
   status?: number;
+  /**
+   * The decision the site's INNERMOST condition belongs to, when one was
+   * read. Two sites that agree on `branch` and disagree on `arm` are the two
+   * ways of ONE fork — which a joined condition string can never say, however
+   * exactly one reads as the other's negation.
+   */
+  decision?: WireStepDecision;
+}
+
+/** One arm of one decision, as the site that runs under it records it. */
+export interface WireStepDecision {
+  /** Where the branching construct starts (`line:column`) — the fork's identity. */
+  branch: string;
+  /** The decision as a reader says it, always positive: `await hasSeenWelcome(…)`. */
+  on: string;
+  /** THIS arm's own condition — an `if` and its `else` differ here and nowhere else. */
+  arm: string;
+  form: 'if' | 'switch' | 'ternary' | 'try';
+  /** The arm taken when the condition does NOT hold — the `else` side. */
+  not?: true;
 }
 
 /** What fires a step or a link: the event it is written under, and the function that writes it there. */

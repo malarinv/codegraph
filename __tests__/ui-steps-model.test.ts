@@ -4,9 +4,9 @@
  * rule, and the panel's two lists.
  */
 import { describe, it, expect } from 'vitest';
-import { buildStepsModel, countWords, kindWord, kindWords, stepEdgeVisible, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
+import { armWords, buildStepsModel, countWords, kindWord, kindWords, stepEdgeVisible, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
 import { placeLabels } from '../ui/src/lib/screens-model';
-import type { WireNodeRef, WireStep, WireStepLink, WireStepsPayload } from '../ui/src/lib/wire';
+import type { WireNodeRef, WireStep, WireStepLink, WireStepSite, WireStepsPayload } from '../ui/src/lib/wire';
 
 function ref(name: string, file = 'src/a.tsx', language: WireNodeRef['language'] = 'tsx'): WireNodeRef {
   return { id: `function:${name}`, kind: 'function', name, qualifiedName: name, file, line: 1, endLine: 9, language, test: false };
@@ -114,6 +114,95 @@ describe('steps model', () => {
     const lists = stepNeighbourhood(payload([screen, handler, bridge, event, effect, store, home], links), event.id);
     expect(lists.arrivesFrom.map((l) => l.from)).toEqual([bridge.id]);
     expect(lists.leadsTo.map((l) => l.to)).toEqual([effect.id, store.id, home.id, store.id]);
+  });
+});
+
+describe('a decision drawn where it is made', () => {
+  // The real shape this exists for: `return (await hasSeenWelcome(id)) ?
+  // '/home/' : '/welcome/'` inside a store action, whose two returned routes
+  // are two `navigates` edges out of ONE box. Each carried the whole
+  // predicate — one of them the other's negation — and at rest the tree drew
+  // both with no label at all, so nothing said it was a choice.
+  const ON = 'await hasSeenWelcome(welcomeUserId())';
+  const BRANCH = '140:9';
+  const site = (when: string, not?: true): WireStepSite => ({
+    file: 'src/org-user.storage.ts',
+    line: 140,
+    text: `push ${when}`,
+    when,
+    decision: { branch: BRANCH, on: ON, arm: when, form: 'ternary', ...(not ? { not: true as const } : {}) },
+  });
+
+  const anchor = step('/terms-of-service', 'screen', 0, { anchor: true });
+  const resolve = step('resolvePostLoginRoute', 'store', 1, { node: ref('resolvePostLoginRoute', 'src/org-user.storage.ts') });
+  const home = step('/home', 'screen', 2, { screen: { path: '/home', component: null } });
+  const welcome = step('/welcome', 'screen', 2, { screen: { path: '/welcome', component: null } });
+  const links = [
+    link(anchor, resolve, { kind: 'store' }),
+    link(resolve, home, { kind: 'navigates', when: ON, sites: [site(ON)] }),
+    link(resolve, welcome, { kind: 'navigates', when: `!(${ON})`, sites: [site(`!(${ON})`, true)] }),
+  ];
+  const model = buildStepsModel(payload([anchor, resolve, home, welcome], links));
+  const edgeTo = (id: string) => [...model.edges.values()].find((e) => e.to === id)!;
+
+  it('says the condition once, under the box that decides it', () => {
+    expect(model.decisions).toHaveLength(1);
+    const d = model.decisions[0]!;
+    expect(d.label).toBe('await hasSeenWelcome(welcomeUserId())?');
+    // Under the deciding box and centred on it — not under the arms. The
+    // condition may take more room than the box, since reading it is the
+    // whole point of the caption.
+    const box = model.layout.nodes.find((n) => n.id === resolve.id)!;
+    expect(d.x + d.width / 2).toBeCloseTo(box.x + box.width / 2, 5);
+    expect(d.width).toBeGreaterThanOrEqual(box.width);
+    expect(d.y).toBeGreaterThan(box.y + box.height - 1);
+  });
+
+  it('each line out answers, instead of carrying the whole predicate', () => {
+    expect(edgeTo(home.id).arm).toBe('yes');
+    expect(edgeTo(home.id).label).toBe('yes');
+    expect(edgeTo(welcome.id).arm).toBe('no');
+    expect(edgeTo(welcome.id).label).toBe('no');
+    // The line into the deciding box is not an arm of anything.
+    expect(edgeTo(resolve.id).arm).toBeUndefined();
+  });
+
+  it('labels the arms at rest — and only the arms', () => {
+    const arms = new Set([...model.edges.values()].filter((e) => e.arm !== undefined).map((e) => e.id));
+    const pills = placeLabels(model, null, arms);
+    expect([...pills.pills.values()].map((p) => p.text).sort()).toEqual(['→ no', '→ yes']);
+    // With nothing asked for, the tree stays unlabelled as it always was.
+    expect(placeLabels(model, null, false).pills.size).toBe(0);
+  });
+
+  it('keeps a lone arm, and a step reached either way, on a plain line', () => {
+    // One drawn arm is a guard clause, not a choice.
+    const only = buildStepsModel(
+      payload([anchor, resolve, home], [link(anchor, resolve, { kind: 'store' }), link(resolve, home, { kind: 'navigates', when: ON, sites: [site(ON)] })])
+    );
+    expect(only.decisions).toEqual([]);
+    expect([...only.edges.values()].every((e) => e.arm === undefined)).toBe(true);
+
+    // A connector with a site that runs under NO condition is not exclusively
+    // an arm — the step happens either way — so it never claims a side.
+    const both = buildStepsModel(
+      payload(
+        [anchor, resolve, home, welcome],
+        [
+          link(anchor, resolve, { kind: 'store' }),
+          link(resolve, home, { kind: 'navigates', when: ON, sites: [site(ON), { file: 'x.ts', line: 9, text: 'push', when: '' }] }),
+          link(resolve, welcome, { kind: 'navigates', when: `!(${ON})`, sites: [site(`!(${ON})`, true)] }),
+        ]
+      )
+    );
+    expect(both.decisions).toEqual([]);
+  });
+
+  it('words a switch arm by its own value, and the default by else', () => {
+    expect(armWords({ on: 'status', arm: "status === 'expired'", form: 'switch' })).toBe("'expired'");
+    expect(armWords({ on: 'status', arm: 'anything', form: 'switch', not: true })).toBe('else');
+    expect(armWords({ on: 'ready', arm: 'ready', form: 'if' })).toBe('yes');
+    expect(armWords({ on: 'ready', arm: '!ready', form: 'if', not: true })).toBe('no');
   });
 });
 
