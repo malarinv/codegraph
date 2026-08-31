@@ -15,12 +15,14 @@
     project: ProjectKind;
     /** The reading on screen: the rail's rows, or the canvas's. */
     order: boolean;
+    /** A screen's picture, laid out by region rather than by distance. */
+    regions?: boolean;
     /** In the flow of a scrolling rail rather than floating over a canvas. */
     flow: boolean;
     open: boolean;
     onToggle: (open: boolean) => void;
   }
-  let { project, order, flow, open, onToggle }: Props = $props();
+  let { project, order, regions = false, flow, open, onToggle }: Props = $props();
 </script>
 
 <div class="legend" class:open class:flow>
@@ -31,8 +33,31 @@
     <div class="legend-body">
       <div class="lrow">
         <span class="k-box k-anchor mono"><span class="mark">●</span>start</span>
-        <span>{order ? 'Where the picture starts; below it, what it does in the code’s own order' : 'Where the picture starts; each row down is one more step away'}</span>
+        <span
+          >{order
+            ? 'Where the picture starts; below it, what it does in the code’s own order'
+            : regions
+              ? 'Where the picture starts; below it, the parts of the ' + kindWord('screen', project) + ', each with what happens there'
+              : 'Where the picture starts; each row down is one more step away'}</span
+        >
       </div>
+      {#if regions && !order}
+        <div class="lrow">
+          <span class="k-cap mono">Name</span>
+          <span
+            >A region — the component that owns the boxes under its rule, a box above what it sets in motion. One line from
+            the start into each region stands in for the {kindWord('screen', project)}'s whole fan-out; every other line
+            draws where it leads</span
+          >
+        </div>
+        <div class="lrow">
+          <span class="k-label">no line</span>
+          <span
+            >A box nothing points at is the region's own doing — run on render or mount, or from a binding written inline.
+            Select it and its line from the {kindWord('screen', project)} lights, with what fires it</span
+          >
+        </div>
+      {/if}
       {#if project === 'api'}
         <div class="lrow">
           <span class="k-box mono">POST /x</span>
@@ -187,6 +212,12 @@
 .k-label {
   font-size: 10.5px;
   color: var(--ink-3);
+}
+.k-cap {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--rule-soft);
+  padding-bottom: 2px;
 }
 .k-box {
   box-sizing: border-box;

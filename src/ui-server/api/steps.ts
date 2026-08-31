@@ -124,6 +124,17 @@ export interface WireStep {
    */
   order?: number;
   /**
+   * For a SCREEN anchor's picture: the region of the screen this step belongs
+   * to — the top-level component (or hook) of the screen's tree the walk first
+   * reached it through, the screen's own component for a call written in the
+   * screen body, and the first-reaching parent's region for everything deeper.
+   * The viewer lays a screen's picture out by these: a screen is a set of
+   * handlers with no order between them, so distance alone put ninety boxes on
+   * one row. Absent for an endpoint's or a function's picture, whose rows
+   * already read in the code's order.
+   */
+  region?: { id: string; label: string };
+  /**
    * For a screen or an endpoint: its path and the symbol that serves it — the
    * component a screen renders, the handler an endpoint runs. `endpoint` when
    * the route leads with an HTTP verb (`POST /users`); `inline` when the
@@ -602,6 +613,43 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
   const fileScopeRefs = new Map<string, Edge[]>();
   const fileScopeUnresolved = new Map<string, UnresolvedReference[]>();
 
+  /**
+   * The spans of the calls that became effect steps, per function — and the
+   * step a binding written inside one arrives from. `Alert.prompt('Add
+   * Folder', …, [{ onPress: (name) => createBackgroundFolder(name) }])` is
+   * two facts: the prompt is a device box, and the prompt's button FIRES the
+   * handler — so the handler's line belongs to the prompt, not to the screen
+   * the prompt is written on, which fires everything and says nothing. A site
+   * is rewired only when its own trigger names the call (`onPress ·
+   * Alert.prompt(…)`) and its position falls inside that call's span in the
+   * same function; the innermost such span wins. An `onSubmit · useFormik(…)`
+   * names no effect and stays where it was.
+   */
+  const firedSpans = new Map<
+    string,
+    Array<{ start: { line: number; column: number }; end: { line: number; column: number }; step: StepRecord }>
+  >();
+  const firedByEffect = (fnId: string, at: { line?: number; column?: number }, of: string): StepRecord | null => {
+    if (at.line === undefined) return null;
+    const spans = firedSpans.get(fnId);
+    if (!spans) return null;
+    const last = (n: string) => n.replace(/\([^()]*\)/g, '').split(/[.:]/).pop() ?? n;
+    const want = last(of);
+    const line = at.line;
+    const column = at.column ?? 0;
+    let best: (typeof spans)[number] | null = null;
+    for (const s of spans) {
+      if (line < s.start.line || line > s.end.line) continue;
+      if (line === s.start.line && column < s.start.column) continue;
+      if (line === s.end.line && column > s.end.column) continue;
+      if (!s.step.effect?.apis.some((api) => last(api) === want)) continue;
+      if (best === null || s.start.line > best.start.line || (s.start.line === best.start.line && s.start.column > best.start.column)) {
+        best = s;
+      }
+    }
+    return best?.step ?? null;
+  };
+
   const stepFor = (node: Node, kind: WireStepKind, depth: number, extra: Partial<WireStep> = {}): StepRecord | null => {
     const existing = steps.get(node.id);
     if (existing) {
@@ -758,7 +806,12 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       effect.category === 'response'
         ? (responseStatus(text, args, ref.referenceKind) ?? (usable && typeof site.status === 'number' ? site.status : null) ?? implicitResponseStatus(text))
         : null;
-    const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, step.depth + 1, status);
+    // What fires this call, read before its box is made: a call bound inside
+    // ANOTHER effect's arguments — the axios.delete in a confirm dialog's
+    // button — hangs off that box, one step deeper, not off the screen.
+    const fired = trigger ?? (await triggerAt(fold.node, at));
+    const from = fired?.of ? (firedByEffect(fold.node.id, at, fired.of) ?? step) : step;
+    const target = effectStep(fold.node, { referenceName: text, line: ref.line }, effect, from.depth + 1, status);
     if (target === null) return true;
     const guards = await guardsAt(fold.node, at);
     const when = guardLabel(guards);
@@ -775,10 +828,16 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
       end: site?.span?.end ?? { line: ref.line, column: ref.column ?? 0 },
       within: site?.within ?? null,
     };
+    // This call's own span, for the bindings written inside its arguments.
+    if (usable && site?.span) {
+      const list = firedSpans.get(fold.node.id) ?? [];
+      list.push({ start: { line: local.line, column: local.column }, end: local.end, step: target });
+      firedSpans.set(fold.node.id, list);
+    }
     const hop: HopSite = fold.first ?? local;
     if (!target.first) target.first = hop;
-    const fired = trigger ?? (await triggerAt(fold.node, at));
-    const id = link(step, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, fired, hop.within);
+    if (!target.region) target.region = regionOf(from, fold.chain);
+    const id = link(from, target, 'effect', fold.chain, [...fold.whens, when], wireSite, null, fired, hop.within);
     record(fold.node, local, guards, { step: target.id, link: id }, fired, await loopsAt(fold.node, at));
     return true;
   };
@@ -860,6 +919,23 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
     const t = await consumerTrigger(anchor);
     if (t) first.trigger = t;
   }
+  // A screen's picture is laid out by REGION — the part of the screen each
+  // step belongs to. The evidence is the walk's own: a step reached out of the
+  // anchor descends through the fold's chain, whose FIRST node is the
+  // top-level component (or hook) of the screen's tree; a chain of nothing is
+  // a call written in the screen body itself; and a step reached from any
+  // other step belongs where its first-reaching parent does. First reach wins,
+  // as `first` does — a shared store is one box, in the region that got there
+  // first, and every other region's way in is a link. An endpoint or a
+  // function reads in the code's order and carries none of this.
+  const regions = first.kind === 'screen' && !first.screen?.endpoint;
+  const regionOf = (from: StepRecord, chain: readonly Node[]): WireStep['region'] => {
+    if (!regions) return undefined;
+    if (!from.anchor) return from.region;
+    const head = chain[0];
+    if (head) return { id: head.id, label: head.name };
+    return { id: from.root?.id ?? from.id, label: from.root?.name ?? from.label };
+  };
   const queue: StepRecord[] = [first];
   /** Steps whose exploration has been queued — each is explored once, from the first row it appears on. */
   const explored = new Set<string>([first.id]);
@@ -1159,14 +1235,19 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
 
         for (const a of arrivals) {
           if (a.kind === null) continue;
+          const at = { line: a.e.line, column: a.e.column };
+          // A binding written inside an effect call's arguments — the dialog's
+          // `onPress` — arrives from that box, not from the step that owns
+          // the fold: the prompt fires it.
+          const firedBy = a.trigger?.of ? firedByEffect(fold.node.id, at, a.trigger.of) : null;
+          const from = firedBy ?? step;
           const fresh = !steps.has(a.target.id);
-          const to = stepFor(a.target, a.kind, step.depth + 1, a.extra);
+          const to = stepFor(a.target, a.kind, from.depth + 1, a.extra);
           if (to === null) continue;
           if (fresh && !to.trigger) {
             const t = a.target.kind === 'route' ? await requestTrigger(a.target, to.root) : await consumerTrigger(a.target);
             if (t) to.trigger = t;
           }
-          const at = { line: a.e.line, column: a.e.column };
           const guards = await guardsAt(fold.node, at);
           const when = guardLabel(guards);
           // A call-shaped hop says what it passes; a navigation already says
@@ -1178,14 +1259,26 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           if (typeof a.meta.channel === 'string' && a.meta.channel !== 'server-action') {
             const written = await callAt(fold.node, at);
             site = written && written.callee ? { ...a.site, text: written.callee, args: written.args } : await withArgs(a.site, fold.node, at);
-          } else if (a.linkKind === 'bridge' || a.linkKind === 'store' || a.linkKind === 'calls') site = await withArgs(a.site, fold.node, at);
+          } else if (
+            a.linkKind === 'bridge' ||
+            a.linkKind === 'store' ||
+            a.linkKind === 'calls' ||
+            // A handler BOUND passes nothing (`onPress={handleX}`), but a
+            // handler CALLED from under a binding is a call like any other —
+            // and `tryCatchSync(onClosePress)`'s argument is the whole answer
+            // to what a wrapper wraps.
+            (a.linkKind === 'handler' && (a.e.kind === 'calls' || a.e.kind === 'instantiates'))
+          ) {
+            site = await withArgs(a.site, fold.node, at);
+          }
           // Where this step is first reached from: the hop out of the root
           // this fold descends from, else this site — its position orders the row.
           const isCallHop = a.e.kind === 'calls' || a.e.kind === 'instantiates' || a.e.kind === 'navigates';
           const local = isCallHop ? await hopAt(fold.node, at, a.target.name) : pointHop(fold.node, at);
           const hop = fold.first ?? local;
           if (!to.first) to.first = hop;
-          const id = link(step, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
+          if (!to.region) to.region = regionOf(from, fold.chain);
+          const id = link(from, to, a.linkKind, fold.chain, [...fold.whens, when], site, a.e, a.trigger, hop.within);
           record(fold.node, local, guards, { step: to.id, link: id }, a.trigger, await loopsAt(fold.node, at));
           if (to.root !== null && !explored.has(to.id)) {
             explored.add(to.id);
@@ -1220,10 +1313,11 @@ export async function buildSteps(cg: CodeGraph, projectRoot: string, query: URLS
           if (known) {
             if (known.id !== step.id) {
               const at = { line: e.line, column: e.column };
+              const firedBy = a.trigger?.of ? firedByEffect(fold.node.id, at, a.trigger.of) : null;
               const guards = await guardsAt(fold.node, at);
               const local = await hopAt(fold.node, at, target.name);
               const hop = fold.first ?? local;
-              const id = link(step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
+              const id = link(firedBy ?? step, known, 'calls', fold.chain, [...fold.whens, guardLabel(guards)], await withArgs(a.site, fold.node, at), e, a.trigger, hop.within);
               record(fold.node, local, guards, { step: known.id, link: id }, a.trigger, await loopsAt(fold.node, at));
             }
             continue;

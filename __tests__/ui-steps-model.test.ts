@@ -4,7 +4,7 @@
  * rule, and the panel's two lists.
  */
 import { describe, it, expect } from 'vitest';
-import { buildStepsModel, countWords, kindWord, kindWords, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
+import { buildStepsModel, countWords, kindWord, kindWords, stepEdgeVisible, stepLabel, stepNeighbourhood, stepSub, stepViaText, triggerWords } from '../ui/src/lib/steps-model';
 import { placeLabels } from '../ui/src/lib/screens-model';
 import type { WireNodeRef, WireStep, WireStepLink, WireStepsPayload } from '../ui/src/lib/wire';
 
@@ -148,5 +148,86 @@ describe('row order', () => {
     const model = buildStepsModel(payload([anchor, d, c, b, a], [link(anchor, a), link(anchor, b), link(anchor, c), link(anchor, d)]));
     const row = model.layout.nodes.filter((n) => n.id !== anchor.id).sort((x, y) => x.x - y.x).map((n) => n.id);
     expect(row).toEqual([a.id, b.id, c.id, d.id]);
+  });
+});
+
+describe('a screen laid out by region', () => {
+  const A = { id: 'component:PanelA', label: 'PanelA' };
+  const B = { id: 'component:PanelB', label: 'PanelB' };
+  const anchor = step('/', 'screen', 0, { anchor: true });
+  const a1 = step('tapSave', 'trigger', 1, { order: 0, region: A });
+  const a2 = step('tapUndo', 'trigger', 1, { order: 1, region: A });
+  const a3 = step('saveThing', 'store', 2, { order: 0, region: A, node: ref('saveThing', 'src/things.storage.ts') });
+  const b1 = step('tapShare', 'trigger', 1, { order: 2, region: B, node: ref('tapShare', 'src/b.tsx') });
+  const links = [
+    link(anchor, a1),
+    link(anchor, a2),
+    link(anchor, b1),
+    link(a1, a3, { kind: 'store' }),
+    link(a1, b1),
+    // Another region's way into a shared store — a lead-to line like any other.
+    link(b1, a3, { kind: 'store' }),
+  ];
+  const model = buildStepsModel(payload([anchor, a1, a2, b1, a3], links));
+  const at = (id: string) => model.layout.nodes.find((n) => n.id === id)!;
+  const between = (id: string, zone: { x: number; width: number }) => {
+    const n = at(id);
+    return n.x >= zone.x && n.x + n.width <= zone.x + zone.width;
+  };
+  const edge = (from: string, to: string) => model.layout.edges.find((e) => e.source === from && e.target === to)!;
+
+  it('names the regions in the order the walk met them, each holding its own boxes', () => {
+    expect(model.regions!.map((z) => z.label)).toEqual(['PanelA', 'PanelB']);
+    const [zoneA, zoneB] = model.regions!;
+    expect(between(a1.id, zoneA!)).toBe(true);
+    expect(between(a2.id, zoneA!)).toBe(true);
+    expect(between(a3.id, zoneA!)).toBe(true);
+    expect(between(b1.id, zoneB!)).toBe(true);
+    // Side by side, not overlapping: the second region starts past the first.
+    expect(zoneB!.x).toBeGreaterThanOrEqual(zoneA!.x + zoneA!.width);
+  });
+
+  it('keeps a step above what it sets in motion, inside its region', () => {
+    expect(at(anchor.id).y).toBeLessThan(at(a1.id).y);
+    expect(at(a1.id).y).toBe(at(a2.id).y);
+    expect(at(a3.id).y).toBeGreaterThan(at(a1.id).y);
+  });
+
+  it('at rest hides only the screen’s own fan and what points back up; every other lead-to draws', () => {
+    expect(model.regionEntries).toEqual(new Set([a1.id, b1.id]));
+    // One line from the screen into each region stands in for its whole fan.
+    expect(stepEdgeVisible(model, edge(anchor.id, a1.id), null)).toBe(true);
+    expect(stepEdgeVisible(model, edge(anchor.id, a2.id), null)).toBe(false);
+    expect(stepEdgeVisible(model, edge(anchor.id, b1.id), null)).toBe(true);
+    // A region's internal line, and another region's way into a shared step.
+    expect(stepEdgeVisible(model, edge(a1.id, a3.id), null)).toBe(true);
+    expect(stepEdgeVisible(model, edge(b1.id, a3.id), null)).toBe(true);
+    // Two boxes on one row point sideways — back-ish, a click away as everywhere.
+    expect(stepEdgeVisible(model, edge(a1.id, b1.id), null)).toBe(false);
+    // Selecting a step brings out everything that touches it, and only that.
+    expect(stepEdgeVisible(model, edge(a1.id, b1.id), a1.id)).toBe(true);
+    expect(stepEdgeVisible(model, edge(anchor.id, a2.id), a1.id)).toBe(false);
+  });
+
+  it('stacks a handler above the store it calls, even when both are one hop from the screen', () => {
+    // Anchor distance is flat inside a region: both of these are depth 1, and
+    // side by side their link was a level arch, hidden at rest — the store
+    // floated. The region's own links order its rows instead.
+    const C = { id: 'component:PanelC', label: 'PanelC' };
+    const root = step('/', 'screen', 0, { anchor: true });
+    const h = step('tapCopy', 'trigger', 1, { order: 0, region: C });
+    const s = step('copyThing', 'store', 1, { order: 1, region: C, node: ref('copyThing', 'src/c.storage.ts') });
+    const m = buildStepsModel(payload([root, h, s], [link(root, h), link(root, s), link(h, s, { kind: 'store' })]));
+    const y = (id: string) => m.layout.nodes.find((n) => n.id === id)!.y;
+    expect(y(s.id)).toBeGreaterThan(y(h.id));
+    const e = m.layout.edges.find((x) => x.source === h.id && x.target === s.id)!;
+    expect(e.route).toBe('down');
+    expect(stepEdgeVisible(m, e, null)).toBe(true);
+  });
+
+  it('a payload without regions keeps the rows, and the Map’s at-rest rule', () => {
+    const plain = buildStepsModel(payload([step('/x', 'screen', 0, { anchor: true }), step('go', 'trigger', 1)], [link(step('/x', 'screen', 0, { anchor: true }), step('go', 'trigger', 1))]));
+    expect(plain.regions).toBeNull();
+    expect(plain.regionEntries).toBeNull();
   });
 });

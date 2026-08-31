@@ -17,6 +17,7 @@
   import { SvelteFlow, Controls, type Node, type Edge, type Viewport } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import StepNode from '../components/steps/StepNode.svelte';
+  import RegionCaption from '../components/steps/RegionCaption.svelte';
   import StepsKey from '../components/steps/StepsKey.svelte';
   import ScreenEdge from '../components/screens/ScreenEdge.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
@@ -32,13 +33,14 @@
   } from '../lib/api';
   import { live } from '../lib/live.svelte';
   import { fileHref, flowHref, navigate, stepsHref, symbolHref } from '../lib/navigation';
-  import { isEdgeVisible, type MapEdgeLayout } from '../lib/map-model';
+  import type { MapEdgeLayout } from '../lib/map-model';
   import { hoverPill, nearestEdge, placeLabels } from '../lib/screens-model';
   import { commonTokens, conditionTokens, restTokens, scenarios, whenWords, type WordToken } from '../lib/conditions';
   import {
     buildStepsModel,
     kindWord,
     kindWords,
+    stepEdgeVisible,
     stepNeighbourhood,
     stepPairId,
     stepViaText,
@@ -118,14 +120,17 @@
   /**
    * The fit. A picture of a few boxes is centred — and the key, bottom left,
    * would sit on its second row; it is fitted to the right of the key instead.
-   * A picture of many boxes is fitted to the whole stage, as the Screens view's.
+   * A picture of many boxes is fitted to the whole stage, as the Screens view's
+   * — and a picture laid out by region may fit far out: the regions and their
+   * captions are the overview, and the reader zooms into one, where a 0.4
+   * floor on a big screen's picture opened on a window torn out of its middle.
    */
   const fitOptions = $derived(
     model !== null && model.layout.nodes.length <= 24 && legendOpen
       ? { padding: { left: '440px', top: '32px', right: '32px', bottom: '32px' }, maxZoom: 1, minZoom: 0.4 }
-      : { padding: 0.1, maxZoom: 1, minZoom: 0.4 }
+      : { padding: 0.1, maxZoom: 1, minZoom: model !== null && model.regions !== null ? 0.2 : 0.4 }
   );
-  const nodeTypes = { step: StepNode };
+  const nodeTypes = { step: StepNode, region: RegionCaption };
 
   /** Two clicks on one box closer than this are a double-click. */
   const DOUBLE_CLICK_MS = 400;
@@ -232,7 +237,18 @@
 
   const nodes = $derived.by<Node[]>(() => {
     if (model === null) return [];
-    return model.layout.nodes.map((node) => ({
+    // A screen's picture carries a caption over each region — text in the gap
+    // above the region's first line, taking no pointer.
+    const captions: Node[] = (model.regions ?? []).map((zone) => ({
+      id: `region:${zone.id}`,
+      type: 'region',
+      position: { x: zone.x, y: zone.y - 32 },
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      data: { label: zone.label, width: zone.width },
+    }));
+    return captions.concat(model.layout.nodes.map((node) => ({
       id: node.id,
       type: 'step',
       position: { x: node.x, y: node.y },
@@ -264,14 +280,14 @@
         // no symbol to start from.
         ...(model.nodes.get(node.id)?.step.node && !model.nodes.get(node.id)?.step.anchor ? { onStart: startHere } : {}),
       },
-    }));
+    })));
   });
 
   const edges = $derived.by<Edge[]>(() => {
     if (model === null) return [];
     const focus = focusId;
     return model.layout.edges
-      .filter((edge) => isEdgeVisible(edge, selected))
+      .filter((edge) => stepEdgeVisible(model, edge, selected))
       .map((edge) => {
         const touches = selected !== null && (edge.source === selected || edge.target === selected);
         const isFocus = focus === edge.id;
@@ -537,6 +553,7 @@
       <StepsKey
         project={payload.project}
         order={readAs === 'order'}
+        regions={model.regions !== null}
         flow={false}
         open={legendOpen}
         onToggle={(next) => (legendOpen = next)}

@@ -3137,7 +3137,7 @@ async function nixOptionPathEdges(queries: QueryBuilder, onYield: MaybeYield): P
   // own namespace (`attrsOf (submodule { options = ...; })`) — its internals
   // are not globally addressable, so the sentinel blocks registration below it
   // while still excluding the region from write candidates.
-  const SUBMODULE = ' submodule';
+  const SUBMODULE = '\u0000submodule';
   const decls = new Map<string, Rec[]>();
   const writes: Rec[] = [];
   const register = (path: string[], rec: Rec) => {

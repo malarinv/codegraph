@@ -150,6 +150,41 @@ const MAX_MENTION_FILE_BYTES = 256 * 1024;
  */
 const WALK_KINDS: Edge['kind'][] = ['calls', 'instantiates', 'contains', 'references'];
 
+/**
+ * An edge that arrives from another execution context, never from a caller.
+ *
+ * Walked FORWARDS these are the point of the synthesizers — a flow question
+ * follows a native event or an HTTP call to the code that runs next. Walked
+ * BACKWARDS they answer a different question than this walk asks. "Which
+ * screen is this navigation written on" is about where the reader is standing;
+ * "what could have triggered the event that got us here" is about a chain that
+ * already left the screen, the language and the process.
+ *
+ * Following one costs an answer that is not merely vague but wrong. In an Expo
+ * app, `CaptureComponent` — the body of `app/capture/index.tsx`, whose sibling
+ * `ARCapturePage` the `/capture` route renders — is reached by nothing but six
+ * Swift `emit` calls: the walk skips `file` nodes, and `memo(CaptureComponent)`
+ * leaves no edge from the memo to the function. So every `router.push` written
+ * in that file escaped through the bridge, wandered back down into whichever
+ * screen had started the round trip, and was attributed there — putting four
+ * of `/capture`'s navigations on `/capture/review`, leaving `/capture/review`
+ * fed only by itself, and dropping it into the unreached band. It also carried
+ * the Swift guards home: `Thread.isMainThread` printed as a condition on a
+ * JavaScript navigation.
+ *
+ * Stopping here leaves the walk with no callers at all, which is the honest
+ * result — and the file fallback below then answers from the holder's own
+ * file, which is where the push is actually written.
+ */
+function arrivesFromAnotherContext(edge: Edge): boolean {
+  const meta = edge.metadata as Record<string, unknown> | undefined;
+  if (!meta) return false;
+  // The cross-tier synthesizer marks every edge it makes with the tier it
+  // crossed (a client's fetch onto its route, a queue job onto its consumer).
+  if (meta.tier !== undefined) return true;
+  return meta.synthesizedBy === 'rn-event-channel';
+}
+
 /** A component rendered by at least this many screens is chrome, not a screen's own behaviour. */
 const SHARED_CHROME_MIN = 3;
 
@@ -322,7 +357,7 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
       if (fromOrigin && start.path[0]!.node.id !== holder.id) {
         // A collapsed chain: the origin's own name is not "via".
       }
-      const id = `${fromId} ${target.id} ${viaKey}`;
+      const id = `${fromId}\u0000${target.id}\u0000${viaKey}`;
       const existing = links.get(id);
       if (existing) {
         existing.sites.push(site);
@@ -422,6 +457,7 @@ async function attribute(
     const byTarget = new Map<string, Edge[]>();
     for (const e of incoming) {
       if (e.kind === 'references' && (e.metadata as Record<string, unknown> | undefined)?.fnRef !== true) continue;
+      if (arrivesFromAnotherContext(e)) continue;
       const list = byTarget.get(e.target) ?? [];
       list.push(e);
       byTarget.set(e.target, list);

@@ -504,7 +504,9 @@ whole app; so is a native event that lands in a COMPONENT (the capture overlay t
 another screen's body — `cut: 'component'`). A bridge or event step needs evidence — a bridge resolver's edge or a synthesized channel's; a plain
 name-matched call across the families (`arr.flat()` landing on a Swift `flat`) is neither drawn nor walked. Effects
 are one box per (function, category), labelled by the first call and counting the rest (`client.post +1`), the calls
-listed in the panel. Every call-shaped site (a store action, a bridge call, an effect, a plain call to a step) also
+listed in the panel. Every call-shaped site (a store action, a bridge call, an effect, a plain call to a step, a
+handler CALLED from under a binding — a bound one passes nothing, but `tryCatchSync(onClosePress)`'s argument is the
+whole answer to what a wrapper wraps) also
 carries **what it passes** — `graph/branch-guards.ts`'s `callArgumentsForFile`, read from the same cached tree as the
 guards: string literals and names whole, an object as its keys (`{ email, password }`), arrays `[…]`, functions
 `() => …`, nested calls `f(…)`, Swift labels kept (`withName: "onZipComplete"`), ≤ 96 chars — printed on the panel's
@@ -517,7 +519,15 @@ runs-later call (`useEffect`, `setTimeout`, `addListener('onZipComplete')`, `.th
 handleX = useCallback(…)`) is a boundary, its own story. A function called from under such a binding is a
 **handler step** even though nothing passed it as a value (`onPress={() => handleLogin(values)}` — the common
 case, and the Formik case), and every call-shaped link carries its trigger: a store action or an effect fired
-straight from a tap says so. The pill on a handler link says the event (`onPress · <Button>`,
+straight from a tap says so. **And when the binding sits in the ARGUMENTS of a call that itself became an effect
+step, the line arrives from that box, not from the step that owns the fold** — `Alert.prompt('Add Folder', …,
+[{ onPress: (name) => createBackgroundFolder(name) }])` is two facts, the prompt as a device box and the prompt's
+button firing the handler, and "the screen fires it" says nothing when the screen fires everything. The walk keeps
+each effect call's span per function (`firedSpans`); a site whose trigger NAMES the call (`onPress ·
+Alert.prompt(…)`) and whose position falls inside that span is rewired to it, innermost span first, one step
+deeper — so the confirm-then-act chains a mobile app is full of read as chains: the delete alert leads to the
+delete, which leads to the request it sends. An `onSubmit · useFormik(…)` names no effect and stays where it was.
+The pill on a handler link says the event (`onPress · <Button>`,
 `onSubmit · useFormik(…)`), not the conditions; the box's second line says it before the file; the panel prints
 `FIRES FROM onPress · <Button> in LoginButton` above the `via` chain, which is set in `--ink-2` at the
 condition's size — it is the answer to "where on the screen", not an afterthought. Caps, each announced: depth in steps (default 8, ≤ 14, `cut: 'depth'` on the step it stopped
@@ -525,6 +535,35 @@ at, drawn with `name …`), fan-out per node (80), folded nodes per step (300), 
 hubs (fan-in ≥ 40) and shared chrome (a component rendered by ≥ 5 parents — higher than the Screens view's 3, which
 attributes navigations rather than deciding what to walk into) are dead ends, counted in `truncated`. A step several
 events land on says `⇠ first +N` and lists them in the panel.
+
+**Regions — a screen's picture is laid out by the parts of the screen.** A screen is a set of handlers with no order
+between them, so rows-by-distance degenerate there: on the mobile app's `/home`, 89 of 120 steps sat one hop out — one
+28,000px row, every line a near-horizontal sweep. The walk already knows the missing structure: a step reached out of the
+anchor descends through the fold's chain, whose first node is the top-level component (or hook) of the screen's tree, so
+the server names it on the step (`WireStep.region` — the fold's first node; the screen's own component for a call written
+in the screen body; the first-reaching parent's region for everything deeper — first reach wins, as `first` does, so a
+shared store is one box in the region that got there first and every other region's way in is a link). Endpoints and
+functions carry none: their rows already read in the code's order, and `view=order` is untouched. The viewer
+(`steps-model.ts`'s `packRegions`) then lays each region out as its own small column — a box above what it sets in
+motion, a line wrapping past ~720px — and tiles the columns into bands under a width budget aimed at a readable aspect,
+in the order the walk met them: the screen's own source order, top of the screen to the left. **Within a region the
+rows come from the region's own links** (longest lead-to path, settled by relaxation as the order reading's rows are),
+never from distance to the anchor, which is flat inside a region: a handler and the store it calls are both one hop
+from the screen, and side by side their line was a level arch, hidden at rest — the store looked wired to nothing.
+Each region wears a caption (`RegionCaption.svelte` — its component's name over a hairline spanning its width)
+and the key explains it. **At rest the picture hides exactly two things** (`stepEdgeVisible`): the anchor's own fan —
+the anchor leads to everything *by definition*, `/home`'s 104 ways of saying so were the moiré, so one line into each
+region's first box stands in for it — and, as everywhere on the canvas, what points back up the layering. Every other
+lead-to draws, a line between two regions included: the empty state's prompt firing the same handler as the header's IS
+the picture, and an earlier cut that reserved cross-region lines for selection made a box that leads three places read
+as wired to nothing. The two hidings compose well: a shared step fed from below — the toast action every handler calls
+— stays quiet through the back rule alone, no hub threshold needed, and selection still brings a step's whole story
+out. A box nothing points at is then a fact, not an accident — the region runs it directly, on render or mount or from
+a binding written inline (`Alert.prompt` in an empty-state view, a store read during render, `Keyboard.addListener` in
+an effect) — and the key says so; selecting it lights its line from the anchor, with what fires it. Same boxes, same
+tracked curves (over a tighter in-region gap), same pills, pointer and panel. Result across the app's 52 screens: widest
+picture ~3,400px (was 28,452), at-rest lines on `/home` 80 of 190 — the region-local structure plus 11 lines between
+regions — with zero boxes that lead somewhere while drawing nothing.
 
 **Servers (Express, NestJS, Fastify, Koa, Hono, FastAPI, Flask, Django, Spring, ASP.NET, Vapor, Gin).** The same picture over
 the same machinery; only the facts and the words change (`src/ui-server/api/route-roots.ts`, `effects.ts`,

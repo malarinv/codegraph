@@ -269,7 +269,11 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
       minWeight: 0,
       sizing: (m) => {
         const info = nodes.get(m.id);
-        return { label: info?.label ?? m.id, meta: info?.sub ?? '' };
+        // Size for the ` …` a cut step wears and the anchor's ● mark, or the
+        // CSS ellipsis eats the name's tail.
+        const cut = info?.step.cut != null ? ' …' : '';
+        const mark = info?.step.anchor ? '● ' : '';
+        return { label: mark + (info?.label ?? m.id) + cut, meta: info?.sub ?? '' };
       },
       layering,
       order: (id) => nodes.get(id)?.step.order ?? Number.MAX_SAFE_INTEGER,
@@ -281,7 +285,8 @@ export function buildOrderModel(payload: WireStepsPayload): StepsModel | null {
   const curves = trackedCurves(layout, SCREEN_LAYER_GAP);
   const polylines = new Map<string, Point[]>();
   for (const [id, curve] of curves) polylines.set(id, samplePolyline(curve, HIT_SAMPLES));
-  return { layout, nodes, edges, layerGap: SCREEN_LAYER_GAP, curves, polylines, counts };
+  // The order reading needs no regions: its rows already say when.
+  return { layout, nodes, edges, layerGap: SCREEN_LAYER_GAP, curves, polylines, counts, regions: null, regionEntries: null };
 }
 
 /**

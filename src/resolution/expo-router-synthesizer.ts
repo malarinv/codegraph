@@ -82,7 +82,7 @@ export async function expoRouterReturnEdges(ctx: ResolutionContext, onYield: May
   // 2. Each callee → the project function it names → the screens in its body.
   const edges: Edge[] = [];
   const seen = new Set<string>();
-  const screensByHelper = new Map<string, Array<{ node: Node; href: string; line: number }> | null>();
+  const screensByHelper = new Map<string, Array<{ node: Node; href: string; line: number; column: number }> | null>();
   for (const site of sites) {
     await onYield();
     const helper = resolveHelper(site, ctx);
@@ -102,6 +102,11 @@ export async function expoRouterReturnEdges(ctx: ResolutionContext, onYield: May
         target: s.node.id,
         kind: 'navigates',
         line: s.line,
+        // The literal's own column, not the line's start: the two arms of
+        // `return (await seen()) ? '/home/' : '/welcome/'` share a line, and
+        // only the column lets the guard reader say WHICH arm each edge is —
+        // without it both drew as `always`.
+        column: s.column,
         provenance: 'heuristic',
         metadata: {
           synthesizedBy: 'expo-router-return',
@@ -152,15 +157,23 @@ function screensInBody(
   helper: Node,
   ctx: ResolutionContext,
   table: ReturnType<typeof routeTable>
-): Array<{ node: Node; href: string; line: number }> | null {
+): Array<{ node: Node; href: string; line: number; column: number }> | null {
   const lines = ctx.getFileLines?.(helper.filePath) ?? ctx.readFile(helper.filePath)?.split(/\r?\n/);
   if (!lines) return null;
   const body = stripCommentsForRegex(
     lines.slice(helper.startLine - 1, helper.endLine).join('\n'),
     'typescript'
   );
-  const found = new Map<string, { node: Node; href: string; line: number }>();
-  for (let i = 0; i < body.length; i++) {
+  // Scan the BODY, not the signature: a return type of literal routes —
+  // `async (): Promise<'/welcome/' | '/home/'> => …` — is string literals
+  // too, and they come FIRST, so first-occurrence-wins kept the annotation's
+  // positions: inside no branch, so both navigations read as `always`. The
+  // body starts at the arrow, or at the first brace for a declaration.
+  const arrow = body.indexOf('=>');
+  const brace = body.indexOf('{');
+  const scanFrom = arrow >= 0 && (brace < 0 || arrow < brace) ? arrow + 2 : brace >= 0 ? brace + 1 : 0;
+  const found = new Map<string, { node: Node; href: string; line: number; column: number }>();
+  for (let i = scanFrom; i < body.length; i++) {
     const ch = body[i];
     if (ch !== '"' && ch !== "'" && ch !== '`') continue;
     const start = i;
@@ -173,10 +186,14 @@ function screensInBody(
     if (segs === null) continue;
     const route = matchRoute(segs, table);
     if (!route || found.has(route.id)) continue;
+    // `body` begins at column 0 of the helper's first line and the comment
+    // stripper preserves offsets, so the literal's column is exact.
+    const lineStart = body.lastIndexOf('\n', start - 1) + 1;
     found.set(route.id, {
       node: route,
       href: href.display,
       line: helper.startLine + body.slice(0, start).split('\n').length - 1,
+      column: start - lineStart,
     });
     if (found.size > MAX_SCREENS_PER_HELPER) return null;
   }

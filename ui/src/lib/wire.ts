@@ -763,6 +763,13 @@ export interface WireStep {
   /** The step's place in its row, in the code's order (a hop written inside another site's arguments before that site). */
   order?: number;
   /**
+   * A screen anchor's picture only: the region of the screen this step belongs
+   * to — the top-level component (or hook) the walk first reached it through,
+   * the screen's own component for the screen body. The viewer lays a screen's
+   * picture out by these; absent, the rows are distance.
+   */
+  region?: { id: string; label: string };
+  /**
    * For a screen or an endpoint — also a `bridge` step that is an endpoint
    * reached across a tier: its path and the symbol that serves it.
    * `endpoint` when the route leads with an HTTP verb; `inline` when the

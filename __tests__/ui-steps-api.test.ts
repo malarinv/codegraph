@@ -129,6 +129,33 @@ beforeAll(async () => {
       '  }\n' +
       '}\n'
   );
+  write(
+    'src/api/remove-thing.ts',
+    "import { client } from './client'\n" +
+      'export async function removeThing(name: string) {\n' +
+      "  await client.post('/things/remove', { name })\n" +
+      '}\n'
+  );
+  // The dialog-confirm-then-act pattern: the prompt is an effect box AND the
+  // thing that fires the handler bound in its buttons.
+  write(
+    'src/app/confirm.tsx',
+    "import { Alert, Button } from 'react-native'\n" +
+      "import { removeThing } from '../api/remove-thing'\n" +
+      'export default function ConfirmScreen() {\n' +
+      '  return (\n' +
+      '    <Button\n' +
+      '      title="remove"\n' +
+      '      onPress={() =>\n' +
+      "        Alert.prompt('Remove thing', 'Which one?', [\n" +
+      "          { text: 'Cancel' },\n" +
+      "          { text: 'OK', onPress: (name) => { if (name) removeThing(name) } },\n" +
+      '        ])\n' +
+      '      }\n' +
+      '    />\n' +
+      '  )\n' +
+      '}\n'
+  );
   cg = CodeGraph.initSync(tmpDir);
   await cg.indexAll();
 });
@@ -300,5 +327,55 @@ describe('buildSteps', () => {
     await expect(buildSteps(cg, tmpDir, q({}))).rejects.toThrow(/anchor/);
     await expect(buildSteps(cg, tmpDir, q({ anchor: 'function:nope' }))).rejects.toThrow(/No symbol/);
     await expect(buildSteps(cg, tmpDir, q({ symbol: 'nothingNamedThis' }))).rejects.toThrow(/Nothing/);
+  });
+});
+
+describe('screen regions', () => {
+  it('a screen names every step’s region: the screen body for its own code, inherited down the walk', async () => {
+    const review = cg.getNodesByKind('route').find((r) => r.name === '/capture/review')!;
+    const payload = await buildSteps(cg, tmpDir, q({ anchor: review.id }));
+    const byLabel = Object.fromEntries(payload.steps.map((s) => [s.label, s]));
+    // Every step of a screen's picture belongs somewhere.
+    for (const s of payload.steps) if (!s.anchor) expect(s.region, s.label).toBeDefined();
+    // A handler declared in the screen body belongs to the screen's own component…
+    expect(byLabel['handleApprove']!.region!.label).toBe('ReviewScreen');
+    // …and what it reaches inherits the region that got there first.
+    expect(byLabel['finalizeCaptureSession']!.region!.id).toBe(byLabel['handleApprove']!.region!.id);
+    expect(byLabel['setZipUri']!.region!.label).toBe('ReviewScreen');
+  });
+
+  it('a step reached through a folded component belongs to that component — the fold’s first node', async () => {
+    const capture = cg.getNodesByKind('route').find((r) => r.name === '/capture')!;
+    const payload = await buildSteps(cg, tmpDir, q({ anchor: capture.id }));
+    const handler = payload.steps.find((s) => s.label === 'handleOpen')!;
+    const toHandler = payload.links.find((l) => l.to === handler.id)!;
+    expect(handler.region!.label).toBe(toHandler.via[0]!.name);
+  });
+
+  it('an anchor with a body carries no regions — its rows read in the code’s order', async () => {
+    const payload = await buildSteps(cg, tmpDir, q({ symbol: 'handleApprove' }));
+    for (const s of payload.steps) expect(s.region).toBeUndefined();
+  });
+});
+
+describe('fired from a dialog', () => {
+  it('a handler bound inside a dialog’s buttons arrives from the dialog, not from the screen', async () => {
+    const confirm = cg.getNodesByKind('route').find((r) => r.name === '/confirm')!;
+    const payload = await buildSteps(cg, tmpDir, q({ anchor: confirm.id }));
+    const prompt = payload.steps.find((s) => s.kind === 'effect' && s.label.startsWith('Alert.prompt'))!;
+    const handler = payload.steps.find((s) => s.label === 'removeThing')!;
+    const into = payload.links.filter((l) => l.to === handler.id);
+    expect(into).toHaveLength(1);
+    expect(into[0]!.from).toBe(prompt.id);
+    expect(into[0]!.trigger?.of).toBe('Alert.prompt');
+    // A handler CALLED from under a binding says what it passes, as every
+    // call-shaped site does — the argument is what a wrapper wraps.
+    expect(into[0]!.sites[0]!.args).toBe('name');
+    // One step deeper than the prompt that fires it, in the prompt's region.
+    expect(handler.depth).toBe(prompt.depth + 1);
+    expect(handler.region!.id).toBe(prompt.region!.id);
+    // …and what the handler does hangs on below.
+    const post = payload.steps.find((s) => s.kind === 'effect' && s.effect?.category === 'network')!;
+    expect(payload.links.some((l) => l.from === handler.id && l.to === post.id)).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import * as os from 'os';
 import { CodeGraph } from '../src';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
 import { buildScreens } from '../src/ui-server/api/screens';
+import { buildSteps } from '../src/ui-server/api/steps';
 import {
   expoRouterResolver,
   routePathForFile,
@@ -465,7 +466,12 @@ describe('expo-router: end-to-end', () => {
     );
     write(
       'src/services/post-login.ts',
-      'export const resolvePostLoginRoute = async (): Promise<string> => {\n' +
+      // The literal-union return type is the trap: its routes are string
+      // literals too, BEFORE the ternary — the scan must skip the signature
+      // or the annotation's guardless positions win.
+      'export const resolvePostLoginRoute = async (): Promise<\n' +
+        "  '/welcome/' | '/'\n" +
+        '> => {\n' +
         "  return (await seen()) ? '/' : '/welcome/'\n" +
         '}\n' +
         'async function seen() { return true }\n' +
@@ -531,6 +537,15 @@ describe('expo-router: end-to-end', () => {
     expect(fromHelper.every((e) => e.provenance === 'heuristic')).toBe(true);
     expect(fromHelper[0]!.metadata?.synthesizedBy).toBe('expo-router-return');
     expect(fromHelper[0]!.metadata?.registeredAt).toBe('src/services/login.ts:4');
+    // Each return literal carries its own POSITION: the two arms of
+    // `return (await seen()) ? '/' : '/welcome/'` share a line, and only the
+    // column lets the guard reader say which arm an edge is — without it both
+    // navigations read as `always`.
+    const welcomeEdge = fromHelper.find((e) => routes.find((r) => r.id === e.target)?.name === '/welcome')!;
+    const rootEdge = fromHelper.find((e) => routes.find((r) => r.id === e.target)?.name === '/')!;
+    expect(rootEdge.line).toBe(welcomeEdge.line);
+    expect(typeof rootEdge.column).toBe('number');
+    expect(welcomeEdge.column!).toBeGreaterThan(rootEdge.column!);
     const finishLogin = cg.getNodesByName('finishLogin')[0]!;
     expect(cg.getOutgoingEdges(finishLogin.id).some((e) => e.target === helper.id && e.kind === 'calls')).toBe(true);
     const apiPath = cg.getNodesByName('apiPath')[0]!;
@@ -554,6 +569,168 @@ describe('expo-router: end-to-end', () => {
     expect(fromOrigins.map((l) => screens.screens.find((s) => s.id === l.to)!.path).sort()).toEqual(['/', '/item/[id]', '/welcome']);
     expect(screens.origins.map((o) => o.node.name)).toEqual(['openItem', 'resolvePostLoginRoute']);
     expect(screens.dropped).toBe(0);
+
+    // The steps walk reads each arm's own condition off the literal's column:
+    // where the app goes after login is a fork, not two `always`es.
+    const steps = await buildSteps(cg, tmpDir, new URLSearchParams({ symbol: 'finishLogin' }));
+    const stepByLabel = (label: string) => steps.steps.find((s) => s.label === label)!;
+    const toRoot = steps.links.find((l) => l.to === stepByLabel('/').id)!;
+    const toWelcome = steps.links.find((l) => l.to === stepByLabel('/welcome').id)!;
+    expect(toRoot.when).toMatch(/await seen\(\)/);
+    expect(toRoot.when).not.toMatch(/!/);
+    expect(toWelcome.when).toMatch(/!\s*\(?\s*await seen\(\)/);
+
+    cg.close();
+  });
+});
+
+// =============================================================================
+// The backward walk must not leave the app's own execution context
+// =============================================================================
+
+/**
+ * A navigation written inside a component the graph can only reach BACKWARDS
+ * through the native bridge belongs to the screen whose file it is written in
+ * — not to whichever screen happened to start the round trip.
+ *
+ * The shape, from a real Expo app: `/capture` renders `ARCapturePage`, which
+ * renders `memo(CaptureComponent)`; the `router.push` lives in an inline
+ * listener inside `CaptureComponent`. Nothing points at `CaptureComponent`
+ * except Swift emitters — the walk skips `file` nodes, and `memo(x)` leaves no
+ * edge from the memo to the function — so before the guard the walk escaped
+ * through `rn-event-channel`, came back down into `ReviewScreen` (which had
+ * called the native module), and filed four of `/capture`'s navigations under
+ * `/capture/review`, whose only remaining feed was itself. It also carried the
+ * Swift guards home as conditions on a JavaScript navigation.
+ */
+describe('expo-router screens: attribution stops at the native bridge', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  function write(rel: string, content: string) {
+    const full = path.join(tmpDir!, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+  }
+
+  it('files the push on the screen whose file holds it, not on the screen that started the round trip', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-expo-bridge-'));
+    write(
+      'package.json',
+      JSON.stringify({
+        name: 'app',
+        dependencies: { expo: '52', 'expo-router': '4', react: '18', 'react-native': '0.76' },
+      })
+    );
+    write('src/app/_layout.tsx', 'export default function Layout() { return null }\n');
+    write('src/app/index.tsx', 'export default function Home() { return null }\n');
+
+    // The Swift side: a method the JS calls, which ends in the event emit.
+    write(
+      'ios/CaptureView.swift',
+      `import Foundation
+@objc(CaptureView)
+class CaptureView: NSObject {
+  @objc func startRetake() {
+    CaptureEvents.shared.emitCaptureComplete()
+  }
+}
+`
+    );
+    // The ObjC bridging shim, without which the JS side never reaches Swift.
+    write(
+      'ios/CaptureView.m',
+      `#import <React/RCTBridgeModule.h>
+@interface RCT_EXTERN_MODULE(CaptureView, NSObject)
+RCT_EXTERN_METHOD(startRetake)
+@end
+`
+    );
+    write(
+      'ios/CaptureEvents.swift',
+      `import Foundation
+class CaptureEvents: RCTEventEmitter {
+  func emitCaptureComplete() {
+    guard Thread.isMainThread else { return }
+    sendEvent(withName: "onCaptureComplete", body: nil)
+  }
+}
+`
+    );
+
+    // /capture — the push is written HERE, in an inline listener inside a
+    // sibling of the route's own default export.
+    write(
+      'src/app/capture/index.tsx',
+      `import { memo, useEffect } from 'react'
+import { router } from 'expo-router'
+const MemoizedCaptureComponent = memo(CaptureComponent)
+export default function ARCapturePage() {
+  return <MemoizedCaptureComponent />
+}
+function CaptureComponent() {
+  useEffect(() => {
+    const sub = nativeEmitter.addListener('onCaptureComplete', (data) => {
+      if (!isRetakeBatchActive) {
+        router.push('/capture/review')
+      }
+    })
+    return () => sub.remove()
+  }, [])
+  return null
+}
+`
+    );
+
+    // /capture/review — calls into the native module, which is what makes the
+    // Swift emitter backwards-reachable from this screen.
+    write(
+      'src/app/capture/review/index.tsx',
+      `import { NativeModules } from 'react-native'
+const { CaptureView } = NativeModules
+export default function ReviewScreen() {
+  function handleRetake() {
+    CaptureView.startRetake()
+  }
+  return handleRetake
+}
+`
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+
+    // The escape route the walk used to take really is in the graph.
+    const capture = cg.getNodesByName('CaptureComponent').find((n) => n.kind !== 'route')!;
+    const bridged = cg
+      .getIncomingEdgesTo([capture.id], ['calls'])
+      .filter((e) => (e.metadata as Record<string, unknown> | undefined)?.synthesizedBy === 'rn-event-channel');
+    expect(bridged.length).toBeGreaterThan(0);
+    // …and it really is a route back OUT to the other screen: without the
+    // guard the walk runs handleRetake > startRetake > emitCaptureComplete >
+    // CaptureComponent and lands the push on /capture/review.
+    const startRetake = cg.getNodesByName('startRetake').find((n) => n.language === 'swift')!;
+    expect(cg.getIncomingEdgesTo([startRetake.id], ['calls']).map((e) => cg.getNodesByIds([e.source]).get(e.source)?.name)).toContain(
+      'handleRetake'
+    );
+
+    const screens = await buildScreens(cg, tmpDir);
+    const from = (path: string) => screens.screens.find((s) => s.path === path)!;
+    const review = from('/capture/review');
+    const links = screens.links.filter((l) => l.to === review.id);
+
+    // One transition into /capture/review, and it comes from /capture.
+    expect(links.map((l) => screens.screens.find((s) => s.id === l.from)?.path)).toEqual(['/capture']);
+    // Written right there: no chain, and no Swift guard smuggled in.
+    expect(links[0]!.via).toEqual([]);
+    expect(links[0]!.when).toBe('!isRetakeBatchActive');
+    expect(links[0]!.sites[0]!.file).toBe('src/app/capture/index.tsx');
+    // …and /capture/review is not left feeding only itself.
+    expect(screens.links.some((l) => l.from === review.id && l.to === review.id)).toBe(false);
 
     cg.close();
   });
