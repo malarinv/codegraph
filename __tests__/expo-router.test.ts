@@ -140,11 +140,30 @@ describe('expo-router: readHrefArgument', () => {
     const r = read(src, 'navigate');
     expect(r?.path).toBe('/sheets/create-detection-item');
     expect(r?.display).toBe('/sheets/create-detection-item?folderId=${…}');
-    expect(r?.alternate?.path).toBe('/sheets/create-detection-item');
+    expect(r?.alternates?.map((a) => a.path)).toEqual(['/sheets/create-detection-item']);
   });
 
-  it('returns null when one arm of a conditional is not a literal', () => {
-    expect(read("router.push(ready ? '/home' : fallback)")).toBeNull();
+  it('reads the literal arm when the other is not one — a place the code demonstrably goes', () => {
+    // Both arms readable is a fork, and `pageForHref` resolves it only when
+    // they name the same route. One arm readable is not a fork: `/home` is
+    // somewhere this call goes, and reporting it is not a guess. Dropping it
+    // cost every react-router app its post-login transition, which is written
+    // `const redirect = search ? search.split('=')[1] : '/'`.
+    const r = read("router.push(ready ? '/home' : fallback)");
+    expect(r?.path).toBe('/home');
+    expect(r?.alternate).toBeUndefined();
+    expect(read("router.push(ready ? fallback : '/home')")?.path).toBe('/home');
+    // Neither arm readable is still nothing.
+    expect(read('router.push(ready ? a : b)')).toBeNull();
+  });
+
+  it('pairs the arms of a NESTED conditional, and keeps all three', () => {
+    // Taking the first `:` split this between `keyword` and '/page', reading
+    // '/page' — a real path, from the wrong arm of the wrong conditional. Paired
+    // properly it is a paginator that goes to one of three places, and the
+    // picture draws all three rather than none.
+    const r = read("router.push(!isAdmin ? keyword ? '/search' : '/page' : '/admin')");
+    expect([r?.path, ...(r?.alternates ?? []).map((a) => a.path)]).toEqual(['/search', '/page', '/admin']);
   });
 
   it('reads only the first argument', () => {
@@ -190,7 +209,7 @@ describe('expo-router: readHrefViaLocal', () => {
       '  }\n}';
     const r = viaLocal(src);
     expect(r?.path).toBe('/barcode-scan');
-    expect(r?.alternate?.path).toBe('/barcode-scan');
+    expect(r?.alternates?.map((a) => a.path)).toEqual(['/barcode-scan']);
   });
 
   it('reads a typed declaration and an Href object initializer', () => {
@@ -369,9 +388,14 @@ describe('expo-router: resolve', () => {
     expect(expoRouterResolver.resolve(ref('list.push', 12, 32), context)?.targetNodeId).toBe(routes[2]!.id);
   });
 
-  it('binds a conditional whose arms name the same screen, refuses one that forks', () => {
-    expect(expoRouterResolver.resolve(ref('router.push', 14, 33), context)?.targetNodeId).toBe(routes[2]!.id);
-    expect(expoRouterResolver.resolve(ref('router.push', 13, 27), context)).toBeNull();
+  it('binds a conditional whose arms name the same screen, and draws BOTH when they fork', () => {
+    const same = expoRouterResolver.resolve(ref('router.push', 14, 33), context);
+    expect(same?.targetNodeId).toBe(routes[2]!.id);
+    expect(same?.alsoTargets).toBeUndefined();
+    // A fork reaches both screens, and each becomes an edge of its own.
+    const forked = expoRouterResolver.resolve(ref('router.push', 13, 27), context);
+    expect(forked).not.toBeNull();
+    expect([forked!.targetNodeId, ...(forked!.alsoTargets ?? []).map((t) => t.targetNodeId)]).toHaveLength(2);
   });
 
   it('ignores refs that are not calls or not JS/TS', () => {

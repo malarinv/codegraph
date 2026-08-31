@@ -264,8 +264,17 @@ export interface HrefLiteral {
   path: string;
   /** The literal as written, holes rendered as `${…}` — for the edge metadata. */
   display: string;
-  /** The other arm of a `cond ? a : b` argument, when the argument was one. */
-  alternate?: HrefLiteral;
+  /**
+   * The OTHER destinations, when the argument was a conditional. A link
+   * written `!isAdmin ? keyword ? '/search/…' : '/page/…' : '/admin/…'` names
+   * three places a user can end up, and each is drawn.
+   */
+  alternates?: HrefLiteral[];
+}
+
+/** Every destination an href names — itself first, then its other arms. */
+export function hrefArms(href: HrefLiteral): HrefLiteral[] {
+  return href.alternates?.length ? [href, ...href.alternates] : [href];
 }
 
 /** Index of the first `ch` at bracket depth 0 and outside strings, or -1. */
@@ -307,6 +316,34 @@ export function toHref(literal: string | null): HrefLiteral | null {
  * with a literal `pathname`, or a conditional whose two arms are each one of
  * those (`cond ? \`/x?id=${id}\` : '/x'`). Anything else is not static.
  */
+/**
+ * The `:` that closes the ternary opened at `q`, honouring nested ones.
+ *
+ * Taking the FIRST `:` splits `a ? b ? '/x' : '/y' : '/z'` between `b` and
+ * `'/y'`, which reads as `'/y'` — a real path, from the wrong arm. A paginator
+ * written that way (`!isAdmin ? keyword ? … : '/page/…' : '/admin/…'`) then
+ * pointed an admin's page links at the storefront's pagination. With the arms
+ * paired correctly the expression is a three-way fork, and a fork is nothing.
+ */
+function ternaryColon(s: string, q: number): number {
+  let depth = 0;
+  let i = q + 1;
+  for (let steps = 0; steps < 64; steps++) {
+    const nextQ = indexAtDepth0(s, '?', i);
+    const nextColon = indexAtDepth0(s, ':', i);
+    if (nextColon < 0) return -1;
+    if (nextQ >= 0 && nextQ < nextColon) {
+      depth++;
+      i = nextQ + 1;
+      continue;
+    }
+    if (depth === 0) return nextColon;
+    depth--;
+    i = nextColon + 1;
+  }
+  return -1;
+}
+
 export function parseHrefExpression(expr: string): HrefLiteral | null {
   // `expr as any` / `expr satisfies Href` — a cast says nothing about the value.
   let args = expr.trim().replace(/\s+(?:as|satisfies)\s+[\w$.<>[\]|&\s]+$/, '');
@@ -317,12 +354,20 @@ export function parseHrefExpression(expr: string): HrefLiteral | null {
   if (args.length === 0) return null;
   const q = indexAtDepth0(args, '?', 0);
   if (q > 0) {
-    const colon = indexAtDepth0(args, ':', q + 1);
+    const colon = ternaryColon(args, q);
     if (colon > q) {
       const yes = parseHrefExpression(args.slice(q + 1, colon));
       const no = parseHrefExpression(args.slice(colon + 1));
-      if (yes && no) return { ...yes, alternate: no };
-      return null;
+      // Every arm is a destination, flattened — an arm that is itself a
+      // conditional contributes its own arms rather than being reduced to one.
+      // `const redirect = location.search ? location.search.split('=')[1] : '/'`
+      // then `history.push(redirect)` contributes just the `/`, which is where
+      // that lands by default; reading neither arm lost the whole transition.
+      const arms = [...(yes ? hrefArms(yes) : []), ...(no ? hrefArms(no) : [])];
+      const head = arms[0];
+      if (!head) return null;
+      const rest = arms.slice(1);
+      return rest.length ? { path: head.path, display: head.display, alternates: rest } : { path: head.path, display: head.display };
     }
   }
   if (args[0] === '{') {
@@ -357,6 +402,25 @@ export function firstArgumentText(
   column: number,
   method: string
 ): string | null {
+  return nthArgumentText(lines, line, column, method, 0);
+}
+
+/**
+ * The source text of a call's nth argument (0-based), or null when there is
+ * no call there or it has too few arguments.
+ *
+ * Most navigation calls put the destination first; SvelteKit's
+ * `redirect(303, '/login')` puts the status there, so the reader has to be
+ * able to take the second. A `,` at depth 0 separates arguments — inside
+ * parens, brackets, braces or a template it is part of one.
+ */
+export function nthArgumentText(
+  lines: readonly string[],
+  line: number,
+  column: number,
+  method: string,
+  index: number
+): string | null {
   const first = line - 1;
   if (first < 0 || first >= lines.length) return null;
   const text = lines.slice(first, first + MAX_CALL_LINES).join('\n');
@@ -366,8 +430,12 @@ export function firstArgumentText(
   while (open < text.length && /\s/.test(text[open]!)) open++;
   if (text[open] !== '(') return null;
   const close = matchParen(text, open);
-  const args = text.slice(open + 1, close < 0 ? undefined : close);
-  // Only the first argument: a `,` at depth 0 ends it (`push(href, opts)`).
+  let args = text.slice(open + 1, close < 0 ? undefined : close);
+  for (let i = 0; i < index; i++) {
+    const comma = indexAtDepth0(args, ',', 0);
+    if (comma < 0) return null;
+    args = args.slice(comma + 1);
+  }
   const comma = indexAtDepth0(args, ',', 0);
   return comma < 0 ? args : args.slice(0, comma);
 }
@@ -437,6 +505,69 @@ function balanced(s: string): boolean {
     else if (c === ')' || c === ']' || c === '}') depth--;
   }
   return depth <= 0;
+}
+
+/**
+ * A route table split by the app each route belongs to.
+ *
+ * One table for a whole repository is wrong the moment the repository holds
+ * more than one app: every app has a `/`, most have a `/login`, and a global
+ * `exact` map keeps whichever was indexed first — so a `<Link to="/posts">`
+ * in one app resolves to another app's `/posts`. Measured on the TanStack
+ * Router monorepo (477 apps in one index): **82% of navigations pointed at a
+ * route belonging to a different app.** Gating on the roots decides only
+ * WHETHER to resolve; the table has to decide WHICH app's routes to match.
+ */
+export interface RootedRouteTable<T extends RouteTable = RouteTable> {
+  /** Identity of the node array the table was built from — rebuild when it changes. */
+  source: readonly Node[];
+  /** App root (`apps/web/`, `''`) → the routes that app serves. */
+  byRoot: Map<string, T>;
+}
+
+/**
+ * The routes of the app `filePath` belongs to, or null when it is under none.
+ *
+ * Longest root wins, so an app nested inside another resolves to the nested
+ * one; a root of `''` is a single-app repo, and covers every file.
+ */
+export function routesForFile<T extends RouteTable>(
+  table: RootedRouteTable<T>,
+  filePath: string
+): T | null {
+  let best: T | null = null;
+  let bestLen = -1;
+  for (const [root, routes] of table.byRoot) {
+    if (root.length > bestLen && filePath.startsWith(root)) {
+      best = routes;
+      bestLen = root.length;
+    }
+  }
+  return best;
+}
+
+/** Register `path` → `node` in one app's table. The first route to claim an address keeps it. */
+export function addRouteTo(table: RouteTable, path: string, node: Node): void {
+  if (!table.exact.has(path)) table.exact.set(path, node);
+  if (path.includes(':')) table.dynamic.push({ node, segs: path.split('/').slice(1) });
+}
+
+/**
+ * The directory the app owning `filePath` lives in — what a navigation call is
+ * gated on, so a `push` in one package of a monorepo cannot name another
+ * package's routes.
+ *
+ * The first conventional source directory ends it: proshop keeps its routes in
+ * `frontend/src/App.js` and its screens in `frontend/src/screens/`, so the root
+ * is `frontend/`; `src/routes/login/+page.svelte` and `pages/index.vue` are
+ * both a repo-root app, whose root is `''` — every file, exactly as a Next app
+ * at the repo root is. A file under no such directory owns only its own folder.
+ */
+export function appRootFor(filePath: string): string {
+  const m = /^((?:[^/]+\/)*?)(?:src|pages|app|routes)\//.exec(filePath);
+  if (m) return m[1]!;
+  const slash = filePath.lastIndexOf('/');
+  return slash < 0 ? '' : filePath.slice(0, slash + 1);
 }
 
 // =============================================================================
@@ -651,21 +782,29 @@ export const expoRouterResolver: FrameworkResolver = {
     }
     if (!href) return null;
     const table = routeTable(context);
-    const segs = normalizeHrefPath(href.path, ref.filePath);
-    if (segs === null) return null;
-    const target = matchRoute(segs, table);
-    if (!target) return null;
-    if (href.alternate) {
-      // `cond ? a : b` — one edge can carry one destination. Both arms
-      // reaching the same screen (a query-string difference, typically) is a
-      // confident bind; two different screens is a fork this ref can't record.
-      const altSegs = normalizeHrefPath(href.alternate.path, ref.filePath);
-      if (altSegs === null || matchRoute(altSegs, table)?.id !== target.id) return null;
+    // `cond ? a : b` names a screen per arm, and the user reaches every one of
+    // them; the extra arms ride along as `alsoTargets` and become edges of
+    // their own. A relative href is resolved against the screen it sits in,
+    // which is why this matches its own way rather than through `pagesForHref`.
+    const targets: Node[] = [];
+    const seen = new Set<string>();
+    for (const arm of hrefArms(href)) {
+      const segs = normalizeHrefPath(arm.path, ref.filePath);
+      if (segs === null) continue;
+      const hit = matchRoute(segs, table);
+      if (!hit || seen.has(hit.id)) continue;
+      seen.add(hit.id);
+      targets.push(hit);
     }
+    const target = targets[0];
+    if (!target) return null;
 
     return {
       original: ref,
       targetNodeId: target.id,
+      ...(targets.length > 1
+        ? { alsoTargets: targets.slice(1).map((t) => ({ targetNodeId: t.id, metadata: { href: href.display, navMethod: method } })) }
+        : {}),
       confidence: 0.95,
       resolvedBy: 'framework',
       edgeKind: 'navigates',

@@ -12,17 +12,30 @@ import type { ResolutionContext } from '../types';
 /** Nested manifests read per project, at most — a monorepo with hundreds of packages is sampled, not scanned. */
 const MAX_MANIFESTS = 24;
 
-const cache = new WeakMap<ResolutionContext, Set<string>>();
+/**
+ * Cached per context, keyed by how many files are indexed.
+ *
+ * The resolver is constructed — and every `detect()` runs once — BEFORE any
+ * file exists, so that first pass sees no directories to probe and reads only
+ * the root manifest. Caching that answer outright made the re-detect after
+ * indexing (`CodeGraph.indexAll`) a cache hit on the empty set, and every
+ * framework whose dependency lives one directory down stayed undetected: a
+ * proshop-shaped repo indexed its React Router routes (extraction is not
+ * gated on detection) and then resolved none of its navigation. Re-reading
+ * when the file count changes costs one manifest sweep per index.
+ */
+const cache = new WeakMap<ResolutionContext, { files: number; names: Set<string> }>();
 
 /** Every dependency name declared at the root or up to two directories down, de-duplicated. */
 export function declaredDependencies(context: ResolutionContext): Set<string> {
+  const files = context.getAllFiles();
   const cached = cache.get(context);
-  if (cached) return cached;
+  if (cached && cached.files === files.length) return cached.names;
   const names = new Set<string>();
   // The index lists source files, never manifests: the candidate directories
   // are the first one or two segments of what IS indexed, probed on disk.
   const dirs = new Set<string>();
-  for (const file of context.getAllFiles()) {
+  for (const file of files) {
     const segs = file.split('/');
     if (segs.length > 1) dirs.add(segs[0] + '/');
     if (segs.length > 2) dirs.add(segs[0] + '/' + segs[1] + '/');
@@ -45,7 +58,7 @@ export function declaredDependencies(context: ResolutionContext): Set<string> {
       // Not JSON — a template, a broken manifest; nothing to read.
     }
   }
-  cache.set(context, names);
+  cache.set(context, { files: files.length, names });
   return names;
 }
 

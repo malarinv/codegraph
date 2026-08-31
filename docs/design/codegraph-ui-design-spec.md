@@ -451,6 +451,38 @@ pages only, from files under a Next app's root; `<Link href>` and an internal `<
 reads them and draws a dashed `navigates` edge from the component (`synthesizedBy: 'next-link'`, the site as `registeredAt`).
 `app/api/**/route.ts` exports and `pages/api/*` are endpoints, not screens (`POST /api/users`, `ANY /api/users`), so the same
 index is a web app: pages on this tab, endpoints in Entry points, and a page's Steps picture firing from its load.
+React Router (`frameworks/react.ts` reads the routes, `frameworks/react-router.ts` the navigation, `react-router-synthesizer.ts`
+the markup): `<Route path component/element>` (v5 and v6) and `createBrowserRouter([{ path, element }])` are the routes, already
+named `:param` the way this table wants them; `history.push` / `.replace`, `useNavigate`'s `navigate`, a data router's
+`router.navigate` and a loader's `redirect` read their argument with the same Expo readers, and `<Link to>` / `<NavLink to>` /
+`<Navigate to>` / `<LinkContainer to>` are markup a synthesizer reads (`synthesizedBy: 'react-router-link'`). Two things are the
+app's, not the router's: the receiver has to name a router, because an unqualified `push` is an array's; and the app ROOT a call
+is read from is everything before the declaring file's `src/` (proshop's routes are in `frontend/src/App.js`, its screens in
+`frontend/src/screens/`). An optional parameter is registered twice — `/cart/:id?` answers `/cart` and `/cart/5` — because the
+matcher pairs a route with an href of the same length. A nested route's relative path and a splat are not destinations.
+Vue Router (`frameworks/vue-router.ts`, `vue-router-synthesizer.ts`): the routes are `createRouter({ routes: [...] })`, walked as
+objects rather than pattern-matched — a `name` is written ABOVE the `path` it belongs to, so a window around each `path` hands an
+entry its predecessor's name — and bound to the view each names by a `calls` edge, because a `references` candidate list is
+filtered to the ref's own language family and a `.js` router config can never name a `.vue` component. Navigation is usually a
+NAME (`router.push({ name: 'profile' })`, `:to="{ name }"`), which no other framework here does, so the table carries a `byName`
+index built by re-reading the config files its own route nodes came from; a `{ path }` object and a bare string fall back to the
+shared href readers. SvelteKit (`frameworks/sveltekit-router.ts`, `sveltekit-synthesizer.ts`): only a `+page.svelte` is a route
+(a `+layout` and a `+error` sit at a page's address without being one); `goto` takes its path first and `redirect(status, path)`
+second, the one framework here that does; `<a href>` is the link component. A route is joined to the `+page.svelte`
+that serves it (`sveltekit-page`), because a SvelteKit route is derived from a file PATH and its component has no name of its own
+to reference — every page file's component is called `+page` — so the match is the file, not a name; without it a page had no
+body and opened as a lone box. The page is in turn joined to the `+page.server.js` beside it by `callback-synthesizer.ts`'s
+`svelteKitLoadEdges` — a `calls` edge to its load and to each form action, because the framework joins those two by the file
+system and not by a call, and a page's own auth guard is written in its loader.
+TanStack Router (`frameworks/tanstack-router.ts`, `tanstack-router-synthesizer.ts`): routes come from `createFileRoute('/x/$id')`
+(the whole path as a literal) and from `createRoute({ path, getParentRoute })` composed up its parent chain within the file;
+`$id` normalises to `:id`, a `_pathless` segment and a `(group)` are not in the URL, and neither a `__root` route nor a file that
+renders an `<Outlet/>` is a page — the index beside it is. Its `to` is the route PATTERN with the values in `params`, so a
+destination is normalised the way a route NAME is rather than read as a URL, and `navigate` / `redirect` take it under a `to`
+key. **Every table above is per-app** (`RootedRouteTable`, `routesForFile`): one table for a whole repository is wrong the moment
+it holds two apps, because each has a `/` and a `/login` and the first indexed claims the address — measured at 82% of
+navigations pointing into a different app on a 477-app monorepo. The `roots` list decides only whether to resolve; the per-root
+split decides which app's routes to match, longest root first.
 
 ### 3.13 Steps (`#/steps?anchor=<id>` | `?symbol=<name>`, `&depth=`)
 What happens from an anchor — a screen, a handler, any symbol — drawn with the Screens view's machinery (§3.12's

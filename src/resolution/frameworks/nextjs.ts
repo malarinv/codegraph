@@ -42,6 +42,7 @@ import { stripCommentsForRegex } from '../strip-comments';
 import { dependsOn } from './package-deps';
 import {
   HOLE,
+  hrefArms,
   defaultExportName,
   firstArgumentText,
   matchRoute,
@@ -164,17 +165,39 @@ function decode(s: string): string {
   }
 }
 
-/** The page an href names in this table, or null when none or several do (a fork), exactly as Expo Router decides. */
-export function pageForHref(href: HrefLiteral, table: RouteTable): Node | null {
-  const segs = hrefSegments(href);
-  if (segs === null) return null;
-  const target = matchRoute(segs, table);
-  if (!target) return null;
-  if (href.alternate) {
-    const alt = hrefSegments(href.alternate);
-    if (alt === null || matchRoute(alt, table)?.id !== target.id) return null;
+/** A route a destination names, with the arm that named it — so each edge says the path it took. */
+export interface HrefDestination {
+  node: Node;
+  /** The arm of the expression this route came from; its `display` is the edge's href. */
+  href: HrefLiteral;
+}
+
+/**
+ * Every route a destination names — one per arm of a conditional, deduped.
+ *
+ * Each carries its OWN arm, because an edge that says
+ * `/search/${…}/page/${…}` while pointing at `/admin/productlist/:pageNumber`
+ * names a path it did not take.
+ */
+export function destinationsForHref(href: HrefLiteral, table: RouteTable): HrefDestination[] {
+  const out: HrefDestination[] = [];
+  const seen = new Set<string>();
+  for (const arm of hrefArms(href)) {
+    const segs = hrefSegments(arm);
+    if (segs === null) continue;
+    const target = matchRoute(segs, table);
+    // An arm naming no route drops out; the arms that DO name one are still
+    // places this navigation goes.
+    if (!target || seen.has(target.id)) continue;
+    seen.add(target.id);
+    out.push({ node: target, href: arm });
   }
-  return target;
+  return out;
+}
+
+/** The single route an href names, or null when it names none. The first arm wins a fork. */
+export function pageForHref(href: HrefLiteral, table: RouteTable): Node | null {
+  return destinationsForHref(href, table)[0]?.node ?? null;
 }
 
 // =============================================================================
@@ -306,15 +329,21 @@ export const nextjsResolver: FrameworkResolver = {
       href = readHrefViaLocal(lines, ref.line, ref.column, callee, start);
     }
     if (!href) return null;
-    const target = pageForHref(href, table);
+    // Every arm of a conditional destination is somewhere this call goes; the
+    // first is this reference's resolution and the rest ride as `alsoTargets`.
+    const targets = destinationsForHref(href, table);
+    const target = targets[0];
     if (!target) return null;
     return {
       original: ref,
-      targetNodeId: target.id,
+      targetNodeId: target.node.id,
+      ...(targets.length > 1
+        ? { alsoTargets: targets.slice(1).map((t) => ({ targetNodeId: t.node.id, metadata: { href: t.href.display, navMethod: verb } })) }
+        : {}),
       confidence: 0.95,
       resolvedBy: 'framework',
       edgeKind: 'navigates',
-      metadata: { href: href.display, navMethod: verb },
+      metadata: { href: target.href.display, navMethod: verb },
     };
   },
 };

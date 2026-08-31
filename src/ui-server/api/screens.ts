@@ -157,12 +157,38 @@ const SHARED_CHROME_MIN = 3;
 // The endpoint
 // =============================================================================
 
+/** True when the edge's destination is written at the line the edge points to. */
+function writtenHere(edge: Edge, holder: Node): boolean {
+  const at = (edge.metadata as Record<string, unknown> | undefined)?.registeredAt;
+  if (typeof at !== 'string') return edge.provenance !== 'heuristic';
+  return at === `${holder.filePath}:${edge.line}`;
+}
+
+/**
+ * A route a user can be ON, as opposed to one a request goes to.
+ *
+ * Every server framework names its routes with the HTTP method that reaches
+ * them — `GET /api/orders`, `POST /api/users/login`, `USE /api/products`,
+ * `ANY /api/users`, `GET *` — while a screen is named by its path alone.
+ * Nuxt is the one framework that names an endpoint like a page, so its
+ * `server/api/` files are excluded by path instead.
+ *
+ * Without this the tab drew a store's thirty Express endpoints beside its
+ * nineteen pages: boxes nothing can navigate to and nothing leaves, in a
+ * picture that is only about navigation, pushing the pages that ARE
+ * unreachable into a row hundreds of boxes wide. Every route still appears on
+ * Entry points, which is the list of what a request or a user can arrive at.
+ */
+function isScreenRoute(route: Node): boolean {
+  return route.name.startsWith('/') && !route.filePath.includes('/server/api/');
+}
+
 export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<WireScreensPayload> {
   const started = Date.now();
   const stats = cg.getStats();
   const index = { lastIndexedAt: cg.getLastIndexedAt() ?? null, edges: stats.edgeCount, files: stats.fileCount };
 
-  const routes = cg.getNodesByKind('route');
+  const routes = cg.getNodesByKind('route').filter(isScreenRoute);
   const routeIds = routes.map((r) => r.id);
   const navEdges = routeIds.length === 0 ? [] : cg.getIncomingEdgesTo(routeIds, ['navigates']);
   if (navEdges.length === 0) {
@@ -183,14 +209,31 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
   // A route standing in for its own inline handler binds to nothing here — a
   // walk back from a navigation cannot land on a registration site.
   const routeById = new Map(routes.map((r) => [r.id, r]));
-  const routeByFile = new Map(routes.map((r) => [r.filePath, r.id]));
+  // A file that declares exactly ONE route, for the fallback that says a
+  // component belongs to the screen whose file defines it. A file holding
+  // SEVERAL routes says nothing about which one a navigation belongs to —
+  // an Express router file, or the `main.tsx` a code-based route tree is
+  // written in, would otherwise hand every navigation in it to whichever
+  // route happened to be declared last, and draw a root nav bar's links as
+  // transitions out of an unrelated page.
+  const routesPerFile = new Map<string, number>();
+  for (const r of routes) routesPerFile.set(r.filePath, (routesPerFile.get(r.filePath) ?? 0) + 1);
+  const routeByFile = new Map(routes.filter((r) => routesPerFile.get(r.filePath) === 1).map((r) => [r.filePath, r.id]));
   const roots = routeRoots(cg, routes);
   const componentOf = new Map<string, Node>();
-  const screenOfComponent = new Map<string, string>();
+  // Component → EVERY route it serves, not one of them. proshop renders
+  // `HomeScreen` at `/`, `/search/:keyword`, `/page/:pageNumber` and
+  // `/search/:keyword/page/:pageNumber`; keeping only the first route to claim
+  // the component gave all four addresses' navigation to whichever `<Route>`
+  // happened to be written first, and drew the home page as a screen you can
+  // get to but never leave.
+  const screenOfComponent = new Map<string, string[]>();
   for (const [routeId, root] of roots) {
     if (root.inline) continue;
     componentOf.set(routeId, root.node);
-    if (!screenOfComponent.has(root.node.id)) screenOfComponent.set(root.node.id, routeId);
+    const serves = screenOfComponent.get(root.node.id);
+    if (serves) serves.push(routeId);
+    else screenOfComponent.set(root.node.id, [routeId]);
   }
   const nodesById = cg.getNodesByIds([...componentOf.values()].map((n) => n.id).concat(navEdges.map((e) => e.source)));
 
@@ -226,8 +269,14 @@ export async function buildScreens(cg: CodeGraph, projectRoot: string): Promise<
       file: toPosix(holder.filePath),
       line: nav.line ?? holder.startLine,
       href: typeof meta.href === 'string' ? meta.href : target.name,
-      method: nav.provenance === 'heuristic' ? 'return' : typeof meta.navMethod === 'string' ? meta.navMethod : 'push',
-      when: nav.provenance === 'heuristic' ? '' : await whenAt(holder, nav),
+      // How the destination got here. A synthesized edge whose `registeredAt`
+      // is its OWN line had the destination written right there — a
+      // `<Link to='/shipping'>` is markup, not a return value — so it keeps
+      // its own verb. Only an edge whose destination came from somewhere else
+      // (`expo-router-return`, where a helper returns the href and the push is
+      // in another file) reads as `return`.
+      method: writtenHere(nav, holder) && typeof meta.navMethod === 'string' ? meta.navMethod : nav.provenance === 'heuristic' ? 'return' : 'push',
+      when: await whenAt(holder, nav),
     };
 
     let starts = await attribute(cg, projectRoot, holder, screenOfComponent, routeByFile, nodesById);
@@ -352,13 +401,14 @@ async function attribute(
   cg: CodeGraph,
   projectRoot: string,
   holder: Node,
-  screenOfComponent: Map<string, string>,
+  screenOfComponent: Map<string, string[]>,
   routeByFile: Map<string, string>,
   known: Map<string, Node>
 ): Promise<Attribution[] | null> {
-  // The holder IS a screen component: the transition starts on that screen.
+  // The holder IS a screen component: the transition starts on that screen —
+  // on each of them, when one component is rendered at several addresses.
   const own = screenOfComponent.get(holder.id);
-  if (own) return [{ screenId: own, path: [{ node: holder, edge: null }] }];
+  if (own) return own.map((screenId) => ({ screenId, path: [{ node: holder, edge: null }] }));
 
   const parent = new Map<string, { prev: string | null; edge: Edge | null }>();
   parent.set(holder.id, { prev: null, edge: null });
@@ -410,9 +460,10 @@ async function attribute(
         if (!caller || caller.kind === 'file' || caller.kind === 'route') continue;
         parent.set(e.source, { prev: e.target, edge: e });
         nodes.set(e.source, caller);
-        const screen = screenOfComponent.get(caller.id);
-        if (screen) {
-          found.push({ screenId: screen, path: pathFrom(caller.id, parent, nodes) });
+        const screens = screenOfComponent.get(caller.id);
+        if (screens) {
+          const path = pathFrom(caller.id, parent, nodes);
+          for (const screenId of screens) found.push({ screenId, path });
           continue; // a screen is where the walk stops
         }
         nextIds.push(e.source);
@@ -455,7 +506,11 @@ function collapseSharedChrome(starts: Attribution[], origins: Map<string, WireSc
   const out: Attribution[] = [];
   const collapsed = new Set<Attribution>();
   for (const [, group] of byFirstHop) {
-    const screens = new Set(group.map((g) => g.screenId));
+    // Counted by the screen COMPONENT the chain starts at, not by the address:
+    // a top bar rendered by twelve different screens is chrome, while one
+    // component serving four routes is one screen with four addresses, and
+    // collapsing that would take the navigation away from all of them.
+    const screens = new Set(group.map((g) => g.path[0]!.node.id));
     if (screens.size < SHARED_CHROME_MIN) continue;
     const head = group[0]!.path[1]!.node;
     const existing = origins.get(head.id);

@@ -52,6 +52,19 @@ export interface ResolvedRef {
   edgeKind?: EdgeKind;
   /** Extra metadata the strategy wants persisted on the edge (`href`, …). */
   metadata?: Record<string, unknown>;
+  /**
+   * The OTHER targets, when one reference names several.
+   *
+   * A navigation whose destination is a conditional reaches every arm —
+   * `!isAdmin ? keyword ? '/search/…' : '/page/…' : '/admin/…'` is one call
+   * and three screens — and drawing only the first would hide two places the
+   * code goes. `createEdges` fans these out into an edge apiece, sharing this
+   * resolution's kind and confidence; each carries its own metadata.
+   *
+   * The reference itself still resolves ONCE, so the resolution pipeline's
+   * bookkeeping — cleanup by row id, counts, re-resolution — is unchanged.
+   */
+  alsoTargets?: { targetNodeId: string; metadata?: Record<string, unknown> }[];
 }
 
 /**

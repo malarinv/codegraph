@@ -27,7 +27,7 @@ import type { MaybeYield } from './cooperative-yield';
 import { stripCommentsForRegex } from './strip-comments';
 import { isTestPath } from '../search/query-utils';
 import { readStringAt, toHref } from './frameworks/expo-router';
-import { nextRouteTable, pageForHref } from './frameworks/nextjs';
+import { nextRouteTable, destinationsForHref } from './frameworks/nextjs';
 import { enclosingFn, makeLineAt } from './synth-utils';
 
 const JSX_FILE = /\.(?:[cm]?[jt]sx?|mdx)$/;
@@ -80,22 +80,24 @@ export async function nextLinkEdges(ctx: ResolutionContext, onYield: MaybeYield)
       const line = lineOf(m.index);
       const component = enclosingFn(nodes, line);
       if (!component) continue;
-      const page = pageForHref(href, table);
-      if (!page) continue;
-      const key = `${component.id}>${page.id}`;
-      if (seen.has(key)) continue;
-      const count = (perComponent.get(component.id) ?? 0) + 1;
-      perComponent.set(component.id, count);
-      if (count > MAX_LINKS_PER_COMPONENT) continue;
-      seen.add(key);
-      edges.push({
-        source: component.id,
-        target: page.id,
-        kind: 'navigates',
-        line,
-        provenance: 'heuristic',
-        metadata: { synthesizedBy: 'next-link', href: href.display, navMethod: tag === 'a' ? 'a' : 'link', registeredAt: `${file}:${line}` },
-      });
+      // A destination written as a choice names one route per arm, and the
+      // user reaches every one of them — each is drawn.
+      for (const { node: page, href: arm } of destinationsForHref(href, table)) {
+        const key = `${component.id}>${page.id}`;
+        if (seen.has(key)) continue;
+        const count = (perComponent.get(component.id) ?? 0) + 1;
+        perComponent.set(component.id, count);
+        if (count > MAX_LINKS_PER_COMPONENT) continue;
+        seen.add(key);
+        edges.push({
+          source: component.id,
+          target: page.id,
+          kind: 'navigates',
+          line,
+          provenance: 'heuristic',
+          metadata: { synthesizedBy: 'next-link', href: arm.display, navMethod: tag === 'a' ? 'a' : 'link', registeredAt: `${file}:${line}` },
+        });
+      }
     }
   }
   return edges;

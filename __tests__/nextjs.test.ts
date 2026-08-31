@@ -263,7 +263,9 @@ describe('nextjs: end to end', () => {
     const link = screens.links.find((l) => l.from === home.id && l.to === users.id)!;
     expect(link.via).toEqual([]);
     expect(link.synthesized).toBe(true);
-    expect(link.sites[0]).toMatchObject({ href: '/users', method: 'return' });
+    // Markup, not a return value: the destination is written right there, so
+    // the site keeps its own verb rather than reading as a helper's return.
+    expect(link.sites[0]).toMatchObject({ href: '/users', method: 'link' });
     const push = screens.links.find((l) => l.from === users.id && l.to === user.id)!;
     expect(push).toBeDefined();
     expect(push.via.map((v) => v.name)).toEqual(['NewUserForm', 'handleSubmit']);
@@ -272,6 +274,14 @@ describe('nextjs: end to end', () => {
     // The middleware's redirect starts from no page: an origin.
     expect(screens.origins.map((o) => o.node.name)).toContain('middleware');
     expect(screens.dropped).toBe(0);
+  });
+
+  it('an endpoint is not a screen — the Screens tab is pages, Entry points is every route', async () => {
+    const screens = await buildScreens(cg, tmpDir);
+    // `GET /api/users` and `POST /api/users` are routes, and they are on the
+    // Entry points list — but a request is not somewhere a user can be.
+    expect(screens.screens.map((s) => s.path).sort()).toEqual(['/', '/login', '/users', '/users/:id']);
+    expect(cg.getNodesByKind('route').some((r) => r.name === 'POST /api/users')).toBe(true);
   });
 
   it('a page’s Steps picture fires from its load, crosses to the server action, and draws the pages it leads to as boundaries', async () => {

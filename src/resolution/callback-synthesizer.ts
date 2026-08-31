@@ -30,6 +30,10 @@ import { cFnPointerDispatchEdges } from './c-fnptr-synthesizer';
 import { goframeRouteEdges } from './goframe-synthesizer';
 import { expoRouterReturnEdges } from './expo-router-synthesizer';
 import { nextLinkEdges } from './next-router-synthesizer';
+import { reactRouterLinkEdges } from './react-router-synthesizer';
+import { tanstackLinkEdges } from './tanstack-router-synthesizer';
+import { vueRouterLinkEdges } from './vue-router-synthesizer';
+import { svelteKitLinkEdges, svelteKitPageComponentEdges } from './sveltekit-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
 import { crossTierEdges } from './tier-synthesizer';
 import { enclosingFn, makeLineAt } from './synth-utils';
@@ -2050,11 +2054,16 @@ async function svelteKitLoadEdges(ctx: ResolutionContext, onYield: MaybeYield): 
       const loaderFile = `${dir}${prefix}${ext}`;
       if (!allFiles.has(loaderFile)) continue;
       for (const hook of ctx.getNodesInFile(loaderFile)) {
-        if (!HOOK_KINDS.has(hook.kind) || !HOOKS.has(hook.name)) continue;
+        // `load` and `actions` by name, and every function the loader file
+        // declares — a form action is an arrow inside `actions`, and it is a
+        // node of its own (`default`, `logout`), where the redirect that ends
+        // the submission is actually written.
+        const named = HOOK_KINDS.has(hook.kind) && HOOKS.has(hook.name);
+        if (!named && hook.kind !== 'function' && hook.kind !== 'method') continue;
         edges.push({
           source: page.id,
           target: hook.id,
-          kind: 'references',
+          kind: 'calls',
           line: page.startLine,
           provenance: 'heuristic',
           metadata: {
@@ -3604,6 +3613,11 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'expoRouterReturnEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => expoRouterReturnEdges(c, y) },
   // `<Link href="/x">` / an internal `<a href>` — markup, not a call; the component navigates.
   { name: 'nextLinkEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => nextLinkEdges(c, y) },
+  { name: 'reactRouterLinkEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => reactRouterLinkEdges(c, y) },
+  { name: 'tanstackLinkEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => tanstackLinkEdges(c, y) },
+  { name: 'vueRouterLinkEdges', gate: (has) => has('vue', ...JS_FAMILY), run: (_q, c, y) => vueRouterLinkEdges(c, y) },
+  { name: 'svelteKitPageEdges', gate: (has) => has('svelte'), run: (_q, c, y) => svelteKitPageComponentEdges(c, y) },
+  { name: 'svelteKitLinkEdges', gate: (has) => has('svelte'), run: (_q, c, y) => svelteKitLinkEdges(c, y) },
   { name: 'nixOptionEdges', gate: (has) => has('nix'), run: (q, _c, y) => nixOptionPathEdges(q, y) },
 ];
 
