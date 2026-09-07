@@ -138,6 +138,15 @@ describe('fuzzy reachability rejects a unique guess but never manufactures one',
     expect(matchFuzzy(callFrom('vite.config.js', 3), contextWith([closure, method]))).toBeNull();
   });
 
+  it('trusts no nesting in C, where a nested function is an extraction artifact', () => {
+    // betaflight: tree-sitter-c's recovery from `RESET_CONFIG(…, .pid = {…})`
+    // runs resetPidProfile to the end of pid.c, so every function after it is
+    // "nested" in the graph. C has no nested named functions; the call reaches it.
+    const cClosure = node({ ...closure, id: 'f:c', language: 'c' as Node['language'], filePath: 'pid.c' });
+    const cRef = { ...callFrom('core.c', 3), language: 'c' as UnresolvedRef['language'] };
+    expect(matchFuzzy(cRef, contextWith([cClosure]))?.targetNodeId).toBe('f:c');
+  });
+
   it('resolves a lone reachable method as before', () => {
     expect(matchFuzzy(callFrom('vite.config.js', 3), contextWith([method]))?.targetNodeId).toBe('m:resolve');
   });

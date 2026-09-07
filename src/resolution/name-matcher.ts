@@ -354,6 +354,9 @@ export function matchFunctionRef(
   return null;
 }
 
+/** Languages with no nested named functions: nesting in the graph is never a scope. */
+const NO_NESTED_FUNCTIONS = new Set<string>(['c', 'cpp']);
+
 /**
  * A function nested inside another FUNCTION is only callable from within its
  * container — Python, JS/TS, and every closure language scope it lexically.
@@ -371,6 +374,14 @@ function isLexicallyReachable(
   context: ResolutionContext
 ): boolean {
   if (candidate.kind !== 'function') return true;
+  // C and C++ have no nested named functions, so a function the graph shows
+  // inside another is an extraction artifact, not a scope: tree-sitter-c
+  // cannot parse a macro call whose arguments are designated initializers
+  // (betaflight's `RESET_CONFIG(pidProfile_t, pidProfile, .pid = {…})`), and
+  // its error recovery runs the enclosing function_definition to the end of
+  // the file, nesting every function after it. Trusting that nesting rejected
+  // 117 real calls into pid.c on that tree; the functions are reachable.
+  if (NO_NESTED_FUNCTIONS.has(candidate.language)) return true;
   const qn = candidate.qualifiedName;
   if (!qn || !qn.includes('::')) return true;
   const parentQn = qn.slice(0, qn.lastIndexOf('::'));
