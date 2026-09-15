@@ -157,6 +157,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 #### MCP / indexing
 
+- Daemon startup and cleanup now preserve live legacy PID-only locks while still reclaiming dead or identity-disproved records, preventing two writers from serving the same project.
 - Incremental sync now keeps edge rebinding crash-safe: replacing a resolved edge with its recovery reference commits atomically, so an interruption cannot permanently remove the relationship.
 
 - The prompt hook no longer injects unrelated projects when run from your home directory or a broader directory containing a stray workspace manifest. (#1454)
