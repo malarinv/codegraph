@@ -154,6 +154,10 @@ export interface ResolutionContext {
   getNodeById?(id: string): Node | null;
   /** Get cached import mappings for a file */
   getImportMappings(filePath: string, language: Language): ImportMapping[];
+  /** Import lookup supplied by the coordinator, keeping name matching from
+   * importing the import resolver (which itself uses name-matching helpers).
+   * Minimal contexts without import resolution may omit this capability. */
+  resolveImport?(ref: UnresolvedRef): ResolvedRef | null;
   /**
    * Project import-path aliases (tsconfig/jsconfig `paths`). Returns
    * `null` when the project doesn't define any. Cached per resolver

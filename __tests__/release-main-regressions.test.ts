@@ -61,6 +61,11 @@ beforeAll(async () => {
   export function unknownFactory(db: any) { db.prepare().reset(); }
   `);
   write('not-a-store.ts', `export const fake = otherFactory(() => ({ reset() { return 1; } }));`);
+  write('barrel.ts', `export { useStore as routedStore } from './store';`);
+  write('barrel-consumer.ts', `import { routedStore as current } from './barrel';
+  export function barrelReset() { current.getState().reset(); }
+  export function barrelSelected() { const selected = current(s => s.reset); selected(); }
+  `);
   write('selectors.ts', `import { useStore as current, anotherStore } from './store';
   import { fake } from './not-a-store';
   export function rootShadow(current: any) { const selected = current(s => s.reset); selected(); }
@@ -143,6 +148,12 @@ describe('release-to-main correctness regressions', () => {
   it('follows selectors captured by closures to their own store action', () => {
     expect(targets(node('Screen::captured').id)).toEqual([node('reset', 'store.ts', 5).id]);
     expect(targets(node('Screen::otherCaptured').id)).toEqual([node('reset', 'store.ts', 8).id]);
+  });
+  it.each(['barrelReset', 'barrelSelected'])('resolves %s through both a re-export and local import alias', (name) => {
+    const store = cg.getNodesByKind('constant').find(n => n.name === 'useStore' && n.filePath === 'store.ts')!;
+    // The imported store itself is also referenced by the accessor/hook call.
+    // Pin the whole target set so the other store's same-named reset cannot leak in.
+    expect(targets(node(name, 'barrel-consumer.ts').id).sort()).toEqual([node('reset', 'store.ts', 5).id, store.id].sort());
   });
   it.each(['Screen::parameterShadow', 'Screen::arrowShadow', 'Screen::localShadow', 'outside', 'wrongSelector', 'unknownSelector', 'rootShadow', 'rootBlockShadow'])('does not guess a selector action in %s', (name) => {
     const calls = targets(node(name, 'selectors.ts').id);
