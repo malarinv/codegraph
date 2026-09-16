@@ -2250,6 +2250,17 @@ export function matchMethodCall(
     return matchRustSelfFieldCall(objectOrClass!.slice('self.'.length), methodName!, ref, context);
   }
 
+  // Rust call on the enclosing type itself — `self.reset()`, emitted as
+  // `self.reset` (#1861). Same discipline as the field branch above, and
+  // EXCLUSIVE for the same reason: the owner is written on the `impl` line and
+  // carried in the calling method's qualified name, so it is not a guess.
+  // Letting this shape reach the bare-name strategies below is how
+  // `self.reset()` resolved to a same-named method on an unrelated type
+  // whenever that type's method happened to sit nearer the call site.
+  if (ref.language === 'rust' && dotMatch && objectOrClass === 'self') {
+    return matchRustSelfCall(methodName!, ref, context);
+  }
+
   // TS/JS call through a field of the enclosing class — `this.mailer.send()`,
   // emitted as `this.mailer.send` (#1496). Same discipline as the Rust branch
   // above, and EXCLUSIVE for the same reason: the field's declared type off
@@ -2588,6 +2599,56 @@ export function rustFieldTypeName(raw: string): string | null {
   if (RUST_NON_PROJECT_FIELD_TYPES.has(seg)) return null;
   if (/^[A-Z]$/.test(seg)) return null; // bare single-letter generic parameter
   return seg;
+}
+
+/**
+ * `self.method()` in Rust — the method on the type the call sits inside.
+ *
+ * The owner is the calling method's qualified-name prefix (`Target::run` →
+ * `Target`), which is where the `impl` block's type ends up. A free function
+ * has no `self`, so a caller whose qualified name carries no owner declines.
+ * Exactly one candidate must belong to that owner: a project with two `impl`
+ * blocks for the same type is normal, two same-named methods on it is not, and
+ * guessing between them is the failure this replaces.
+ */
+function matchRustSelfCall(
+  methodName: string,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): ResolvedRef | null {
+  const caller = context.getNodeById?.(ref.fromNodeId);
+  if (!caller?.qualifiedName) return null;
+  const sep = caller.qualifiedName.lastIndexOf('::');
+  if (sep <= 0) return null; // a free fn has no `self`
+  const owner = caller.qualifiedName.slice(0, sep);
+
+  let owned = context
+    .getNodesByQualifiedName(`${owner}::${methodName}`)
+    .filter(
+      (n) =>
+        n.kind === 'method' &&
+        n.language === 'rust' &&
+        n.qualifiedName === `${owner}::${methodName}`,
+    );
+  // Rust's extracted qualified names omit module paths. Two modules can
+  // each declare `Target`; matching just `Target::reset` does not establish
+  // ownership. In that case require a single owner declaration in the
+  // caller's file and a method in that file. Otherwise leave it unresolved.
+  // A unique owner still permits ordinary impl blocks split across files.
+  const owners = context.getNodesByQualifiedName(owner).filter((n) =>
+    n.language === 'rust' && ['struct', 'enum', 'union', 'trait', 'class'].includes(n.kind));
+  if (owners.length > 1) {
+    if (owners.filter((n) => n.filePath === caller.filePath).length !== 1) return null;
+    owned = owned.filter((n) => n.filePath === caller.filePath);
+  }
+  if (owned.length !== 1) return null;
+
+  return {
+    original: ref,
+    targetNodeId: owned[0]!.id,
+    confidence: 0.9,
+    resolvedBy: 'qualified-name',
+  };
 }
 
 /**
