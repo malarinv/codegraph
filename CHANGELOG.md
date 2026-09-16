@@ -145,6 +145,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- Turning telemetry off now resets its identity and stops running processes from recording, sending, or restoring unsent data. (#1869)
+
 - Calls between JavaScript, JSX and TypeScript files keep their callers and callback flows.
 - Zustand actions keep their callers when read through typed stores, destructured from store state, or selected by a hook.
 - Steps diagrams retain database operations made through external client chains without inventing internal dependencies.
