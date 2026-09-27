@@ -932,6 +932,8 @@ export function symbolsNotInRanges(
   return out;
 }
 
+const BARE_GAP_MARKER = '\n\n... (gap) ...\n\n';
+
 /**
  * Gap marker between two non-contiguous slices of one file.
  *
@@ -945,7 +947,7 @@ export function formatGapMarker(
   filePath: string,
   elided: ReadonlyArray<ElidedSymbolRef>,
 ): string {
-  if (elided.length === 0) return '\n\n... (gap) ...\n\n';
+  if (elided.length === 0) return BARE_GAP_MARKER;
   const shown = elided.slice(0, ELIDED_SYMBOL_CAP);
   const more = elided.length - shown.length;
   const names = shown.map((s) => `${s.name} (${filePath}:${s.startLine})`).join(', ')
@@ -953,18 +955,37 @@ export function formatGapMarker(
   return `\n\n... (gap: ${names}) ...\n\n`;
 }
 
-/** Join rendered parts with gap markers that name whatever the trim skipped. */
+/**
+ * Join rendered parts with gap markers that name whatever the trim skipped.
+ *
+ * `spareChars` is what naming may cost beyond bare markers. Cluster selection
+ * prices every join between clusters as a bare marker, and on a long path each
+ * named gap runs to several hundred chars, so unbounded naming overran the
+ * file's reservation and the ceiling trim then dropped SOURCE to pay for the
+ * names: vscode's `rpcProtocol.ts` went from ~5,200 chars of the RPCProtocol
+ * body to a 222-char stub. A gap the spare can't cover stays bare; the file
+ * header still lists the symbols the trim dropped.
+ */
 export function joinPartsWithNamedGaps(
   filePath: string,
   parts: ReadonlyArray<{ range: ExploreLineRange; text: string }>,
   nodes: ReadonlyArray<{ name: string; kind: string; startLine: number; endLine: number }>,
+  spareChars = Infinity,
 ): string {
   if (parts.length === 0) return '';
   let out = parts[0]!.text;
+  let spare = spareChars;
   for (let i = 1; i < parts.length; i++) {
     const prev = parts[i - 1]!;
     const next = parts[i]!;
-    out += formatGapMarker(filePath, symbolsBetweenRanges(nodes, prev.range.end, next.range.start));
+    const named = formatGapMarker(filePath, symbolsBetweenRanges(nodes, prev.range.end, next.range.start));
+    const extra = named.length - BARE_GAP_MARKER.length;
+    if (extra <= spare) {
+      out += named;
+      spare -= extra;
+    } else {
+      out += BARE_GAP_MARKER;
+    }
     out += next.text;
   }
   return out;
@@ -3242,10 +3263,62 @@ export class ToolHandler {
       try { const ce = cg.getIncomingEdges(m.id).find((e) => e.kind === 'contains'); return ce ? cg.getNode(ce.source) : null; }
       catch { return null; }
     };
+    // A supertype dispatches only a member it (or an ancestor) declares. Without
+    // this, any name shared by enough subclasses read as dispatch through their
+    // common base: on vscode the query word `extension`, a getter on unrelated
+    // classes that all extend `Disposable`, was announced as "runtime dispatch to
+    // 2706 types implementing Disposable" at the top of 9 of 31 answers.
+    //
+    // A Swift protocol and each of its extensions are separate nodes of one name,
+    // and a conformer's edge may land on any of them (Alamofire's
+    // `RequestInterceptor` conformers point at an extension in OfflineRetrier.swift
+    // that has no `adapt`), so every same-named type is asked. The answer is
+    // `unknown`, and the announcement stays, whenever absence can't be judged:
+    // nothing on the chain has indexed members of the family's sort, or an
+    // interface/protocol on it has none (Swift requirements aren't nodes, so
+    // `URLRequestConvertible` can't be said to lack `asURLRequest`).
+    const memberOfSupertype = (typeId: string, name: string, callable: boolean): 'declared' | 'absent' | 'unknown' => {
+      const counts = (kind: string) => !callable || kind === 'method' || kind === 'function';
+      let sawMembers = false;
+      let opaque = false;
+      const seen = new Set<string>();
+      const visit = (id: string, depth: number): boolean => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        let node: Node | null = null;
+        let edges: ReturnType<typeof cg.getOutgoingEdges> = [];
+        try { node = cg.getNode(id); edges = cg.getOutgoingEdges(id); } catch { return false; }
+        let own = 0;
+        for (const e of edges) {
+          if (e.kind !== 'contains') continue;
+          let child: Node | null = null;
+          try { child = cg.getNode(e.target); } catch { child = null; }
+          if (!child) continue;
+          if (child.name === name) return true;
+          if (counts(child.kind)) own++;
+        }
+        if (own > 0) sawMembers = true;
+        else if (node && (node.kind === 'interface' || node.kind === 'protocol' || node.kind === 'trait')) opaque = true;
+        if (depth >= 3) return false;
+        return edges.some((e) => (e.kind === 'extends' || e.kind === 'implements') && visit(e.target, depth + 1));
+      };
+      let root: Node | null = null;
+      try { root = cg.getNode(typeId); } catch { root = null; }
+      let namesakes: Node[] = [];
+      try {
+        namesakes = root
+          ? cg.getNodesByName(root.name).filter((n) => n.language === root!.language && CLASSY.has(n.kind))
+          : [];
+      } catch { namesakes = []; }
+      if (visit(typeId, 0) || namesakes.some((n) => visit(n.id, 0))) return 'declared';
+      return sawMembers && !opaque ? 'absent' : 'unknown';
+    };
     const notes: string[] = [];
     const seenSuper = new Set<string>();
     for (const { token, family } of candidates) {
       if (notes.length >= MAX_NOTES) break;
+      const memberName = family[0]?.name ?? token;
+      const callableFamily = family[0]?.kind === 'method' || family[0]?.kind === 'function';
       // supertype id → how many sampled definers share it + a few example definers
       const supers = new Map<string, { node: Node; count: number; targets: Node[] }>();
       for (const m of family.slice(0, SAMPLE)) {
@@ -3277,7 +3350,9 @@ export class ToolHandler {
         // `extends` and a synthesized `implements` is one implementation.
         const impl = countImplementers(cg, node.id);
         if (impl < MIN_IMPL) continue;
-        if (!best || impl > best.impl) best = { node, impl, targets };
+        if (best && impl <= best.impl) continue;
+        if (memberOfSupertype(node.id, memberName, callableFamily) === 'absent') continue;
+        best = { node, impl, targets };
       }
       if (!best || seenSuper.has(best.node.id)) continue;
       seenSuper.add(best.node.id);
@@ -3813,7 +3888,17 @@ export class ToolHandler {
         if (!names) {
           names = new Set<string>();
           try {
-            for (const n of cg.getNodesInFile(fp)) names.add(n.name.toLowerCase());
+            // An interface's members (#1638) describe a shape; nobody names
+            // them in a question. Counting them let `readonly host: string` in
+            // an options interface corroborate the English word "main" into
+            // seeding the same file's `main()`, which then took the named-first
+            // tier from the answer files (vscode "extension host … main process").
+            const fileNodes = cg.getNodesInFile(fp);
+            const interfaces = fileNodes.filter((n) => n.kind === 'interface');
+            const declaresShape = (n: Node) =>
+              (n.kind === 'property' || n.kind === 'method') &&
+              interfaces.some((i) => n.startLine >= i.startLine && n.endLine <= i.endLine);
+            for (const n of fileNodes) if (!declaresShape(n)) names.add(n.name.toLowerCase());
           } catch { /* unreadable file entry — treat as uncorroborated */ }
           fileNameSets.set(fp, names);
         }
@@ -5481,12 +5566,14 @@ export class ToolHandler {
       // does the slicing; a second function mirroring these window/padding rules
       // would drift.
       type SectionPart = { range: ExploreLineRange; text: string };
-      // Named gaps (#1711): a bare `... (gap) ...` hid the answer when the
-      // trim dropped the symbols the query was asking for. Budget estimates
-      // still use GAP_MARKER.length (a lower bound); the final fit test
-      // measures the real joined text.
+      // Every fit decision below measures parts joined by BARE gap markers.
+      // Naming what a gap skipped (#1711) is added once, at assembly, from what
+      // the file's budget has left: measured with the names, a shrunk cluster
+      // could overrun its room by the names alone and be dropped whole — the
+      // RPCProtocol class in vscode's rpcProtocol.ts went out that way, leaving a
+      // 3-line stub where ~5,200 chars of its body had fit.
       const sectionText = (parts: ReadonlyArray<SectionPart>): string =>
-        joinPartsWithNamedGaps(filePath, parts, fileIndexNodes);
+        joinPartsWithNamedGaps(filePath, parts, fileIndexNodes, 0);
       const buildSection = (
         c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number },
       ): SectionPart[] => {
@@ -5901,6 +5988,10 @@ export class ToolHandler {
         projectedChars += text.length + GAP_MARKER.length;
       }
 
+      // Gap names (#1711) are paid from what selection left of this file's
+      // budget, never from source: selection measured every gap as bare.
+      const namedGapBudget = Math.max(fileBudget, projectedChars);
+
       // Emit chosen clusters in source order so the file reads top-to-bottom.
       // Assembled through a function because it may have to run more than once:
       // the fit test below trims the weakest cluster and re-assembles rather
@@ -5930,7 +6021,9 @@ export class ToolHandler {
           }
         }
         const ranges = parts.map((p) => p.range);
-        const text = joinPartsWithNamedGaps(filePath, parts, fileIndexNodes);
+        const text = joinPartsWithNamedGaps(
+          filePath, parts, fileIndexNodes, Math.max(0, namedGapBudget - sectionText(parts).length),
+        );
         // Header bias prefers RELEVANT elisions (cluster members the trim cut)
         // over incidental index filler — otherwise locale-sorted `calls0`…
         // crowds out the answer methods (#1711).
