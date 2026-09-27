@@ -13167,3 +13167,70 @@ describe('Unsupported-language projects report what they skipped (#1502)', () =>
     expect(stats.unsupportedByExtension.size).toBe(0);
   });
 });
+
+
+describe('C++ COM interface declarations (#1519)', () => {
+  let tempDir: string;
+  let cg: CodeGraph | undefined;
+  afterEach(() => {
+    cg?.close();
+    cg = undefined;
+    if (tempDir) cleanupTempDir(tempDir);
+  });
+
+  it.each(['\n', '\r\n'])('indexes COM owners, methods and inheritance with %j line endings', async (eol) => {
+    const source = [
+      '#define interface struct',
+      'struct IParentInterface { virtual void Parent() = 0; };',
+      'interface IMyComInterface : IParentInterface {',
+      '    virtual void Foo() = 0;',
+      '    virtual void Bar() = 0;',
+      '};',
+      'interface IStandalone { virtual void Run() = 0; };',
+      '',
+    ].join(eol);
+    expect(detectLanguage('MyInterface.h', source)).toBe('cpp');
+    tempDir = createTempDir();
+    fs.writeFileSync(path.join(tempDir, 'MyInterface.h'), source);
+    cg = CodeGraph.initSync(tempDir);
+    await cg.indexAll();
+    cg.resolveReferences();
+    const nodes = cg.getNodesInFile('MyInterface.h');
+    const owner = nodes.find((n) => n.name === 'IMyComInterface');
+    expect(owner).toMatchObject({ kind: 'struct', startLine: 3 });
+    for (const [name, line] of [['Foo', 4], ['Bar', 5]] as const) {
+      expect(nodes.find((n) => n.name === name)).toMatchObject({
+        kind: 'method', qualifiedName: `IMyComInterface::${name}`, isAbstract: true, startLine: line,
+      });
+    }
+    expect(nodes.find((n) => n.name === 'IStandalone')).toMatchObject({ kind: 'struct' });
+    expect(nodes.find((n) => n.name === 'Run')).toMatchObject({ qualifiedName: 'IStandalone::Run', isAbstract: true });
+    expect(nodes.filter((n) => n.kind === 'function')).toEqual([]);
+    const parent = nodes.find((n) => n.name === 'IParentInterface');
+    expect(cg.getOutgoingEdges(owner!.id)).toContainEqual(expect.objectContaining({ kind: 'extends', target: parent!.id }));
+    expect(await cg.getCode(owner!.id)).toContain('interface IMyComInterface');
+  });
+
+  it('normalizes declaration evidence without a local alias and preserves all other bytes', async () => {
+    const { cppExtractor } = await import('../src/extraction/languages/c-cpp');
+    const source = [
+      '// interface Comment : Base {};',
+      '/* interface Block { virtual void Fake() = 0; }; */',
+      'const char* text = "interface String : Base {};";',
+      'const char* raw = R"tag(interface Raw : Base {})tag";',
+      '#define SAMPLE interface Macro : Base {}',
+      '#define MULTI \\',
+      'interface Continued : Base {}',
+      'int interface = 1;',
+      'void interface();',
+      'interface value;',
+      'interface ordinary{};',
+      'interface IDerived : Base { virtual void Foo() = 0; };',
+      'interface IStandalone { virtual void Run() = 0; };',
+      '',
+    ].join('\r\n');
+    const expected = source.replace('interface IDerived', 'struct    IDerived').replace('interface IStandalone', 'struct    IStandalone');
+    expect(cppExtractor.preParse!(source, 'com.hpp')).toBe(expected);
+    expect(Buffer.byteLength(expected)).toBe(Buffer.byteLength(source));
+  });
+});

@@ -122,6 +122,20 @@ describe.skipIf(!kernelBuilt)('kernel C/C++ extraction parity', () => {
     expect(names).not.toContain('registration');
   });
 
+  it.each(['\n', '\r\n'])('COM interface declarations retain native/wasm parity (%j)', (eol) => {
+    const source = [
+      '#define interface struct',
+      'struct IParentInterface { virtual void Parent() = 0; };',
+      'interface IMyComInterface : IParentInterface {',
+      '    virtual void Foo() = 0;',
+      '    virtual void Bar() = 0;',
+      '};',
+      'interface IStandalone { virtual void Run() = 0; };',
+      '',
+    ].join(eol);
+    assertParity('MyInterface.h', source, 'cpp', 8);
+  });
+
   it('torture fixture (c): fn-ptr tables, typedefs, file-scope consts, value-refs', () => {
     const file = path.join(FIXTURE_DIR, 'torture.c');
     assertParity('fixtures/torture.c', fs.readFileSync(file, 'utf8'), 'c');

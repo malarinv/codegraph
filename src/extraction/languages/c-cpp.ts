@@ -918,6 +918,34 @@ function restoreDirectiveLines(original: string, blanked: string): string {
   return changed ? b.join('\n') : blanked;
 }
 
+/** Recover MSVC's COM alias only at type-definition sites. Match on a lexical
+ * mask so comments, literals and directives cannot supply declaration evidence;
+ * replace just the keyword, preserving source offsets on both parser arms. */
+function normalizeCppComInterfaces(source: string): string {
+  if (!source.includes('interface')) return source;
+  // Raw strings have already been masked by preParseCppSource.
+  let code = source.replace(
+    /\/\/(?:\\\r?\n|[^\r\n])*|\/\*[\s\S]*?(?:\*\/|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|(?<!\w)(?:u8|[LuU])?'(?:\\[\s\S]|[^'\\])*(?:'|$)/g,
+    (m) => m.replace(/[^\r\n]/g, ' ')
+  );
+  const hasAlias = /^[ \t]*#[ \t]*define[ \t]+interface[ \t]+struct\b/m.test(code);
+  code = code.replace(/^[ \t]*#(?:\\\r?\n|[^\r\n])*/gm, (m) => m.replace(/[^\r\n]/g, '\0'));
+  const declaration = /(^|[;{}])\s*\binterface\s+[A-Za-z_]\w*\s*(:[^;{}]+)?\{/gm;
+  const offsets: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = declaration.exec(code)) !== null) {
+    const bodyEnd = code.indexOf('}', declaration.lastIndex);
+    const hasVirtual = /\bvirtual\b/.test(code.slice(declaration.lastIndex, bodyEnd < 0 ? code.length : bodyEnd));
+    if (!hasAlias && !match[2] && !hasVirtual) continue;
+    offsets.push(match.index + match[0].indexOf('interface'));
+    declaration.lastIndex--; // allow the opening brace to start a nested declaration
+  }
+  for (const offset of offsets) {
+    source = source.slice(0, offset) + 'struct   ' + source.slice(offset + 9);
+  }
+  return source;
+}
+
 /** C/C++ source pre-processing before tree-sitter: recover macro-annotated class
  * definitions, macro-prefixed function definitions, macro-prefixed members, and
  * macro-decorated members (Unreal-Engine reflection markup) — plus the non-C++
@@ -935,7 +963,7 @@ function preParseCppSource(source: string, filePath?: string): string {
     blankCLeadingAttrMacros(
       blankCppAnnotationMacroCalls(
         blankCppInlineAnnotationMacros(
-          blankCppApiPrefixMacros(blankCppInlineMacros(blankCppExportMacros(source)))
+          blankCppApiPrefixMacros(blankCppInlineMacros(blankCppExportMacros(normalizeCppComInterfaces(source))))
         )
       )
     )
