@@ -310,8 +310,9 @@ const NOT_WORD_AFTER = /(?![\p{L}\p{N}_])/u.source;
  * Structural keywords matched as EXACT words (boundary on both sides): short
  * or ambiguous tokens where prefix matching would false-positive ("flow" in
  * "flower", "path" in "pathological"). Grouped by language; a term appears once
- * even when several languages share it ("como" is Portuguese for how AND
- * unaccented-typed Spanish "cómo").
+ * even when several languages share it. Ambiguous everyday words like PT/ES
+ * "como" and DE "wie" are excluded: the hook instead requires another strong
+ * keyword, a verified code token, or indexed prose segments (#1654).
  */
 const STRUCTURAL_WORDS = [
   // English — the pre-#1126 list minus what moved to STRUCTURAL_STEMS: the
@@ -320,17 +321,16 @@ const STRUCTURAL_WORDS = [
   'how', 'where', 'tracing', 'flows?', 'paths?', 'reach(?:es|ed)?', 'wired?', 'breaks?', 'why does',
   // French (où=where, flux=flow, chemin=path, casse=breaks)
   'comment', 'où', 'flux', 'chemins?', 'casse',
-  // Spanish (cómo/como=how, dónde/donde=where, flujo=flow, ruta/camino=path,
+  // Spanish (cómo=how, dónde/donde=where, flujo=flow, ruta/camino=path,
   // rompe=breaks, llaman / quién llama = call(s) — bare "llama" is excluded:
   // it's also the animal/model name in English prompts)
   'cómo', 'dónde', 'donde', 'flujos?', 'rutas?', 'caminos?', 'rompe', 'llaman', 'quién llama', 'quien llama',
-  // Portuguese (como=how — also covers unaccented Spanish; onde=where,
-  // fluxo=flow, caminho=path)
-  'como', 'onde', 'fluxos?', 'caminhos?',
-  // German (wie=how, wo/woher/wohin=where, Pfad=path, Fluss/Ablauf=flow,
+  // Portuguese (onde=where, fluxo=flow, caminho=path)
+  'onde', 'fluxos?', 'caminhos?',
+  // German (wo/woher/wohin=where, Pfad=path, Fluss/Ablauf=flow,
   // bricht/kaputt=breaks, ruft=calls, hängt=depends — "hängt … von X ab"
   // splits the separable verb "abhängen", so the "abhäng" stem can't catch it)
-  'wie', 'wo', 'woher', 'wohin', 'pfade?', 'fluss', 'ablauf', 'bricht', 'kaputt', 'ruft', 'hängt',
+  'wo', 'woher', 'wohin', 'pfade?', 'fluss', 'ablauf', 'bricht', 'kaputt', 'ruft', 'hängt',
   // Italian (dove=where, flusso=flow, percorso/i=path)
   'dove', 'flusso', 'percors[oi]',
   // Russian (как=how, где=where, путь/пути=path, работает=works)
