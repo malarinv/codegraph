@@ -9,7 +9,6 @@ import { Language, Node } from '../types';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, isSupertypeTarget, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
-
 /**
  * Ceiling on how many same-named definitions a FUZZY name-match strategy will
  * score. A name defined more times than this is "ubiquitous" — a method/symbol
@@ -226,14 +225,191 @@ export function gateLanguageMatch(
   return result;
 }
 
+/** Member values retain their receiver; never break ties by file order (#1820). */
+function matchMemberFunctionRef(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  const dot = ref.referenceName.lastIndexOf('.');
+  const receiver = ref.referenceName.slice(0, dot);
+  const member = ref.referenceName.slice(dot + 1);
+  const result = (nodes: Node[], confidence = 0.9): ResolvedRef | null => {
+    const pool = nodes.filter(n => sameLanguageFamily(n.language, ref.language));
+    const target = pool.length === 1 ? pool[0] : undefined;
+    return target && (target.kind === 'function' || target.kind === 'method') &&
+      target.id !== ref.fromNodeId && !isPythonProperty(target, context)
+      ? { original: ref, targetNodeId: target.id, confidence, resolvedBy: 'function-ref' }
+      : null;
+  };
+  const imports = context.getImportMappings(ref.filePath, ref.language);
+  // An import is authoritative even when it points outside the project.
+  if (imports.some(i => i.localName === receiver.split('.')[0])) {
+    if (ref.language === 'python') {
+      const cls = pythonRefClass(receiver, ref, context);
+      if (cls) return result(pythonMembers(cls, member, ref, context));
+    }
+    const imported = context.resolveImport?.(ref);
+    const node = imported && context.getNodeById?.(imported.targetNodeId);
+    return node ? result(context.getNodesByQualifiedName(node.qualifiedName).filter(n => n.filePath === node.filePath)) : null;
+  }
+  if (ref.language === 'go') {
+    if (receiver.includes('.')) return matchGoFieldChainCall(receiver, member, ref, context);
+    const type = inferLocalReceiverType(receiver, ref, context);
+    if (type) return resolveMethodOnType(type, member, ref, context, 0.9, 'function-ref');
+    const types = context.getNodesByName(receiver).filter(n => n.language === 'go' && (n.kind === 'struct' || n.kind === 'interface'));
+    if (types.length) return types.length === 1 ? resolveMethodOnType(receiver, member, ref, context, 0.9, 'function-ref') : null;
+  } else {
+    const owner = context.getNodesInFile(ref.filePath).filter(n =>
+      n.kind === 'class' && n.startLine <= ref.line && n.endLine >= ref.line)
+      .sort((a, b) => b.startLine - a.startLine)[0];
+    let type: string | null = null;
+    if (receiver === 'self' || receiver === 'cls') {
+      return owner ? result(pythonMembers(owner, member, ref, context)) : null;
+    }
+    if (/^(self|cls)\.\w+$/.test(receiver)) {
+      if (!owner) return null;
+      type = pythonFieldType(receiver, owner, ref, context);
+    } else {
+      type = pythonLocalType(receiver, ref, context);
+    }
+    // A type name used directly (`Store.fetch`) is scoped just like an annotation.
+    if (!type && /^[A-Z]\w*$/.test(receiver)) type = receiver;
+    if (type && type !== 'object' && type !== 'Any') {
+      const cls = pythonRefClass(type, ref, context);
+      if (!cls) return null;
+      const members = pythonMembers(cls, member, ref, context);
+      if (members.length) return result(members);
+      // A base-typed field can hold a subclass-only method (the reported case).
+      // Keep only descendants of THAT base; unrelated same-name methods cannot win.
+      const candidates = context.getNodesByName(member).filter(n => n.kind === 'method' && n.language === 'python');
+      const descendants = candidates.filter(n => {
+        const parent = context.getNodesInFile(n.filePath).find(c =>
+          c.kind === 'class' && n.qualifiedName === `${c.qualifiedName}::${member}`);
+        return parent && pythonDerivesFrom(parent, cls, ref, context);
+      });
+      return result(descendants, 0.8);
+    }
+  }
+  // Unknown receivers retain the old unique-or-drop discipline, across ALL
+  // files. Tests and abstract-looking bodies are candidates too.
+  return result(context.getNodesByName(member), 0.8);
+}
+
+function pythonRefClass(name: string, ref: UnresolvedRef, context: ResolutionContext): Node | null {
+  const imports = context.getImportMappings(ref.filePath, 'python');
+  if (imports.some(i => i.localName === name.split('.')[0])) {
+    const hit = context.resolveImport?.({ ...ref, referenceName: name, referenceKind: 'references' });
+    const node = hit && context.getNodeById?.(hit.targetNodeId);
+    return node?.kind === 'class' && context.getNodesByQualifiedName(node.qualifiedName)
+      .filter(n => n.kind === 'class' && n.filePath === node.filePath).length === 1 ? node : null;
+  }
+  const classes = context.getNodesByName(name).filter(n => n.kind === 'class' && n.filePath === ref.filePath);
+  return classes.length === 1 ? classes[0]! : null;
+}
+
+function pythonBases(cls: Node, ref: UnresolvedRef, context: ResolutionContext): Node[] {
+  const line = context.getFileLines?.(cls.filePath)?.[cls.startLine - 1]
+    ?? context.readFile(cls.filePath)?.split('\n')[cls.startLine - 1] ?? '';
+  const bases = line.match(/^\s*class\s+\w+\s*\(([^)]*)\)/)?.[1];
+  return (bases?.split(',') ?? []).flatMap(name => {
+    const base = pythonRefClass(name.trim(), { ...ref, filePath: cls.filePath }, context);
+    return base ? [base] : [];
+  });
+}
+
+function pythonDerivesFrom(cls: Node, base: Node, ref: UnresolvedRef, context: ResolutionContext, seen = new Set<string>()): boolean {
+  if (seen.has(cls.id) || seen.size >= 16) return false;
+  seen.add(cls.id);
+  return pythonBases(cls, ref, context).some(p => p.id === base.id || pythonDerivesFrom(p, base, ref, context, seen));
+}
+
+function pythonMembers(cls: Node, member: string, ref: UnresolvedRef, context: ResolutionContext, seen = new Set<string>()): Node[] {
+  if (seen.has(cls.id) || seen.size >= 16) return [];
+  seen.add(cls.id);
+  // Instance assignments also shadow methods, even though they are not nodes.
+  const body = pythonMemberLines(cls.filePath, context).slice(cls.startLine - 1, cls.endLine).join('\n');
+  if (new RegExp(`^\\s*(?:(?:self|cls)\\.)?${member}\\s*(?:=|:)`, 'm').test(body)) return [cls];
+  const own = context.getNodesByQualifiedName(`${cls.qualifiedName}::${member}`).filter(n => n.filePath === cls.filePath);
+  if (own.length) return own;
+  return [...new Map(pythonBases(cls, ref, context).flatMap(p => pythonMembers(p, member, ref, context, seen)).map(n => [n.id, n])).values()];
+}
+
+function isPythonProperty(node: Node, context: ResolutionContext): boolean {
+  if (node.language !== 'python' || node.kind !== 'method') return false;
+  const lines = context.getFileLines?.(node.filePath) ?? context.readFile(node.filePath)?.split('\n') ?? [];
+  for (let i = node.startLine - 2; i >= 0 && lines[i]!.trim().startsWith('@'); i--) {
+    if (/^\s*@(?:property|(?:functools\.)?cached_property)\s*$/.test(lines[i]!)) return true;
+  }
+  return false;
+}
+
+const PYTHON_MEMBER_LINES = new WeakMap<ResolutionContext, Map<string, string[]>>();
+function pythonMemberLines(filePath: string, context: ResolutionContext): string[] {
+  let files = PYTHON_MEMBER_LINES.get(context);
+  if (!files) { files = new Map(); PYTHON_MEMBER_LINES.set(context, files); }
+  let lines = files.get(filePath);
+  if (!lines) {
+    lines = stripCommentsForRegex(context.readFile(filePath) ?? '', 'python').split('\n');
+    files.set(filePath, lines);
+  }
+  return lines;
+}
+
+function pythonLocalType(receiver: string, ref: UnresolvedRef, context: ResolutionContext): string | null {
+  if (!/^\w+$/.test(receiver)) return null;
+  const caller = context.getNodeById?.(ref.fromNodeId);
+  const lines = pythonMemberLines(ref.filePath, context);
+  const declaration = new RegExp(`^\\s*${receiver}\\s*(?::\\s*["']?([\\w.]+)["']?)?\\s*=\\s*(.*)$`);
+  const annotation = new RegExp(`^\\s*${receiver}\\s*:\\s*["']?([\\w.]+)`);
+  for (let i = ref.line - 1; i >= (caller?.startLine ?? 1) - 1; i--) {
+    const line = lines[i] ?? '';
+    const assigned = line.match(declaration);
+    if (assigned) return assigned[1] ?? assigned[2]!.match(/^([A-Z][\w.]*)\s*\(/)?.[1] ?? '<unknown>';
+    const declared = line.match(annotation)?.[1];
+    if (declared) return declared;
+  }
+  return caller?.signature?.match(new RegExp(`\\b${receiver}\\s*:\\s*["']?([\\w.]+)`))?.[1] ?? null;
+}
+
+/** Read a field's own annotation/initializer, or a constructor parameter assigned to it. */
+function pythonFieldType(receiver: string, owner: Node, ref: UnresolvedRef, context: ResolutionContext): string | null {
+  const lines = pythonMemberLines(ref.filePath, context);
+  const field = receiver.split('.')[1]!;
+  const assignment = new RegExp(`^\\s*(?:self|cls)\\.${field}\\s*(?::\\s*["']?([\\w.]+)["']?)?\\s*=\\s*(.*)$`);
+  const annotation = new RegExp(`^\\s*(?:(?:self|cls)\\.)?${field}\\s*:\\s*["']?([\\w.]+)`);
+  const methods = context.getNodesInFile(ref.filePath).filter(n => n.kind === 'method' &&
+    n.qualifiedName.startsWith(`${owner.qualifiedName}::`));
+  const types = new Set<string>();
+  for (let i = owner.startLine; i < owner.endLine; i++) {
+    const method = methods.find(n => n.startLine <= i + 1 && n.endLine >= i + 1);
+    if (method && method.name !== '__init__' && method.id !== ref.fromNodeId) continue;
+    if (method?.id === ref.fromNodeId && i + 1 > ref.line) continue;
+    const line = lines[i] ?? '';
+    const declared = !method || /^\s*(?:self|cls)\./.test(line) ? line.match(annotation)?.[1] : undefined;
+    if (declared) types.add(declared);
+    const assigned = line.match(assignment);
+    if (!assigned) continue;
+    if (assigned[1]) { types.add(assigned[1]); continue; }
+    const constructor = assigned[2]!.match(/^([A-Z][\w.]*)\s*\(/)?.[1];
+    if (constructor) { types.add(constructor); continue; }
+    const param = assigned[2]!.trim();
+    if (method && /^\w+$/.test(param)) {
+      const signature = method.signature ?? '';
+      const type = signature.match(new RegExp(`\\b${param}\\s*:\\s*["']?([\\w.]+)`))?.[1];
+      if (type) types.add(type);
+    } else {
+      types.add('<unknown>');
+    }
+  }
+  // Conflicting assignments are known-but-ambiguous, never a name-only fallback.
+  return types.size === 1 ? [...types][0]! : types.size > 1 ? '<ambiguous>' : null;
+}
+
 /**
  * Resolve a function-as-value reference (#756) — a function name used as a
  * callback/function-pointer value (`register(handler)`, `o->cb = handler`,
  * `{ .cb = handler }`, `signal(SIGINT, handler)`). The ONLY strategy allowed
  * for `function_ref` refs: exact name, function/method targets only, same
- * language family, same-file first, and cross-file only when the match is
- * UNIQUE. No fuzzy fallback, no qualified-name walking — a wrong callback
- * edge is worse than none.
+ * language family, same-file first for bare names, and unique-only cross-file.
+ * Member values use receiver/type/import scope before a unique-name fallback.
+ * A wrong callback edge is worse than none.
  */
 export function matchFunctionRef(
   ref: UnresolvedRef,
@@ -242,6 +418,10 @@ export function matchFunctionRef(
   // `this.<member>` refs are resolved ONLY by the class-scoped resolver in
   // resolveOne (resolveThisMemberFnRef) — never by name matching here.
   if (ref.referenceName.startsWith('this.')) return null;
+
+  if ((ref.language === 'python' || ref.language === 'go') && ref.referenceName.includes('.')) {
+    return matchMemberFunctionRef(ref, context);
+  }
 
   // In JS/TS/Python a bare identifier can never be a method value (methods
   // are only reachable through a receiver — `this.m` / `self.m` /
@@ -1319,6 +1499,7 @@ export function resolveMethodOnType(
   // block, so Java/Kotlin import disambiguation — whose target is intentionally
   // in ANOTHER file (#314) — is unaffected: that block returns early whenever
   // an import FQN pins the class.
+  if (ref.referenceKind === 'function_ref' && matches.length !== 1) return null;
   const ordered = preferCallSiteFile(matches, ref.filePath);
   return {
     original: ref,
@@ -1876,6 +2057,7 @@ function getInferScanStates(context: ResolutionContext): Map<string, InferScanSt
 /** Drop the per-context scan states (see ReferenceResolver.clearCaches). */
 export function clearNameMatcherMemos(context: ResolutionContext): void {
   INFER_SCAN_STATES.delete(context);
+  PYTHON_MEMBER_LINES.delete(context);
   AWAITED_TYPE_MEMO.delete(context);
   AWAITED_FILES.delete(context);
   C_STATIC_MEMO.delete(context);

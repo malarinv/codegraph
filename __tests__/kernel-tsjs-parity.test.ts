@@ -220,6 +220,43 @@ async function exprReceivers(x, y) {
     assertParity('fixtures/torture.go', fs.readFileSync(file, 'utf8'), 'go');
   });
 
+  it('Python member values preserve receivers across callback, assignment and collection positions (#1820)', () => {
+    const result = assertParity('members.py', `
+class Store:
+    def fetch(self, ids):
+        return ids
+class Consumer:
+    def wire(self, pool, obj):
+        pool.submit(self.store.fetch, obj.fetch)
+        cb = self.store.fetch
+        table = [obj.fetch, Store.fetch, self.fetch, cls.fetch]
+        keyword(callback=obj.fetch)
+        obj.fetch([])
+        pool.submit(factory().fetch, obj[0].fetch)
+`, 'python');
+    const names = result.unresolvedReferences.filter(r => r.referenceKind === 'function_ref').map(r => r.referenceName);
+    expect(names.sort()).toEqual(['Store.fetch', 'cls.fetch', 'obj.fetch', 'self.fetch', 'self.store.fetch']);
+    expect(result.unresolvedReferences.some(r => r.referenceKind === 'calls' && r.referenceName === 'obj.fetch')).toBe(true);
+  });
+
+  it('Go method values preserve receivers and exclude invocation receivers (#1820)', () => {
+    const result = assertParity('members.go', `package demo
+ type Store struct{}
+ func (s *Store) Fetch() {}
+ func wire(c *Store, pool Pool) {
+   Submit(c.Fetch)
+   cb := c.Fetch
+   table := []func(){c.Fetch, Store.Fetch}
+   Submit(c.store.Fetch)
+   go c.Fetch()
+   Submit(factory().Fetch, items[0].Fetch)
+ }
+`, 'go');
+    const names = result.unresolvedReferences.filter(r => r.referenceKind === 'function_ref').map(r => r.referenceName);
+    expect(names.sort()).toEqual(['Store.Fetch', 'c.Fetch', 'c.store.Fetch']);
+    expect(result.unresolvedReferences.some(r => r.referenceKind === 'calls' && r.referenceName === 'c.Fetch')).toBe(true);
+  });
+
   it.each(REAL_SOURCES)('real source parity: %s', (rel) => {
     const file = path.join(__dirname, '..', rel);
     assertParity(rel, fs.readFileSync(file, 'utf8'), 'typescript');

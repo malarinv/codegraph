@@ -1009,6 +1009,31 @@ impl<'t> Walker<'t> {
                     row: p.row,
                 });
             }
+            // #1820: preserve the receiver of a method value.
+            "selector_expression" => {
+                let field = v
+                    .child_by_field_name("field")
+                    .or_else(|| v.named_child(v.named_child_count().saturating_sub(1)));
+                let Some(field) = field else { return };
+                let name = self.text(field);
+                if name.is_empty() || is_stoplisted(name) {
+                    return;
+                }
+                let value = self.text(v);
+                if !value.split('.').all(|part| {
+                    !part.is_empty() && part.chars().enumerate().all(|(i, c)| {
+                        c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                    })
+                }) { return; }
+                let p = field.start_position();
+                self.fn_ref_cands.push(Cand {
+                    from,
+                    name: value.to_string(),
+                    line: p.row as u32 + 1,
+                    column_byte: field.start_byte(),
+                    row: p.row,
+                });
+            }
             "literal_element" | "expression_list" => {
                 for i in 0..v.named_child_count() {
                     if let Some(c) = v.named_child(i) {
@@ -1050,6 +1075,7 @@ impl<'t> Walker<'t> {
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for c in cands {
             if !c.name.starts_with("this.")
+                && !c.name.contains('.')
                 && !c.name.contains("::")
                 && !self.defined_fn_names.contains(&c.name)
                 && !self.imported_names.contains(&c.name)
