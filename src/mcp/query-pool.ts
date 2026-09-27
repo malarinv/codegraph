@@ -217,11 +217,14 @@ export class QueryPool {
   }
 
   private onMessage(w: PoolWorker, m: WorkerMessage): void {
-    if (!m) return;
+    if (!m || !this.workers.has(w)) return; // ignore late messages from retired workers
     if (m.type === 'ready') {
-      this.pendingWorkers.delete(w);
-      if (m.ok === false) this.totalCrashes++; // hard open failure
-      else this.everReady = true;
+      if (!this.pendingWorkers.delete(w)) return; // already handled this handshake
+      if (m.ok === false) {
+        this.onWorkerGone(w); // failed opens consume the same budget as crashes
+        return;
+      }
+      this.everReady = true;
       this.idle.push(w);
       this.drain();
       return;

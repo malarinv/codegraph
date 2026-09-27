@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
 import { CodeGraph } from '../src';
 import { ExploreSessionState, EXPLORE_EMISSION_KEY } from '../src/mcp/explore-session-state';
 import type { MCPEngine } from '../src/mcp/engine';
@@ -32,16 +33,20 @@ type Action = { result: ToolResult } | { crash: true } | { hang: true } | { wait
  */
 class FakeWorker implements PoolWorker {
   private msgCb?: (m: unknown) => void;
+  private errorCb?: (e: Error) => void;
   private exitCb?: (code: number) => void;
   alive = true;
-  constructor(private behavior: (m: CallMsg) => Action, readyOk = true) {
-    setTimeout(() => { if (this.alive) this.msgCb?.({ type: 'ready', ok: readyOk }); }, 0);
+  constructor(private behavior: (m: CallMsg) => Action, readyOk: boolean | null = true) {
+    setTimeout(() => { if (this.alive && readyOk !== null) this.emitMessage({ type: 'ready', ok: readyOk }); }, 0);
   }
   on(event: string, cb: (...args: any[]) => void): void {
     if (event === 'message') this.msgCb = cb;
     else if (event === 'exit') this.exitCb = cb;
-    // 'error' unused by the fakes
+    else if (event === 'error') this.errorCb = cb;
   }
+  emitMessage(m: unknown): void { this.msgCb?.(m); }
+  emitError(): void { this.errorCb?.(new Error('worker failed')); }
+  emitExit(): void { this.exitCb?.(13); }
   private reply(id: number, result: ToolResult): void {
     if (this.alive) this.msgCb?.({ type: 'result', id, result });
   }
@@ -194,12 +199,98 @@ describe('QueryPool', () => {
     expect(pool.ready).toBe(false); // destroyed pool must not be selected
   });
 
-  it('a failed cold start (ready ok:false) does not mark the pool ready', async () => {
-    const pool = new QueryPool({ root: '/x', size: 1, createWorker: () => new FakeWorker(() => ({ hang: true }), /* readyOk */ false) });
-    await sleep(5);
-    expect(pool.ready).toBe(false); // hard open failure — keep serving in-process
-    await pool.destroy();
+  it('retires a failed cold start and serves queued work on its replacement', async () => {
+    const workers: FakeWorker[] = [];
+    const pool = new QueryPool({
+      root: '/x', size: 1,
+      createWorker: () => {
+        const worker = new FakeWorker(() => ({ result: ok('recovered') }), null);
+        workers.push(worker);
+        return worker;
+      },
+    });
+    try {
+      const call = pool.run('codegraph_search', {});
+      workers[0].emitMessage({ type: 'ready', ok: false });
+      expect(workers[0].alive).toBe(false);
+      expect(pool.ready).toBe(false);
+      expect(workers).toHaveLength(2);
+      workers[1].emitMessage({ type: 'ready', ok: true });
+      expect(await call).toEqual(ok('recovered'));
+      expect(pool.ready).toBe(true);
+      expect(pool.healthy).toBe(true);
+    } finally { await pool.destroy(); }
   });
+
+  it('never routes mixed-pool calls to failed workers, including after late lifecycle messages', async () => {
+    const workers: FakeWorker[] = [];
+    const dispatched: number[] = [];
+    const pool = new QueryPool({
+      root: '/x', size: 2,
+      createWorker: () => {
+        const index = workers.length;
+        const worker = new FakeWorker(() => { dispatched.push(index); return { result: ok('served') }; }, null);
+        workers.push(worker);
+        return worker;
+      },
+    });
+    try {
+      workers[0].emitMessage({ type: 'ready', ok: true });
+      const calls = Array.from({ length: 20 }, () => pool.run('codegraph_search', {}));
+      const failed = workers[1];
+      failed.emitMessage({ type: 'ready', ok: false });
+      expect(failed.alive).toBe(false);
+      for (let i = 0; i < 20; i++) {
+        failed.emitMessage({ type: 'ready', ok: false });
+        failed.emitMessage({ type: 'ready', ok: true });
+        failed.emitMessage({ type: 'result', id: 1, result: ok('late') });
+        failed.emitError();
+        failed.emitExit();
+      }
+      expect(workers).toHaveLength(3);
+      expect(pool.liveWorkers).toBe(2);
+      expect(pool.healthy).toBe(true);
+      workers[2].emitMessage({ type: 'ready', ok: true });
+      expect(await Promise.all(calls)).toEqual(Array.from({ length: 20 }, () => ok('served')));
+      expect(dispatched).not.toContain(1);
+    } finally { await pool.destroy(); }
+    workers[2].emitMessage({ type: 'ready', ok: true });
+    expect(pool.liveWorkers).toBe(0);
+    expect(pool.ready).toBe(false);
+  });
+
+  it('counts each failed startup once and stops replacing at the crash budget', async () => {
+    const workers: FakeWorker[] = [];
+    const pool = new QueryPool({
+      root: '/x', size: 8, softTimeoutMs: 30,
+      createWorker: () => {
+        const worker = new FakeWorker(() => ({ result: ok('must not dispatch') }), null);
+        workers.push(worker);
+        return worker;
+      },
+    });
+    try {
+      const calls = Array.from({ length: 20 }, () => pool.run('codegraph_search', {}));
+      expect(workers).toHaveLength(2); // bounded concurrent cold starts
+      for (let i = 0; i < workers.length; i++) {
+        expect(i).toBeLessThan(13);
+        workers[i].emitMessage({ type: 'ready', ok: false });
+        workers[i].emitError();
+        workers[i].emitExit();
+        expect(workers.filter((w) => w.alive).length).toBeLessThanOrEqual(2);
+      }
+      // One other pending worker can fail after the twelfth failure trips the breaker.
+      expect(workers).toHaveLength(13);
+      expect(pool.healthy).toBe(false);
+      expect(pool.ready).toBe(false);
+      expect(pool.liveWorkers).toBe(0);
+      for (const result of await Promise.all(calls)) {
+        expect(result.isError).toBeFalsy();
+        expect(result.content[0].text).toMatch(/busy/i);
+      }
+    } finally { await pool.destroy(); }
+  });
+
 });
 
 // Use the built engine so its pool loads the real compiled worker sibling.
@@ -285,6 +376,35 @@ describe('MCP query pool with real projects (#1465)', () => {
       const late = await handler.execute('codegraph_explore', { query: 'lateSymbol' });
       expect(late.isError).toBeFalsy();
       expect(late.content[0].text).toContain('lateSymbol');
+    }
+  }, 30000);
+
+  it('retires real failed-open workers and recovers on a valid SQLite index (#1357)', async () => {
+    const alpha = await indexProject('alpha', 'alphaSymbol');
+    const workers: Worker[] = [];
+    const exits: Promise<unknown>[] = [];
+    pool = new QueryPool({
+      root: alpha, size: 1,
+      createWorker: () => {
+        const worker = new Worker(path.resolve(__dirname, '../dist/mcp/query-worker.js'), {
+          workerData: { root: workers.length === 0 ? tempDir : alpha },
+        });
+        workers.push(worker);
+        exits.push(new Promise((resolve) => worker.once('exit', resolve)));
+        return worker;
+      },
+    });
+    try {
+      const result = await pool.run('codegraph_search', { query: 'alphaSymbol' });
+      expect(result.isError).toBeFalsy();
+      expect(result.content[0].text).toContain('alphaSymbol');
+      expect(workers).toHaveLength(2);
+      await exits[0];
+      expect(workers[0].threadId).toBe(-1);
+      expect(pool.healthy).toBe(true);
+    } finally {
+      await pool.destroy();
+      await Promise.all(exits);
     }
   }, 30000);
 
