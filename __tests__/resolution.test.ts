@@ -67,6 +67,19 @@ describe('Resolution Module', () => {
 
   });
 
+  it('does not turn cross-language name collisions into call or constructor edges (#1986)', async () => {
+    fs.writeFileSync(path.join(tempDir, 'foreign.py'), 'class ForeignThing:\n    pass\ndef mystery():\n    pass\n');
+    fs.writeFileSync(path.join(tempDir, 'caller.ts'), 'export function build() { return new ForeignThing(); }');
+    fs.writeFileSync(path.join(tempDir, 'Caller.swift'), 'func consumer() { mystery() }');
+    cg = await CodeGraph.init(tempDir, { silent: true });
+    await cg.indexAll();
+    for (const name of ['build', 'consumer']) {
+      const caller = cg.getNodesByName(name).find((n) => n.kind === 'function')!;
+      expect(caller).toBeDefined();
+      expect(cg.getOutgoingEdges(caller.id).filter((e) => e.kind === 'calls' || e.kind === 'instantiates')).toEqual([]);
+    }
+  });
+
   describe('Name Matcher', () => {
     it('should match exact name references', () => {
       // Create a mock context
