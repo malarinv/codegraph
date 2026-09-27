@@ -4982,6 +4982,13 @@ CPPType* ApiHelper<CType,
       expect(instNames('Widget w{1, 2};')).toEqual(['Widget']);
     });
 
+    it('records constructor defaults and array element arities (#1839)', () => {
+      const result = extractFromSource('f.cpp', 'struct Widget { Widget(int x = 1); };\nvoid run() { Widget a[2]; Widget b[3]{{2}, {3}}; }');
+      expect(result.nodes.find((n) => n.kind === 'method')?.signature).toBe('(int x = 1);');
+      expect(result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName))
+        .toEqual(['Widget::Widget/0', 'Widget::Widget/1', 'Widget::Widget/1', 'Widget::Widget/0']);
+    });
+
     it('strips template args and namespace to the bare class name', () => {
       // `std::vector<int> v(10)` → `vector`; `ns::Widget w(0)` → `Widget`.
       expect(instNames('std::vector<int> v(10);')).toEqual(['vector']);

@@ -539,7 +539,7 @@ export function blankMetalAttributes(source: string): string {
  * removed in full. The pipeline masks once, and individual paren blankers also
  * use this helper so they are safe when called directly.
  */
-function maskCppRawStrings(source: string): { source: string; restore: (blanked: string) => string } {
+export function maskCppRawStrings(source: string): { source: string; restore: (blanked: string) => string } {
   const unchanged = { source, restore: (blanked: string): string => blanked };
   if (source.indexOf('R"') === -1) return unchanged;
   // Skip comments and ordinary literals before looking for a raw opener. The
@@ -1763,6 +1763,16 @@ function preParseCSource(source: string): string {
   return rawStrings.restore(blankCNamedVariadicDefineDots(restoreDirectiveLines(source, blanked)));
 }
 
+/** A constructor prototype carries defaults even when its body is in another file. */
+export function isCppConstructorDeclaration(node: SyntaxNode): boolean {
+  if (node.type !== 'declaration' || getChildByField(node, 'type')) return false;
+  const owner = node.parent?.parent;
+  if (!owner || !['class_specifier', 'struct_specifier', 'union_specifier'].includes(owner.type)) return false;
+  const declarator = getChildByField(node, 'declarator');
+  return declarator?.type === 'function_declarator'
+    && getChildByField(declarator, 'declarator')?.text === getChildByField(owner, 'name')?.text;
+}
+
 export const cppExtractor: LanguageExtractor = {
   // Recover macro-annotated class/struct definitions (`class MYMODULE_API Foo : Base`,
   // #1061/#946) and macro-prefixed functions (`FORCEINLINE FString Foo()`, #1093
@@ -1806,6 +1816,18 @@ export const cppExtractor: LanguageExtractor = {
   resolveName: extractCppQualifiedMethodName,
   getReceiverType: extractCppReceiverType,
   getReturnType: extractCppReturnType,
+  // Constructors (definitions and class-body declarations) carry their
+  // parameter list as the signature; a trailing semicolon marks a prototype, so a local `T obj(args)` can be matched
+  // to the one overload with a compatible arity (#1839). Macro-shaped
+  // definitions whose real name was recovered from an argument are excluded:
+  // their "parameters" are macro arguments. Mirrored in the kernel.
+  getSignature: (node, source) => {
+    if ((node.type !== 'function_definition' && !isCppConstructorDeclaration(node)) || getChildByField(node, 'type')) return undefined;
+    if (recoverCppMacroDefinedName(node, source)) return undefined;
+    const declarator = getChildByField(node, 'declarator');
+    const parameters = declarator && getChildByField(declarator, 'parameters');
+    return parameters ? getNodeText(parameters, source) + (node.type === 'declaration' ? ';' : '') : undefined;
+  },
   getVisibility: (node) => {
     // Check for access specifier in parent
     const parent = node.parent;

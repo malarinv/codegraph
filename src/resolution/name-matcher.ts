@@ -6,7 +6,7 @@
 
 import * as path from 'path';
 import { Language, Node } from '../types';
-import { UnresolvedRef, ResolvedRef, ResolutionContext, isSupertypeTarget, isInheritanceRef, isImportableKind } from './types';
+import { UnresolvedRef, ResolvedRef, ResolutionContext, isSupertypeTarget, CPP_DEFINE_SIGNATURE, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
 /**
@@ -981,6 +981,11 @@ export function matchByExactName(
     if (storeAction) return storeAction;
   }
   const candidates = context.getNodesByName(ref.referenceName)
+    // Macro constants are not callees and must not consume the same-name
+    // ceiling (#1839). Keep upstream's language gate on the chosen result.
+    .filter((n) => !(ref.referenceKind === 'calls' &&
+      (ref.language === 'c' || ref.language === 'cpp') &&
+      n.kind === 'constant' && CPP_DEFINE_SIGNATURE.test(n.signature ?? '')))
     // Type/value references retain same-family eligibility: a native namesake
     // must not hide the actual web type. Calls still gate only the winner.
     .filter((n) => (ref.referenceKind !== 'references' && ref.referenceKind !== 'function_ref') ||

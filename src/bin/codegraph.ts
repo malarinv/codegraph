@@ -2250,13 +2250,16 @@ for (const direction of ['callers', 'callees'] as const) {
             return { group, nodes: [...nodes.values()], edges: [...edges.values()] };
           });
 
+          const relationships = (node: Node, edges: Edge[]) => [...new Set(edges
+            .filter((edge) => (direction === 'callers' ? edge.source : edge.target) === node.id)
+            .map((edge) => edge.kind))];
           if (options.json) {
             const definitions = collected.map(({ group, nodes, edges }) => {
               const limited = nodes.slice(0, limit);
               const shown = new Set(limited.map((node) => node.id));
               return {
                 ...cliDefinition(group),
-                [direction]: limited.map((node) => ({ id: node.id, ...cliNode(node) })),
+                [direction]: limited.map((node) => ({ id: node.id, ...cliNode(node), relationships: relationships(node, edges) })),
                 edges: edges.filter((edge) => shown.has(direction === 'callers' ? edge.source : edge.target)),
                 total: nodes.length,
                 limit,
@@ -2277,7 +2280,8 @@ for (const direction of ['callers', 'callees'] as const) {
               filteredOut,
               note,
               definitions,
-              [direction]: [...union.values()].slice(0, limit).map(cliNode),
+              [direction]: [...union.values()].slice(0, limit).map((node) => ({ ...cliNode(node),
+                relationships: relationships(node, collected.flatMap((entry) => entry.edges)) })),
               total,
               limit,
               truncated: total > limit,
@@ -2287,7 +2291,7 @@ for (const direction of ['callers', 'callees'] as const) {
             if (ambiguous) {
               console.log(chalk.bold(`\n${title} of "${symbol}" — ${groups.length} distinct definitions (narrow with --file):`));
             }
-            for (const { group, nodes } of collected) {
+            for (const { group, nodes, edges } of collected) {
               const limited = nodes.slice(0, limit);
               const total = nodes.length;
               const truncated = total > limit;
@@ -2304,7 +2308,9 @@ for (const direction of ['callers', 'callees'] as const) {
               }
               for (const node of limited) {
                 const loc = node.startLine ? `:${node.startLine}` : '';
-                console.log(chalk.cyan(node.kind.padEnd(12)) + chalk.white(node.name));
+                const kinds = relationships(node, edges).filter((kind) => kind !== 'calls');
+                const relation = kinds.length ? ` [${kinds.join(', ')}]` : '';
+                console.log(chalk.cyan(node.kind.padEnd(12)) + chalk.white(node.name) + chalk.dim(relation));
                 console.log(chalk.dim(`  ${node.filePath}${loc}`));
                 console.log();
               }
