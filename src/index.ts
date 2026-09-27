@@ -1648,6 +1648,11 @@ export class CodeGraph {
     return this.queries.searchNodes(query, options);
   }
 
+  /** Lexical evidence for an empty explore result; does not alter retrieval. */
+  getExploreMissDiagnostics(query: string) {
+    return this.queries.getExploreMissDiagnostics(query);
+  }
+
   /**
    * Graph-derived prompt matching for the front-load hook's MEDIUM tier:
    * which indexed symbols do these prose words name? "state machine des
