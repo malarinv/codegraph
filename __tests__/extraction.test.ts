@@ -5822,6 +5822,89 @@ end`;
     expect(components.length).toBe(2);
   });
 
+  describe('component source ranges (#1350)', () => {
+    let tempDir: string;
+    let cg: CodeGraph | undefined;
+
+    beforeEach(() => {
+      tempDir = createTempDir();
+    });
+
+    afterEach(() => {
+      cg?.close();
+      cg = undefined;
+      cleanupTempDir(tempDir);
+    });
+
+    it.each(['dfm', 'fmx'])('persists complete nested %s bodies and retrieves event bindings', async (extension) => {
+      const source = `inherited Form1: TForm1
+  inline Frame1: TFrame
+    object Button1: TButton
+      Caption = 'Click'
+      Items.Strings = (
+        'First'
+        'Second')
+      Panels = <
+        item
+          Width = 100
+        end
+        item
+          Width = 200
+        end>
+      OnClick = Button1Click
+    end
+    OnEnter = FrameEnter
+  end
+  object Label1: TLabel
+    Caption = 'Sibling'
+  end
+end`;
+      const fileName = `Form1.${extension}`;
+      fs.writeFileSync(path.join(tempDir, fileName), source);
+      cg = CodeGraph.initSync(tempDir);
+      expect((await cg.indexAll()).filesIndexed).toBe(1);
+
+      const nodes = cg.getNodesInFile(fileName);
+      const components = nodes.filter((node) => node.kind === 'component');
+      expect(components.map(({ name, startLine, endLine, endColumn }) => ({
+        name, startLine, endLine, endColumn,
+      }))).toEqual(expect.arrayContaining([
+        { name: 'Form1', startLine: 1, endLine: 22, endColumn: 3 },
+        { name: 'Frame1', startLine: 2, endLine: 18, endColumn: 5 },
+        { name: 'Button1', startLine: 3, endLine: 16, endColumn: 7 },
+        { name: 'Label1', startLine: 19, endLine: 21, endColumn: 5 },
+      ]));
+      expect(components).toHaveLength(4);
+
+      const extracted = extractFromSource(fileName, source);
+      const file = extracted.nodes.find((node) => node.kind === 'file')!;
+      const form = components.find((node) => node.name === 'Form1')!;
+      const frame = components.find((node) => node.name === 'Frame1')!;
+      const button = components.find((node) => node.name === 'Button1')!;
+      const label = components.find((node) => node.name === 'Label1')!;
+      for (const [parent, child] of [[file, form], [form, frame], [frame, button], [form, label]]) {
+        expect(extracted.edges).toContainEqual({ source: parent!.id, target: child!.id, kind: 'contains' });
+      }
+      expect(extracted.unresolvedReferences).toEqual([
+        expect.objectContaining({ fromNodeId: button.id, referenceName: 'Button1Click' }),
+        expect.objectContaining({ fromNodeId: frame.id, referenceName: 'FrameEnter' }),
+      ]);
+      expect(file.endLine).toBe(22);
+
+      const { ToolHandler } = await import('../src/mcp/tools');
+      const handler = new ToolHandler(cg);
+      for (const [tool, args] of [
+        ['codegraph_node', { symbol: 'Button1', includeCode: true }],
+        ['codegraph_explore', { query: 'Button1' }],
+      ] as const) {
+        const result = await handler.execute(tool, args);
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0]!.text).toContain("Caption = 'Click'");
+        expect(result.content[0]!.text).toContain('OnClick = Button1Click');
+      }
+    });
+  });
+
   describe('Full fixture: MainForm.dfm', () => {
     const code = `object frmMain: TfrmMain
   Left = 0
