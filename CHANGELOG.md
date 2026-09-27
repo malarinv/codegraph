@@ -203,6 +203,23 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files opted in with `includeIgnored` now stay indexed on Git older than 2.36, and embedded repositories remain visible to the watcher (thanks @maxmilian and @newshowardz777; #1549).
 
 - `codegraph init` and `codegraph index` now list unsupported file extensions and explain that CodeGraph is inactive when no supported source files are found (#1502).
+- `codegraph_explore` now flags a dynamic `import()`/`require()` built from a template literal with a substitution or from string concatenation, while an escaped `\${…}` stays a plain string. Thanks @inth3shadows. (#1967)
+- The stale-file warning no longer names a pending file just because its path is a prefix or suffix of a path the answer shows (`src/app.ts` vs `src/app.tsx`). Thanks @inth3shadows. (#1968)
+- When `codegraph_explore` finds nothing, it now says that matching is lexical, lists the query words the index doesn't contain, and suggests real symbol names to retry with. Thanks @iacore. (#1904)
+- `codegraph_explore` now finds a file when the query is its exact Chinese filename, with or without the extension. Thanks @Syh1906. (#1372)
+- Java, Kotlin and Scala packages named `build` under a source root are indexed again, while real build-output directories stay excluded. Thanks @CmmVoid for the report and @danusha2345. (#1642)
+- Files over the 1 MB source limit, such as a package archive an import points at, are now rejected before they are read during resolution, removing a multi-gigabyte memory spike at startup. Thanks @hcg1023 for the report and @danusha2345. (#1553)
+- `codegraph sync` now reports that the index is busy and exits non-zero when another process holds the write lock, instead of printing "Already up to date". Thanks @inth3shadows. (#1361)
+- `codegraph sync` now reports the pending references it resolved instead of printing "Already up to date" while it did that work. Thanks @inth3shadows. (#1360)
+- An incremental sync now refreshes event, callback and cross-tier links when a change touches a registration, a handler or a file that feeds them, so the graph matches a full re-index; ordinary edits stay as fast as before. Thanks @bompus. (#1988)
+- Edits inside a symlinked directory now auto-sync on macOS, Windows and Linux, including links added, removed or retargeted while watching. Thanks @ztibeike for the report and @dengzhongyuan365-dev. (#770)
+- A project queried through `projectPath` now catches up on first access and stays in sync like the default project, coordinating with any daemon that already owns it. Thanks @nakisen for the report and @danusha2345. (#1835)
+- Two spellings of one repository (a symlink, or different casing on a case-insensitive drive such as WSL `/mnt/c`) now share one index connection instead of opening it twice. Thanks @yjtdkj for the report and @inth3shadows. (#1057)
+- Direct (non-daemon) MCP sessions now serve concurrent calls from a small off-thread query pool (2 workers by default; `CODEGRAPH_QUERY_POOL_SIZE` changes it). Thanks @blabla-yy. (#1465)
+- `impact --depth N`, and callers/callees at a depth, now find every dependent within N hops even when a longer path reaches one of them first. Thanks @inth3shadows for the report and @danusha2345. (#1974)
+- Path finding no longer re-queues the same node many times through a dense fan-in hub. Thanks @inth3shadows. (#1359)
+- Everyday Portuguese/Spanish "como" and German "wie" no longer escalate a prompt to a full code search on their own. Thanks @AndreLFSMartins. (#1654)
+- The Antigravity installer now saves the permanent path of `codegraph` rather than fnm's per-shell directory, so the command keeps working after the installing shell exits. Thanks @kevocodes. (#1443)
 
 #### Screens, links and navigation
 
@@ -271,6 +288,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ASP.NET Minimal API endpoint groups are routes.** The handler-first form — `groupBuilder.MapPost(CreateTodoItem)`, `MapPut(UpdateTodoItem, "{id}")` inside an `IEndpointGroup` / `EndpointGroupBase` class (the Clean Architecture template and its descendants) — now registers `POST /api/TodoItems` and `PUT /api/TodoItems/{id}`, with the `/api/` head read from the app's own `MapGroup($"/api/{groupName}")` and a class's `RoutePrefix` honoured, each bound to its handler so the Steps tab starts there and lists its `TypedResults` replies by status code.
 
 - **A FastAPI service that lives in one directory of a monorepo is detected.** `backend/pyproject.toml` and `backend/app/main.py` count, not only files at the repository root — the official full-stack template's routes now appear in Entry points and the Steps tab.
+- React Router routes are now read from each `<Route>` tag's own attributes and each route object's own fields, so an `element` no longer bleeds into a sibling or parent route. Thanks @inth3shadows. (#1348)
+- MyBatis mappers with whitespace inside a closing tag, and `<include refid>` references to another namespace, are now extracted correctly. Thanks @ESPINS for the report and @fengshao1227. (#1209)
+- `render`, `include`, `section` and `assign` written inside a `{% liquid %}` block are now extracted with their real line numbers, and commented or raw content is ignored. Thanks @Puma7. (#1906)
+- Rust functions annotated `#[tauri::command]` are no longer reported as dead code. Thanks @vdavid. (#1543)
 
 #### Symbols, tests and the viewer
 
@@ -336,6 +357,24 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Fixed a long-running `codegraph ui` session serving a symbol that a sync had already deleted. The viewer keeps one connection to your index open, and its in-memory lookup didn't notice when another process — your agent's sync, or `codegraph sync` — rewrote the file underneath it, so a symbol screen could keep showing a body with no callers while search correctly reported it had moved. Because a symbol's identity includes the line it starts on, this happened after almost any edit above it.
 
 - Python calls and file dependencies through `from package import module as alias` now appear in the graph, so renamed imports no longer hide live callers or imported modules. Thanks @JoeyNPP. (#1626)
+- Python docstrings are now indexed alongside preceding comments, so their prose is searchable and shown. Thanks @iacore for the report and @maxmilian. (#1905)
+- A Dart 3 `extension type` is now indexed as a type with its members attached. Thanks @bompus for the report and @Dshuishui. (#1784)
+- A receiver-less Go call (a function parameter or local func value) no longer links to a same-named method. Thanks @PCeltide for the report and @maxmilian. (#1857)
+- A function passed to a curried wrapper (`Effect.fn("x")(function* () {…})`, `connect(m)(fn)`) is now indexed under its declarator or property name. Thanks @Dshuishui for the report and @maxmilian. (#1747)
+- The bundled Scala grammar is now the official tree-sitter-scala v0.26.2, so classes with several parameter lists keep all their inheritance edges. Thanks @htarnacki for the report and @danusha2345. (#1823)
+- A Scala `object` is now indexed as a module, so `extends`/`with` resolves to the trait or class rather than its companion object. Thanks @htarnacki. (#1824)
+- C/C++ functions defined through a single-argument macro are now indexed under their real name when the macro's own `#define` proves it. Thanks @Dshuishui. (#1373)
+- MSVC COM `interface` declarations in C++ headers are now indexed as types with their methods. Thanks @timxx. (#1519)
+- A function-like C/C++ macro invocation no longer binds to a same-named function in another file, and a local C++ object initialization now records a call to its constructor. Thanks @netbrah for the reports and @danusha2345. (#1838, #1839)
+- A Delphi DFM component's range now runs to its closing `end`, so its properties and event bindings belong to it. Thanks @inth3shadows. (#1350)
+- Two same-named symbols on one line (a one-line getter/setter pair) no longer collide and drop one; existing symbol IDs are unchanged. Thanks @inth3shadows. (#1349)
+- A callback registered with `subscribe(this.handler)` now links to that exact handler, not the first same-named method in the project. Thanks @inth3shadows. (#1355)
+- Calls through an object-literal member that references an outer function (`{ fn }`, `{ fn: fn }`) now resolve to that function. Thanks @nikamodis for the report and @danusha2345. (#1932)
+- Calls, constructors and inheritance no longer link to a same-named symbol in an unrelated language, while real interop (web, JVM, native, .NET, cgo) keeps its edges. Thanks @bompus for the report and @danusha2345. (#1986)
+- A built-in method call such as `list.map()` or `cache.get()` on an untyped value no longer links to a same-named project method, and `this.#field.method()` resolves on the field's type. Thanks @bompus for the report and @danusha2345. (#1987)
+- Python and Go methods passed as values (`executor.submit(self.store.fetch)`) now appear in callers and impact results. Thanks @JosefAschauer. (#1820)
+- Methods called by a base class outside the index (React lifecycle methods, a stream's `_transform`, NestJS hooks) are no longer reported as dead code. Thanks @inth3shadows for the report and @danusha2345. (#1973)
+- A viewer trail now holds up to 64 hops everywhere — the trail bar, saved trails and "Read as flow". Thanks @inth3shadows for the report and @danusha2345. (#1976)
 
 ## [1.6.0] - 2026-08-26
 
