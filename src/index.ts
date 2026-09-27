@@ -982,6 +982,9 @@ export class CodeGraph {
         // Grind them down with the batched resolver; this also makes a bare
         // `codegraph sync` the recovery command for a wedged index. On a
         // healthy index this is one COUNT query.
+        result.pendingRefsProcessed = 0;
+        result.pendingRefsResolved = 0;
+        result.pendingRefsUnresolved = 0;
         const orphanCount = this.queries.getUnresolvedReferencesCount();
         if (orphanCount > 0) {
           options.onProgress?.({
@@ -990,7 +993,7 @@ export class CodeGraph {
             total: orphanCount,
           });
 
-          await this.resolveReferencesBatched(
+          const recovery = await this.resolveReferencesBatched(
             (current, total) => {
               options.onProgress?.({
                 phase: 'resolving',
@@ -1007,6 +1010,9 @@ export class CodeGraph {
             },
             backpressure
           );
+          result.pendingRefsProcessed = recovery.stats.total;
+          result.pendingRefsResolved = recovery.stats.resolved;
+          result.pendingRefsUnresolved = recovery.stats.unresolved;
         }
 
         if (filesChanged || orphanCount > 0) {

@@ -7,12 +7,12 @@ import CodeGraph from '../src/index';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
-describe('codegraph sync lock contention (#1361)', () => {
+describe('codegraph sync reporting', () => {
   let testDir: string;
 
   beforeEach(async () => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cli-sync-'));
-    fs.writeFileSync(path.join(testDir, 'index.ts'), 'export function original() { return 1; }');
+    fs.writeFileSync(path.join(testDir, 'index.ts'), 'export function original() { return target(); }\nexport function target() { return 1; }');
     const cg = CodeGraph.initSync(testDir);
     try {
       await cg.indexAll();
@@ -37,6 +37,38 @@ describe('codegraph sync lock contention (#1361)', () => {
       },
     });
   }
+
+  it.each([false, true])('reports pending-reference recovery (quiet=%s)', (quiet) => {
+    for (const resolvable of [true, false]) {
+      const cg = CodeGraph.openSync(testDir);
+      try {
+        const queries = (cg as unknown as { queries: import('../src/db/queries').QueryBuilder }).queries;
+        const caller = cg.searchNodes('original').find(r => r.node.name === 'original')!.node;
+        const target = cg.searchNodes('target').find(r => r.node.name === 'target')!.node;
+        queries.db.prepare("DELETE FROM edges WHERE source = ? AND target = ? AND kind = 'calls'")
+          .run(caller.id, target.id);
+        queries.insertUnresolvedRef({
+          fromNodeId: caller.id, referenceName: resolvable ? 'target' : 'missingTarget',
+          referenceKind: 'calls', line: 1, column: 37, filePath: 'index.ts', language: 'typescript',
+        });
+      } finally {
+        cg.destroy();
+      }
+      const recovered = sync(quiet);
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.status).toBe(0);
+      if (quiet) expect(recovered.stdout + recovered.stderr).toBe('');
+      else {
+        expect(recovered.stdout).not.toContain('Already up to date');
+        expect(recovered.stdout).toContain(`Resolved ${resolvable ? 1 : 0} pending references`);
+        if (!resolvable) expect(recovered.stdout).toContain('1 unresolved');
+      }
+      const unchanged = sync(quiet);
+      expect(unchanged.status).toBe(0);
+      if (quiet) expect(unchanged.stdout + unchanged.stderr).toBe('');
+      else expect(unchanged.stdout).toContain('Already up to date');
+    }
+  });
 
   it.each([false, true])('reports contention and recovers after release (quiet=%s)', (quiet) => {
     fs.writeFileSync(path.join(testDir, 'index.ts'), 'export function changedUnderLock() { return 2; }');

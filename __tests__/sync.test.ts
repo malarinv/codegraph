@@ -1096,3 +1096,47 @@ describe('committed-but-unindexed changes (#1829)', () => {
     expect(cg.getChangedFiles().added).toHaveLength(0);
   });
 });
+
+
+describe('sync pending-reference recovery reporting (#1360)', () => {
+  let testDir: string;
+  let cg: CodeGraph;
+
+  beforeEach(async () => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-sync-recovery-'));
+    fs.writeFileSync(path.join(testDir, 'index.ts'),
+      'export function caller() { return target(); }\nexport function target() { return 1; }\n');
+    cg = CodeGraph.initSync(testDir);
+    await cg.indexAll();
+  });
+
+  afterEach(() => {
+    cg?.destroy();
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it.each([true, false])('reports sweep outcomes without file changes (resolvable=%s)', async (resolvable) => {
+    const queries = (cg as unknown as { queries: import('../src/db/queries').QueryBuilder }).queries;
+    const caller = cg.searchNodes('caller').find(r => r.node.name === 'caller')!.node;
+    const target = cg.searchNodes('target').find(r => r.node.name === 'target')!.node;
+    queries.db.prepare("DELETE FROM edges WHERE source = ? AND target = ? AND kind = 'calls'")
+      .run(caller.id, target.id);
+    queries.insertUnresolvedRef({
+      fromNodeId: caller.id, referenceName: resolvable ? 'target' : 'missingTarget',
+      referenceKind: 'calls', line: 1, column: 35, filePath: 'index.ts', language: 'typescript',
+    });
+    expect(cg.getPendingReferenceCount()).toBe(1);
+
+    const result = await cg.sync();
+    expect(result).toMatchObject({
+      filesAdded: 0, filesModified: 0, filesRemoved: 0,
+      pendingRefsProcessed: 1, pendingRefsResolved: resolvable ? 1 : 0,
+      pendingRefsUnresolved: resolvable ? 0 : 1,
+    });
+    expect(cg.getPendingReferenceCount()).toBe(0);
+    expect(cg.getCallees(caller.id).some(r => r.node.id === target.id)).toBe(resolvable);
+    expect(await cg.sync()).toMatchObject({
+      pendingRefsProcessed: 0, pendingRefsResolved: 0, pendingRefsUnresolved: 0,
+    });
+  });
+});
