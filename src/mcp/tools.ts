@@ -6,7 +6,7 @@
 
 import type CodeGraph from '../index';
 import type { QueryPool } from './query-pool';
-import { findNearestCodeGraphRoot } from '../directory';
+import { findNearestCodeGraphRoot, isSameIndexRoot } from '../directory';
 // Lazy-load the heavy CodeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
 // schemas), but it must NOT drag in sqlite/query layers before the daemon binds;
@@ -37,6 +37,7 @@ import { extractQueryPaths, queryMightContainPaths } from '../search/query-paths
 import {
   existsSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from 'fs';
 import { createHash } from 'crypto';
@@ -1810,7 +1811,8 @@ export class ToolHandler {
     // support) that surfaces as intermittent
     // "database is locked" on concurrent tool calls. See issue #238. The
     // default instance is owned/closed by the server, so it's never cached.
-    if (this.cg && this.cg.getProjectRoot() === resolvedRoot) {
+    // Another spelling of the same root counts too (#1057).
+    if (this.cg && isSameIndexRoot(this.cg.getProjectRoot(), resolvedRoot)) {
       return this.freshen(this.cg);
     }
 
@@ -1820,8 +1822,19 @@ export class ToolHandler {
     const cached = this.projectCache.get(resolvedRoot);
     if (cached) return this.freshen(cached);
 
-    const cg = loadCodeGraph().openSync(resolvedRoot);
-    this.projectCache.set(resolvedRoot, cg);
+    // Compare current identities on every cache miss: a previously seen alias
+    // may have been retargeted or recreated since the last call (#1057).
+    for (const [root, open] of this.projectCache) {
+      if (isSameIndexRoot(root, resolvedRoot)) {
+        return this.freshen(open);
+      }
+    }
+
+    // Pin the owner to the symlink target, so retargeting the first spelling
+    // cannot move an existing connection onto another cached project.
+    const ownerRoot = realpathSync.native(resolvedRoot);
+    const cg = loadCodeGraph().openSync(ownerRoot);
+    this.projectCache.set(ownerRoot, cg);
     return cg;
   }
 
@@ -1854,7 +1867,9 @@ export class ToolHandler {
    * Close all cached project connections
    */
   closeAll(): void {
-    for (const cg of this.projectCache.values()) {
+    // One key per instance by design; closing through a Set keeps a second
+    // close (which throws on node:sqlite) from ever stopping the loop.
+    for (const cg of new Set(this.projectCache.values())) {
       cg.close();
     }
     this.projectCache.clear();
