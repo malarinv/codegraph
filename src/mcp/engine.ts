@@ -32,6 +32,8 @@ const loadCodeGraph = (): typeof import('../index').default =>
 const RETRY_SUBSCAN_TTL_MS = 5_000;
 
 export interface MCPEngineOptions {
+  /** Serve existing index contents without syncing, watching, or claiming a writer slot. */
+  readOnly?: boolean;
   /**
    * Whether to start the file watcher when initializing. Daemon and direct
    * modes both want this true; tests may set it false to keep the engine
@@ -90,10 +92,11 @@ export class MCPEngine {
   private queryPool: QueryPool | null = null;
 
   constructor(opts: MCPEngineOptions = {}) {
-    this.opts = { watch: opts.watch ?? true, queryPool: opts.queryPool ?? false, queryPoolDefaultMax: opts.queryPoolDefaultMax };
+    this.opts = { readOnly: opts.readOnly ?? false, watch: opts.watch ?? true, queryPool: opts.queryPool ?? false, queryPoolDefaultMax: opts.queryPoolDefaultMax };
     this.toolHandler = new ToolHandler(null);
     this.toolHandler.setProjectLifecycle({
       open: (root, open) => {
+        if (this.opts.readOnly) return loadCodeGraph().openSync(root, { readOnly: true });
         if (!this.opts.watch) return open();
         const lease = acquireProject(root, open, this.watchOptions());
         this.explicitProjects.set(lease.cg, lease);
@@ -102,7 +105,7 @@ export class MCPEngine {
       activate: (cg) => this.explicitProjects.get(cg)?.ready() ?? Promise.resolve(),
       release: (cg) => this.releaseExplicitProject(cg),
     });
-    if (opts.writerLockRoot) {
+    if (opts.writerLockRoot && !this.opts.readOnly) {
       const writer = tryAcquireWriterLock(opts.writerLockRoot, 'fallback');
       if (writer.kind === 'taken') {
         throw new Error(writerLockHeldMessage(writer.existing, writer.pidPath));
@@ -118,7 +121,7 @@ export class MCPEngine {
    * in-process, so the pool can only help, never break, tool calls.
    */
   private maybeStartPool(root: string | null): void {
-    if (!this.opts.queryPool || this.queryPool || this.closed) return;
+    if (this.opts.readOnly || !this.opts.queryPool || this.queryPool || this.closed) return;
     const envSize = process.env.CODEGRAPH_QUERY_POOL_SIZE;
     let size = resolvePoolSize(envSize, os.cpus().length);
     if ((envSize === undefined || envSize === '') && this.opts.queryPoolDefaultMax !== undefined) {
@@ -222,7 +225,7 @@ export class MCPEngine {
         try { this.cg.close(); } catch { /* ignore */ }
         this.cg = null;
       }
-      this.cg = loadCodeGraph().openSync(resolvedRoot);
+      this.cg = loadCodeGraph().openSync(resolvedRoot, { readOnly: this.opts.readOnly });
       this.projectPath = resolvedRoot;
       this.toolHandler.setDefaultCodeGraph(this.cg);
       this.startWatching();
@@ -345,7 +348,7 @@ export class MCPEngine {
 
     this.projectPath = resolvedRoot;
     try {
-      const opened = await loadCodeGraph().open(resolvedRoot);
+      const opened = await loadCodeGraph().open(resolvedRoot, { readOnly: this.opts.readOnly });
       if (this.closed) { opened.close(); return; }
       this.cg = opened;
       this.toolHandler.setDefaultCodeGraph(this.cg);
@@ -374,7 +377,7 @@ export class MCPEngine {
    * keep working.
    */
   private startWatching(): void {
-    if (!this.cg || this.watcherStarted || !this.opts.watch) return;
+    if (this.opts.readOnly || !this.cg || this.watcherStarted || !this.opts.watch) return;
 
     const opened = this.cg;
     this.defaultLease = acquireProject(opened.getProjectRoot(), () => opened, this.watchOptions());
@@ -396,7 +399,7 @@ export class MCPEngine {
    */
   private catchUpSync(): void {
     const cg = this.cg;
-    if (!cg) return;
+    if (!cg || this.opts.readOnly) return;
     if (this.defaultLease) {
       this.toolHandler.setCatchUpGate(this.defaultLease.ready());
       return;

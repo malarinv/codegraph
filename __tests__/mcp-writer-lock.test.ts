@@ -9,8 +9,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph } from '../src';
+import type { MCPEngine } from '../src/mcp/engine';
+
+import { createDatabase } from '../src/db/sqlite-adapter';
 import { getWriterPidPath } from '../src/mcp/writer-lock';
 import { isProcessAlive, stopDaemonAt } from '../src/mcp/daemon-registry';
+
+// Exercise the shipped lazy CommonJS loader as well as the engine lifecycle.
+const { MCPEngine: BuiltMCPEngine } = require('../dist/mcp/engine') as typeof import('../src/mcp/engine');
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
@@ -174,4 +180,62 @@ describe('issue #1740 — direct-mode writer lock', () => {
     expect(isProcessAlive(b.child.pid!)).toBe(false);
     expect(fs.existsSync(tempDir)).toBe(false);
   }, 25000);
+});
+
+
+describe('reader-only MCP engine (#1963)', () => {
+  let root: string;
+  let engine: MCPEngine;
+
+  beforeEach(async () => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg1963-reader-')));
+    fs.writeFileSync(path.join(root, 'app.ts'), 'export function originalSymbol() { return 1; }\n');
+    const cg = await CodeGraph.init(root);
+    try { await cg.indexAll(); } finally { cg.close(); }
+  });
+
+  afterEach(async () => {
+    await engine?.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each(['async', 'retry', 'explicit'] as const)('%s initialization never updates the index or owner lock', async (mode) => {
+    const lockPath = getWriterPidPath(root);
+    const owner = JSON.stringify({ pid: process.pid, mode: 'daemon', startedAt: Date.now() });
+    fs.writeFileSync(lockPath, owner);
+    fs.writeFileSync(path.join(root, 'app.ts'), 'export function changedSymbol() { return 2; }\n');
+    const { db } = createDatabase(path.join(root, '.codegraph', 'codegraph.db'), { readOnly: true });
+    const version = db.pragma('data_version', { simple: true });
+    // readOnly overrides watching, pool workers, and writer acquisition.
+    engine = new BuiltMCPEngine({ readOnly: true, watch: true, queryPool: true, writerLockRoot: root });
+    try {
+      if (mode === 'async') await engine.ensureInitialized(root);
+      if (mode === 'retry') {
+        const empty = path.join(root, 'empty');
+        fs.mkdirSync(empty);
+        engine.retryInitializeSync(empty);
+      }
+      const args = mode === 'explicit' ? { projectPath: root } : {};
+      const result = await engine.getToolHandler().execute('codegraph_search', { ...args, query: 'originalSymbol' });
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0].text).toContain('originalSymbol');
+      fs.writeFileSync(path.join(root, 'added.ts'), 'export function addedSymbol() {}\n');
+      // Includes the lifecycle's periodic ownership retry and watcher debounce.
+      await sleep(2200);
+      expect(db.pragma('data_version', { simple: true })).toBe(version);
+      expect(fs.readFileSync(lockPath, 'utf8')).toBe(owner);
+      await engine.stop();
+      expect(db.pragma('data_version', { simple: true })).toBe(version);
+      expect(fs.readFileSync(lockPath, 'utf8')).toBe(owner);
+    } finally { db.close(); }
+  });
+
+  it('watch:false still performs the normal startup catch-up', async () => {
+    fs.writeFileSync(path.join(root, 'app.ts'), 'export function changedSymbol() {}\n');
+    engine = new BuiltMCPEngine({ watch: false });
+    await engine.ensureInitialized(root);
+    const result = await engine.getToolHandler().execute('codegraph_search', { query: 'changedSymbol' });
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0].text).toContain('changedSymbol');
+  });
 });

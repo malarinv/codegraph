@@ -50,7 +50,6 @@ import {
 import { clearStaleDaemonArtifacts } from './daemon-registry';
 import { connectWithHello, runLocalHandshakeProxy } from './proxy';
 import {
-  getWriterPidPath,
   readWriterLock,
   releaseWriterLock,
   tryAcquireWriterLock,
@@ -92,6 +91,16 @@ const TAKEOVER_MAX_RETRIES = 5;
 const TAKEOVER_RETRY_DELAY_MS = 100;
 
 /**
+ * A fallback that serves reads without a watcher or a writer lock (#1963).
+ * Say so on stderr: otherwise a session that quietly stopped syncing looks
+ * the same as a healthy one in the logs.
+ */
+function readOnlyFallback(holder: string): MCPEngine {
+  process.stderr.write(`[CodeGraph MCP] Serving reads in-process without auto-sync: ${holder}.\n`);
+  return new MCPEngine({ readOnly: true });
+}
+
+/**
  * Create an in-process fallback only when it cannot conflict with a live
  * legacy daemon. Plain-PID locks cannot prove daemon identity, but they still
  * prove that a process owns the legacy writer slot.
@@ -117,12 +126,12 @@ function makeFallbackEngine(root: string): MCPEngine {
   }
   const writer = readWriterLock(root);
   if (writer && writer.pid > 0 && isProcessAlive(writer.pid)) {
-    throw new Error(writerLockHeldMessage(writer, getWriterPidPath(root)));
+    // Another process owns updates. A fallback may still serve read-only WAL
+    // queries without claiming a second writer or starting a watcher (#1963).
+    return readOnlyFallback(`writer lock held by PID ${writer.pid} (${writer.mode} mode)`);
   }
   if (existing && isProcessAlive(existing.pid)) {
-    throw new Error(
-      `Cannot start an in-process fallback while live daemon pid ${existing.pid} holds the project lock.`
-    );
+    return readOnlyFallback(`live daemon PID ${existing.pid} holds the project lock`);
   }
   return new MCPEngine({ writerLockRoot: root, queryPool: true, queryPoolDefaultMax: DIRECT_QUERY_POOL_MAX });
 }
