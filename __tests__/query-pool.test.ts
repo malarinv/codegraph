@@ -218,7 +218,7 @@ describe('MCP query pool with real projects (#1465)', () => {
 
   afterEach(async () => {
     await pool?.destroy();
-    engine?.stop();
+    await engine?.stop();
     engine = undefined;
     vi.unstubAllEnvs();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -257,8 +257,10 @@ describe('MCP query pool with real projects (#1465)', () => {
       const query = i % 2 ? 'betaSymbol' : 'alphaSymbol';
       return handler.execute('codegraph_explore', { projectPath, query }, session);
     });
-    expect(pool!.liveWorkers).toBe(2);
     const results = await Promise.all(calls);
+    // Explicit projects pass an asynchronous catch-up gate before dispatch.
+    // Check pool growth once the calls have actually reached the workers.
+    expect(pool!.liveWorkers).toBe(2);
     for (const [i, result] of results.entries()) {
       expect(result.isError).toBeFalsy();
       expect(result.content[0].text).toContain(i % 2 ? 'betaSymbol' : 'alphaSymbol');

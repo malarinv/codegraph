@@ -381,13 +381,9 @@ export class MCPServer {
    * connected session; in direct mode it mirrors the pre-#411 behavior (close
    * cg, exit). Proxy mode never routes through here — the proxy exits itself.
    */
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
-    if (this.writerLockRoot) {
-      releaseWriterLock(this.writerLockRoot);
-      this.writerLockRoot = null;
-    }
     if (this.ppidWatchdog) {
       clearInterval(this.ppidWatchdog);
       this.ppidWatchdog = null;
@@ -406,8 +402,12 @@ export class MCPServer {
       this.session = null;
     }
     if (this.engine) {
-      this.engine.stop();
+      await this.engine.stop();
       this.engine = null;
+    }
+    if (this.writerLockRoot) {
+      releaseWriterLock(this.writerLockRoot);
+      this.writerLockRoot = null;
     }
     process.exit(0);
   }
@@ -432,7 +432,7 @@ export class MCPServer {
     }
 
     this.engine = new MCPEngine({ queryPool: true, queryPoolDefaultMax: DIRECT_QUERY_POOL_MAX });
-    const transport = new StdioTransport();
+    const transport = new StdioTransport({ exitOnClose: false, onClose: () => { void this.stop(); } });
     this.session = new MCPSession(transport, this.engine, {
       explicitProjectPath: this.projectPath,
     });
@@ -445,7 +445,7 @@ export class MCPServer {
     this.session.start();
 
     // Detect parent-process death — same logic as pre-refactor. When stdin
-    // closes we go through StdioTransport's `process.exit(0)` already, but
+    // closes the transport drains the engine through stop(), but
     // SIGKILL of the parent doesn't reliably close stdin on Linux (#277).
     // Also treat a stdin `'error'` (a socket-backed stdin can fail with
     // ECONNRESET/hangup instead of a clean close) as shutdown, and destroy the

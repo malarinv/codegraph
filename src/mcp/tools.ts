@@ -1496,6 +1496,38 @@ export function getStaticTools(): ToolDefinition[] {
  */
 const DEFAULT_MCP_TOOLS = new Set(['explore']);
 
+/** realpath when the path exists, the path itself otherwise — never throws. */
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * How many explicit-`projectPath` projects a handler keeps open at once
+ * (#1835). Each cached project may hold a file watcher, a writer lock and a
+ * SQLite connection, so the cache is bounded LRU: opening one more than this
+ * closes the least recently used. Small on purpose — a session that queries
+ * many repositories still leaks nothing; it only pays a reopen + catch-up.
+ */
+export const MAX_CACHED_PROJECTS = 8;
+
+/**
+ * Engine-side lifecycle for a project the ToolHandler opened for an explicit
+ * `projectPath` (#1835). `activate` gives it the same treatment the default
+ * project gets — a file watcher while it stays open and a catch-up sync — and
+ * returns the catch-up promise, which the handler awaits (time-boxed) before
+ * calls against that project. `release` runs after active calls drain, so the
+ * engine can release shared ownership safely on LRU eviction or shutdown.
+ */
+export interface ProjectLifecycle {
+  open(root: string, open: () => CodeGraph): CodeGraph;
+  activate(cg: CodeGraph): Promise<void>;
+  release(cg: CodeGraph): void | Promise<void>;
+}
+
 /**
  * Tool handler that executes tools against a CodeGraph instance
  *
@@ -1503,8 +1535,19 @@ const DEFAULT_MCP_TOOLS = new Set(['explore']);
  * Other projects are opened on-demand and cached for performance.
  */
 export class ToolHandler {
-  // Cache of opened CodeGraph instances for cross-project queries
+  // Cache of opened CodeGraph instances for cross-project queries, keyed by the
+  // CANONICAL (realpath) index root. Map insertion order doubles as LRU order:
+  // a hit re-inserts, and `MAX_CACHED_PROJECTS` bounds the size (#1835).
   private projectCache: Map<string, CodeGraph> = new Map();
+  // Engine hook that watches + catches up an explicit project (null for the
+  // CLI and worker-thread handlers, which never own a watcher).
+  private projectLifecycle: ProjectLifecycle | null = null;
+  // Every concurrent call shares its project's pending catch-up promise.
+  private projectGates: Map<CodeGraph, Promise<void>> = new Map();
+  private activeCalls = 0;
+  private closing = false;
+  private pendingCloses = 0;
+  private closeWaiters: Array<() => void> = [];
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
@@ -1528,8 +1571,7 @@ export class ToolHandler {
   // per-file staleness banner can't help, because `getPendingFiles()` is
   // populated by the watcher, not by catch-up. The wait is time-boxed
   // (see {@link resolveCatchUpGateTimeoutMs}) so a minutes-long reconcile on a
-  // huge repo can't hang the first call (#905); cleared on first await so
-  // subsequent calls don't pay any cost.
+  // huge repo can't hang a call (#905); cleared when the reconcile settles.
   private catchUpGate: Promise<void> | null = null;
   // Optional worker-thread pool for off-loop read-tool dispatch. When ready +
   // healthy, heavy reads leave the main loop free for the MCP transport.
@@ -1548,6 +1590,14 @@ export class ToolHandler {
   }
 
   /**
+   * Engine-only: own the lifecycle (watcher, catch-up, writer lock) of every
+   * project this handler opens for an explicit `projectPath` (#1835).
+   */
+  setProjectLifecycle(lifecycle: ProjectLifecycle | null): void {
+    this.projectLifecycle = lifecycle;
+  }
+
+  /**
    * Update the default CodeGraph instance (e.g. after lazy initialization)
    */
   setDefaultCodeGraph(cg: CodeGraph): void {
@@ -1563,6 +1613,11 @@ export class ToolHandler {
    */
   setCatchUpGate(p: Promise<void> | null): void {
     this.catchUpGate = p;
+    void p?.then(() => {
+      if (this.catchUpGate === p) this.catchUpGate = null;
+    }, () => {
+      if (this.catchUpGate === p) this.catchUpGate = null;
+    });
   }
 
   /**
@@ -1792,8 +1847,11 @@ export class ToolHandler {
     // (#926). The DB connection itself is still cached (by resolved root,
     // below), so re-resolving costs only the stat walk, never a reopen.
     const resolvedRoot = findNearestCodeGraphRoot(projectPath);
+    // Two spellings of one root (a symlinked checkout, `/tmp` vs
+    // `/private/tmp`) must share one connection and one watcher (#1835).
+    const canonicalRoot = resolvedRoot ? canonicalPath(resolvedRoot) : null;
 
-    if (!resolvedRoot) {
+    if (!resolvedRoot || !canonicalRoot) {
       throw new NotIndexedError(
         `The project at ${projectPath} isn't indexed with codegraph (no .codegraph/ directory found ` +
         'walking up from it), so codegraph cannot query it. Use your built-in tools (Read/Grep/Glob) ' +
@@ -1814,26 +1872,67 @@ export class ToolHandler {
       return this.freshen(this.cg);
     }
 
-    // Cache the open DB connection by RESOLVED ROOT only — never by the input
+    // Cache the open DB connection by CANONICAL ROOT only — never by the input
     // path. One key per instance means closeAll() closes each exactly once, and
     // a changed resolution maps to a different entry instead of a stale hit.
-    const cached = this.projectCache.get(resolvedRoot);
-    if (cached) return this.freshen(cached);
+    const cached = this.projectCache.get(canonicalRoot);
+    if (cached) {
+      // Refresh LRU position.
+      this.projectCache.delete(canonicalRoot);
+      this.projectCache.set(canonicalRoot, cached);
+      return this.freshen(cached);
+    }
 
     // Compare current identities on every cache miss: a previously seen alias
     // may have been retargeted or recreated since the last call (#1057).
     for (const [root, open] of this.projectCache) {
       if (isSameIndexRoot(root, resolvedRoot)) {
+        this.projectCache.delete(root);
+        this.projectCache.set(root, open);
         return this.freshen(open);
       }
     }
 
-    // Pin the owner to the symlink target, so retargeting the first spelling
-    // cannot move an existing connection onto another cached project.
-    const ownerRoot = realpathSync.native(resolvedRoot);
-    const cg = loadCodeGraph().openSync(ownerRoot);
-    this.projectCache.set(ownerRoot, cg);
+    const open = () => loadCodeGraph().openSync(canonicalRoot);
+    const cg = this.projectLifecycle?.open(canonicalRoot, open) ?? open();
+    this.projectCache.set(canonicalRoot, cg);
+    this.trimProjects();
     return cg;
+  }
+
+  private async awaitProjectGate(projectPath: string): Promise<void> {
+    const cg = this.getCodeGraph(projectPath);
+    if (!this.projectLifecycle || cg === this.cg) return;
+    let gate = this.projectGates.get(cg);
+    if (!gate) {
+      gate = this.projectLifecycle.activate(cg).catch(() => { /* engine logs */ });
+      this.projectGates.set(cg, gate);
+      void gate.then(() => {
+        if (this.projectGates.get(cg) === gate) this.projectGates.delete(cg);
+        this.trimProjects();
+      });
+    }
+    await this.awaitCatchUpGate(gate);
+  }
+
+  /** Never evict a graph while a tool call or its timed-out reconcile uses it. */
+  private trimProjects(): void {
+    if (this.activeCalls > 0) return;
+    for (const [root, cg] of this.projectCache) {
+      if (!this.closing && this.projectCache.size <= MAX_CACHED_PROJECTS) break;
+      if (this.projectGates.has(cg)) continue;
+      this.projectCache.delete(root);
+      if (this.projectLifecycle) {
+        this.pendingCloses++;
+        void Promise.resolve(this.projectLifecycle.release(cg)).finally(() => {
+          this.pendingCloses--;
+          this.trimProjects();
+        });
+      } else cg.close();
+    }
+    if (this.closing && this.projectCache.size === 0 && this.pendingCloses === 0) {
+      for (const resolve of this.closeWaiters.splice(0)) resolve();
+    }
   }
 
   /**
@@ -1864,14 +1963,12 @@ export class ToolHandler {
   /**
    * Close all cached project connections
    */
-  closeAll(): void {
-    // One key per instance by design; closing through a Set keeps a second
-    // close (which throws on node:sqlite) from ever stopping the loop.
-    for (const cg of new Set(this.projectCache.values())) {
-      cg.close();
-    }
-    this.projectCache.clear();
+  closeAll(): Promise<void> {
+    this.closing = true;
     this.worktreeMismatchCache.clear();
+    this.trimProjects();
+    if (this.projectCache.size === 0 && this.activeCalls === 0 && this.pendingCloses === 0) return Promise.resolve();
+    return new Promise((resolve) => this.closeWaiters.push(resolve));
   }
 
   /**
@@ -2062,13 +2159,11 @@ export class ToolHandler {
       return result; // no default project — leave as is
     }
 
-    // Cross-project `projectPath` calls open a cached CodeGraph WITHOUT a
-    // watcher (watchers are only attached to the default session project).
+    // A cross-project `projectPath` call's cached CodeGraph only has a watcher
+    // when the engine owns its lifecycle (#1835) — the CLI's handler has none.
     // When the cross-project path happens to be the same project as the
-    // default cg, the cached instance is the wrong one — its pendingFiles is
-    // permanently empty. Detect the equal-path case and prefer the default
-    // cg so the staleness signal still fires when an agent passes the
-    // explicit projectPath form of its own project.
+    // default cg, prefer the default cg so the staleness signal still fires
+    // when an agent passes the explicit projectPath form of its own project.
     if (this.cg && cg !== this.cg) {
       try {
         const sameProject =
@@ -2083,9 +2178,9 @@ export class ToolHandler {
     // stopped, getPendingFiles() is empty so the per-file banner below can't
     // fire — but the index is now FROZEN and silently drifting stale. Surface
     // one global notice instead, so the agent Reads for current content rather
-    // than trusting a response off a no-longer-updating index. (Cross-project
-    // calls open a watcher-less CodeGraph, so this is false there — correct: we
-    // only know degraded state for the default session project.)
+    // than trusting a response off a no-longer-updating index. (A cross-project
+    // instance without an engine-owned watcher reports false here — correct: we
+    // only know degraded state for a project we watch.)
     let degraded = false;
     try {
       degraded = cg.isWatcherDegraded?.() ?? false;
@@ -2157,18 +2252,19 @@ export class ToolHandler {
     args: Record<string, unknown>,
     sessionState?: ExploreSessionState,
   ): Promise<ToolResult> {
+    if (this.closing) return this.textResult('This MCP session is closing; retry with a connected session.');
+    this.activeCalls++;
     try {
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
       // running. The wait is time-boxed (#905): a huge-repo reconcile takes
       // minutes, and blocking the first call on all of it reads as a hang, so
       // we wait briefly then serve and let it finish in the background. The
-      // gate is cleared after first await — subsequent calls pay nothing.
+      // gate stays installed until reconciliation settles, including on timeout.
       // Catch-up failures are logged by the engine; we proceed regardless so a
       // transient sync error never breaks tools.
       if (this.catchUpGate) {
         const gate = this.catchUpGate;
-        this.catchUpGate = null;
         await this.awaitCatchUpGate(gate);
       }
       // Honor the optional tool allowlist (CODEGRAPH_MCP_TOOLS): a trimmed
@@ -2183,6 +2279,13 @@ export class ToolHandler {
       const pathCheck = this.validateOptionalPath(args.projectPath, 'projectPath');
       if (typeof pathCheck === 'object' && pathCheck !== undefined) {
         return pathCheck;
+      }
+      // An explicit project gets the same first-call guarantee as the default
+      // (#1835): its post-open catch-up sync finishes (time-boxed) before we
+      // serve it. Resolved on the main thread so the watcher lives here even
+      // when dispatch is off-loaded to a worker.
+      if (typeof pathCheck === 'string') {
+        await this.awaitProjectGate(pathCheck);
       }
       // The `path` and `pattern` properties used by codegraph_files are
       // also path-shaped — apply the same cap.
@@ -2255,6 +2358,9 @@ export class ToolHandler {
         'This is an internal codegraph error — retry the call once; if it persists, ' +
         'continue without codegraph for this task.'
       );
+    } finally {
+      this.activeCalls--;
+      this.trimProjects();
     }
   }
 

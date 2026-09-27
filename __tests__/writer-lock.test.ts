@@ -12,6 +12,8 @@ import { MCPEngine } from '../src/mcp/engine';
 import {
   decodeWriterLockInfo,
   getWriterPidPath,
+  markWriterReady,
+  readWriterLock,
   releaseWriterLock,
   tryAcquireWriterLock,
   writerLockHeldMessage,
@@ -88,6 +90,18 @@ describe('writer lock (#1740)', () => {
     const r = tryAcquireWriterLock(root, 'direct');
     expect(r.kind).toBe('acquired');
     releaseWriterLock(root);
+  });
+
+  it('publishes catch-up completion for readers without changing writer identity', () => {
+    const root = makeProject();
+    const acquired = tryAcquireWriterLock(root, 'direct');
+    expect(acquired.kind).toBe('acquired');
+    const before = readWriterLock(root);
+    expect(before?.ready).toBe(false);
+    markWriterReady(root);
+    expect(readWriterLock(root)).toEqual({ ...before, ready: true });
+    tryAcquireWriterLock(root, 'fallback');
+    expect(readWriterLock(root)).toEqual({ ...before, ready: true });
   });
 
   it('lets a fallback engine atomically claim and release writer ownership', () => {
