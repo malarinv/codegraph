@@ -98,6 +98,20 @@ describe.skipIf(!kernelBuilt)('kernel TS/JS extraction parity', () => {
 
   it.each([
     ['ts', 'typescript'], ['tsx', 'tsx'], ['js', 'javascript'], ['jsx', 'jsx'],
+  ] as const)('same-line accessors retain distinct identities after Unicode: %s (#1349)', (ext, language) => {
+    const source = 'class Point { /* é😀 */ get x() { return read(); } set x(v) { write(v); } }';
+    const result = assertParity(`point.${ext}`, source, language);
+    const x = result.nodes.filter((n) => n.name === 'x');
+    expect(x).toHaveLength(2);
+    expect(x[1]!.id).toBe(`${x[0]!.id}:${source.indexOf('set x')}`);
+    expect(result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => [r.fromNodeId, r.referenceName]))
+      .toEqual([[x[0]!.id, 'read'], [x[1]!.id, 'write']]);
+    // No state leaks between files or repeated extractions.
+    expect(canon(assertParity(`point.${ext}`, source, language))).toEqual(canon(result));
+  });
+
+  it.each([
+    ['ts', 'typescript'], ['tsx', 'tsx'], ['js', 'javascript'], ['jsx', 'jsx'],
   ] as const)('leaves nested identifier receivers unresolved and keeps argument calls: %s (#1566)', (ext, language) => {
     const result = assertParity(`fixture.${ext}`, `
 function readKey() { return 'answer'; }

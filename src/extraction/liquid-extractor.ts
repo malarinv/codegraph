@@ -1,5 +1,5 @@
 import { Node, Edge, ExtractionResult, ExtractionError, UnresolvedReference } from '../types';
-import { generateNodeId } from './tree-sitter-helpers';
+import { generateNodeId, NodeIdAllocator } from './tree-sitter-helpers';
 
 /**
  * LiquidExtractor - Extracts relationships from Liquid template files
@@ -14,6 +14,7 @@ export class LiquidExtractor {
   private filePath: string;
   private source: string;
   private nodes: Node[] = [];
+  private nodeIds = new NodeIdAllocator();
   private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
   private errors: ExtractionError[] = [];
@@ -217,7 +218,7 @@ export class LiquidExtractor {
       const line = this.getLineNumber(match.index);
 
       // Create an import node for searchability
-      const importNodeId = generateNodeId(this.filePath, 'import', snippetName!, line);
+      const importNodeId = this.nodeIds.generate(this.filePath, 'import', snippetName!, line, match.index - this.getLineStart(line));
       const importNode: Node = {
         id: importNodeId,
         kind: 'import',
@@ -242,7 +243,7 @@ export class LiquidExtractor {
       });
 
       // Create a component node for the snippet reference
-      const nodeId = generateNodeId(this.filePath, 'component', `${tagType}:${snippetName}`, line);
+      const nodeId = this.nodeIds.generate(this.filePath, 'component', `${tagType}:${snippetName}`, line, match.index - this.getLineStart(line));
 
       const node: Node = {
         id: nodeId,
@@ -289,7 +290,7 @@ export class LiquidExtractor {
       const line = this.getLineNumber(match.index);
 
       // Create an import node for searchability
-      const importNodeId = generateNodeId(this.filePath, 'import', sectionName!, line);
+      const importNodeId = this.nodeIds.generate(this.filePath, 'import', sectionName!, line, match.index - this.getLineStart(line));
       const importNode: Node = {
         id: importNodeId,
         kind: 'import',
@@ -314,7 +315,7 @@ export class LiquidExtractor {
       });
 
       // Create a component node for the section reference
-      const nodeId = generateNodeId(this.filePath, 'component', `section:${sectionName}`, line);
+      const nodeId = this.nodeIds.generate(this.filePath, 'component', `section:${sectionName}`, line, match.index - this.getLineStart(line));
 
       const node: Node = {
         id: nodeId,
@@ -378,7 +379,7 @@ export class LiquidExtractor {
       }
 
       // Create a node for the schema
-      const nodeId = generateNodeId(this.filePath, 'constant', `schema:${schemaName}`, startLine);
+      const nodeId = this.nodeIds.generate(this.filePath, 'constant', `schema:${schemaName}`, startLine, match.index - this.getLineStart(startLine));
 
       const node: Node = {
         id: nodeId,
@@ -419,7 +420,7 @@ export class LiquidExtractor {
       const line = this.getLineNumber(match.index);
 
       // Create a variable node
-      const nodeId = generateNodeId(this.filePath, 'variable', variableName!, line);
+      const nodeId = this.nodeIds.generate(this.filePath, 'variable', variableName!, line, match.index - this.getLineStart(line));
 
       const node: Node = {
         id: nodeId,
