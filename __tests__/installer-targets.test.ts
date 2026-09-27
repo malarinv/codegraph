@@ -2957,3 +2957,74 @@ describe('Installer targets — Codex CODEX_HOME override (#1627)', () => {
     expect(fs.existsSync(path.join(custom, 'config.toml'))).toBe(false);
   });
 });
+
+describe('Antigravity macOS command persistence (#1443)', () => {
+  let tmpHome: string;
+  let homeRestore: { restore: () => void };
+
+  beforeEach(() => {
+    tmpHome = fs.realpathSync(mkTmpDir('antigravity-command'));
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    homeRestore.restore();
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function makeCommand(): string {
+    const bin = path.join(tmpHome, 'node-versions', 'v22', 'installation', 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const shim = path.join(tmpHome, 'npm-shim.js');
+    fs.writeFileSync(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    fs.symlinkSync(shim, path.join(bin, 'codegraph'));
+    return bin;
+  }
+
+  function installCommand(): string {
+    getTarget('antigravity')!.install('global', { autoAllow: true });
+    const file = path.join(tmpHome, '.gemini', 'antigravity', 'mcp_config.json');
+    return JSON.parse(fs.readFileSync(file, 'utf-8')).mcpServers.codegraph.command;
+  }
+
+  it.runIf(process.platform === 'darwin')('keeps the saved command usable after the fnm shell symlink is removed', () => {
+    const bin = makeCommand();
+    const shell = path.join(tmpHome, 'fnm_multishells', 'shell');
+    fs.mkdirSync(path.dirname(shell), { recursive: true });
+    fs.symlinkSync(path.dirname(bin), shell);
+    vi.stubEnv('PATH', path.join(shell, 'bin'));
+
+    const command = installCommand();
+    fs.unlinkSync(shell);
+    expect(fs.existsSync(command)).toBe(true);
+    expect(command).toBe(path.join(bin, 'codegraph'));
+    expect(path.basename(command)).toBe('codegraph');
+    vi.stubEnv('PATH', bin);
+    expect(getTarget('antigravity')!.install('global', { autoAllow: true }).files[0].action).toBe('unchanged');
+    expect(getTarget('antigravity')!.printConfig('global')).toContain(JSON.stringify(command));
+  });
+
+  it.runIf(process.platform === 'darwin')('preserves a stable command path without resolving the npm shim filename', () => {
+    const bin = makeCommand();
+    vi.stubEnv('PATH', bin);
+    expect(installCommand()).toBe(path.join(bin, 'codegraph'));
+  });
+
+  it.runIf(process.platform === 'darwin')('keeps the discovered path if directory canonicalization fails', () => {
+    const bin = makeCommand();
+    vi.stubEnv('PATH', bin);
+    const realpath = fs.realpathSync;
+    vi.spyOn(require('fs') as typeof fs, 'realpathSync').mockImplementation((...args) => {
+      if (args[0] === bin) throw new Error('directory unavailable');
+      return realpath(...args);
+    });
+    expect(installCommand()).toBe(path.join(bin, 'codegraph'));
+  });
+
+  it.runIf(process.platform === 'darwin')('falls back to the bare command when lookup fails', () => {
+    vi.stubEnv('PATH', tmpHome);
+    expect(installCommand()).toBe('codegraph');
+  });
+});
