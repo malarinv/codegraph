@@ -15,7 +15,7 @@ import * as path from 'path';
 import type CodeGraph from '../index';
 import { resolveServerRoot } from '../directory';
 import { ToolHandler } from './tools';
-import { releaseWriterLock, tryAcquireWriterLock, writerLockHeldMessage } from './writer-lock';
+import { assertNoRebuild, releaseWriterLock, tryAcquireWriterLock, writerLockHeldMessage } from './writer-lock';
 import { QueryPool, resolvePoolSize } from './query-pool';
 import { acquireProject, ProjectLease } from './project-lifecycle';
 
@@ -96,6 +96,9 @@ export class MCPEngine {
     this.toolHandler = new ToolHandler(null);
     this.toolHandler.setProjectLifecycle({
       open: (root, open) => {
+        // Explicit projects and read-only fallbacks also hold SQLite handles.
+        // Fence them before opening, just like the default daemon project.
+        assertNoRebuild(root);
         if (this.opts.readOnly) return loadCodeGraph().openSync(root, { readOnly: true });
         if (!this.opts.watch) return open();
         const lease = acquireProject(root, open, this.watchOptions());
@@ -106,6 +109,7 @@ export class MCPEngine {
       release: (cg) => this.releaseExplicitProject(cg),
     });
     if (opts.writerLockRoot && !this.opts.readOnly) {
+      assertNoRebuild(opts.writerLockRoot);
       const writer = tryAcquireWriterLock(opts.writerLockRoot, 'fallback');
       if (writer.kind === 'taken') {
         throw new Error(writerLockHeldMessage(writer.existing, writer.pidPath));
@@ -225,6 +229,7 @@ export class MCPEngine {
         try { this.cg.close(); } catch { /* ignore */ }
         this.cg = null;
       }
+      assertNoRebuild(resolvedRoot);
       this.cg = loadCodeGraph().openSync(resolvedRoot, { readOnly: this.opts.readOnly });
       this.projectPath = resolvedRoot;
       this.toolHandler.setDefaultCodeGraph(this.cg);
@@ -348,6 +353,7 @@ export class MCPEngine {
 
     this.projectPath = resolvedRoot;
     try {
+      assertNoRebuild(resolvedRoot);
       const opened = await loadCodeGraph().open(resolvedRoot, { readOnly: this.opts.readOnly });
       if (this.closed) { opened.close(); return; }
       this.cg = opened;

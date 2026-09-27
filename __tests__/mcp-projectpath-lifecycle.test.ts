@@ -18,6 +18,9 @@ import CodeGraph from '../src/index';
 import { MCPEngine } from '../src/mcp/engine';
 import { MAX_CACHED_PROJECTS, __setLoadCodeGraphForTests } from '../src/mcp/tools';
 
+// Default and read-only opens use the engine's lazy CommonJS loader.
+const { MCPEngine: BuiltMCPEngine } = require('../dist/mcp/engine') as typeof import('../src/mcp/engine');
+
 const opened: CodeGraph[] = [];
 let onOpen: ((cg: CodeGraph) => void) | undefined;
 /** CodeGraph that records every instance the ToolHandler opens. */
@@ -143,6 +146,47 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     const res = await engine.getToolHandler().execute('codegraph_search', { query: symbol, projectPath });
     expect(res.isError).toBeFalsy();
     return res.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+  }
+
+  for (const options of [{ watch: true }, { watch: false }, { readOnly: true }]) {
+    it(`defers explicit project opens during a rebuild (${JSON.stringify(options)})`, async () => {
+      await engine.stop();
+      engine = new BuiltMCPEngine(options);
+      engines.push(engine);
+      const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      children.push(holder);
+      if (!holder.pid) throw new Error('Failed to spawn rebuild holder');
+      const fence = path.join(serviceA, '.codegraph/rebuild.pid');
+      fs.writeFileSync(fence, JSON.stringify({ pid: holder.pid, mode: 'rebuild', startedAt: Date.now() }));
+      const response = await engine.getToolHandler().execute('codegraph_search', {
+        projectPath: serviceA, query: 'alphaOriginal',
+      });
+      expect(JSON.stringify(response)).toContain('rebuild is in progress');
+      // Expected and temporary: guidance, never a tool error that teaches abandonment.
+      expect(JSON.stringify(response)).not.toContain('"isError":true');
+      expect(opened).toHaveLength(0);
+      expect(fs.existsSync(path.join(serviceA, '.codegraph/writer.pid'))).toBe(false);
+      fs.unlinkSync(fence);
+      expect(await search(serviceA, 'alphaOriginal')).toContain('alphaOriginal');
+    });
+
+    it(`defers default project opens and synchronous retries during a rebuild (${JSON.stringify(options)})`, async () => {
+      const reader = new BuiltMCPEngine(options);
+      engines.push(reader);
+      const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      children.push(holder);
+      if (!holder.pid) throw new Error('Failed to spawn rebuild holder');
+      const fence = path.join(serviceA, '.codegraph/rebuild.pid');
+      fs.writeFileSync(fence, JSON.stringify({ pid: holder.pid, mode: 'rebuild', startedAt: Date.now() }));
+      await reader.ensureInitialized(serviceA);
+      expect(reader.hasDefaultCodeGraph()).toBe(false);
+      reader.retryInitializeSync(serviceA);
+      expect(reader.hasDefaultCodeGraph()).toBe(false);
+      expect(fs.existsSync(path.join(serviceA, '.codegraph/writer.pid'))).toBe(false);
+      fs.unlinkSync(fence);
+      reader.retryInitializeSync(serviceA);
+      expect(reader.hasDefaultCodeGraph()).toBe(true);
+    });
   }
 
   it('catches up an edit made before the first call and watches later edits', async () => {

@@ -2401,8 +2401,11 @@ export class ToolHandler {
       // Expected condition, not a malfunction: answer as a SUCCESS so the
       // agent keeps trusting the toolset for projects that ARE indexed.
       // (An isError here teaches session-long abandonment — see NotIndexedError.)
-      if (err instanceof NotIndexedError) {
-        return this.textResult(err.message);
+      // A running `codegraph index` rebuild is the same kind of expected,
+      // temporary condition (#1325). Matched by name: tools.ts stays free of
+      // the writer-lock module on the MCP startup path.
+      if (err instanceof NotIndexedError || (err as Error | null)?.name === 'RebuildInProgressError') {
+        return this.textResult((err as Error).message);
       }
       // Security refusal: a clean error, no retry encouragement.
       if (err instanceof PathRefusalError) {

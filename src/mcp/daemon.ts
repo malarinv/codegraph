@@ -58,6 +58,7 @@ import { CodeGraphPackageVersion } from './version';
 import {
   releaseWriterLock,
   tryAcquireWriterLock,
+  assertNoRebuild,
   writerLockHeldMessage,
 } from './writer-lock';
 import { registerDaemon, deregisterDaemon } from './daemon-registry';
@@ -212,6 +213,7 @@ export class Daemon {
   async start(): Promise<DaemonStartResult> {
     // #1740: claim the project writer lock before opening/watching so a
     // concurrent direct-mode serve --mcp cannot start a second watcher.
+    assertNoRebuild(this.projectRoot);
     const writer = tryAcquireWriterLock(this.projectRoot, 'daemon');
     if (writer.kind === 'taken') {
       const msg = writerLockHeldMessage(writer.existing, writer.pidPath);
