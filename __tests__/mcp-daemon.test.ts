@@ -41,6 +41,8 @@ import * as path from 'path';
 import { CodeGraph } from '../src';
 import { getDaemonSocketPath } from '../src/mcp/daemon-paths';
 import { CodeGraphPackageVersion } from '../src/mcp/version';
+import { once } from 'events';
+import { WASM_RUNTIME_FLAGS } from '../src/extraction/wasm-runtime-flags';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
@@ -51,7 +53,7 @@ interface SpawnedServer {
 }
 
 function spawnServer(cwd: string, env: NodeJS.ProcessEnv = {}, args: string[] = []): SpawnedServer {
-  const child = spawn(process.execPath, [BIN, 'serve', '--mcp', ...args], {
+  const child = spawn(process.execPath, [...WASM_RUNTIME_FLAGS, BIN, 'serve', '--mcp', ...args], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // #618: the daemon-attach log line is now off by default; opt the test
@@ -195,7 +197,14 @@ describe('Shared MCP daemon (issue #411)', () => {
   });
 
   afterEach(async () => {
-    killTree(...servers.map((s) => s.child));
+    // The runtime flags avoid an intermediate relaunch process. Wait for each
+    // actual server to exit before removing its Windows working directory.
+    await Promise.all(servers.map(async ({ child }) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill('SIGKILL');
+      await exited;
+    }));
     // The daemon is detached (not a tracked child) — reap it explicitly via the
     // pid it recorded, so a test can't leak a background daemon. Guard against
     // our own pid: the version-mismatch test plants `pid: process.pid` in the
@@ -203,10 +212,11 @@ describe('Shared MCP daemon (issue #411)', () => {
     const daemonPid = readLockPid(realRoot);
     if (daemonPid && daemonPid !== process.pid && isAlive(daemonPid)) {
       try { process.kill(daemonPid, 'SIGKILL'); } catch { /* race */ }
+      await waitProcessExit(daemonPid, 5000);
     }
     await new Promise((r) => setTimeout(r, 50));
     servers.length = 0;
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it.runIf(process.platform !== 'win32')('stops despite a socket still waiting for its client hello (#1963)', async () => {
@@ -495,8 +505,21 @@ describe('Shared MCP daemon (issue #411)', () => {
     sendInitialize(first.child, `file://${tempDir}`, 1);
     await waitFor(() => findResponse(first.stdout, 1), 10000);
     await waitFor(() => countListeningLines(realRoot) >= 1, 10000);
+    // Listening precedes engine initialization. Do not kill SQLite while its
+    // initial connection is still being configured for this fixture.
+    sendMessage(first.child, {
+      jsonrpc: '2.0', id: 10, method: 'tools/call',
+      params: { name: 'codegraph_status', arguments: {} },
+    });
+    const ready = await waitFor(() => findResponse(first.stdout, 10), 10000);
+    expect(ready.result?.isError).not.toBe(true);
+    expect(JSON.stringify(ready.result)).toContain('CodeGraph Status');
     const killedPid = readLockPid(realRoot)!;
 
+    // End the first proxy before simulating PID reuse. Otherwise it can switch
+    // to a fallback writer while this test prepares the replacement locks/DB.
+    first.child.stdin.end();
+    await waitFor(() => first.child.exitCode !== null, 5000);
     process.kill(killedPid, 'SIGKILL');
     expect(await waitProcessExit(killedPid, 8000)).toBe(true);
 
@@ -518,7 +541,10 @@ describe('Shared MCP daemon (issue #411)', () => {
     fs.writeFileSync(daemonPath, staleDaemonLock);
     fs.writeFileSync(writerPath, staleWriterLock);
 
-    const before = await staleIndex(realRoot);
+    // Make the index stale by changing the source, without opening a new
+    // SQLite writer against the database of the daemon we just killed.
+    const before = fs.readFileSync(path.join(realRoot, '.codegraph', 'codegraph.db'));
+    fs.writeFileSync(path.join(realRoot, 'app.ts'), 'export function changedSymbol() {}\n');
     const second = spawnServer(tempDir, env);
     servers.push(second);
     sendInitialize(second.child, `file://${tempDir}`, 2);
@@ -528,7 +554,7 @@ describe('Shared MCP daemon (issue #411)', () => {
       () => second.stderr.some((line) =>
         line.includes('Attached to shared daemon') || line.includes('Shared daemon unavailable')
       ),
-      12000,
+      30000, // The nominal 6s retry loop takes up to 26s on the Windows VM.
       25,
       'the proxy to attach or fall back',
     );
@@ -570,7 +596,7 @@ describe('Shared MCP daemon (issue #411)', () => {
       () => server.stderr.some((line) =>
         line.includes('Attached to shared daemon') || line.includes('Shared daemon unavailable')
       ),
-      12000,
+      30000, // The nominal 6s retry loop takes up to 26s on the Windows VM.
       25,
       'the proxy to attach or fall back',
     );
@@ -590,7 +616,7 @@ describe('Shared MCP daemon (issue #411)', () => {
     expect(toolResponse).toMatchObject({
       error: { message: expect.stringContaining('live legacy daemon') },
     });
-  }, 30000);
+  }, 40000);
 
   it('does not start a fallback writer when the daemon lock is unreadable', async () => {
     const pidPath = path.join(realRoot, '.codegraph', 'daemon.pid');
@@ -601,7 +627,7 @@ describe('Shared MCP daemon (issue #411)', () => {
     sendInitialize(server.child, `file://${tempDir}`, 1);
     await waitFor(
       () => server.stderr.some((line) => line.includes('Shared daemon unavailable')),
-      12000,
+      30000, // The nominal 6s retry loop takes up to 26s on the Windows VM.
       25,
       'the proxy to fall back',
     );
@@ -616,7 +642,7 @@ describe('Shared MCP daemon (issue #411)', () => {
     expect(toolResponse).toMatchObject({
       error: { message: expect.stringContaining('daemon lock could not be read') },
     });
-  }, 30000);
+  }, 40000);
 
   it.each([null, 'daemon', 'fallback'])('proxy falls back to read-only mode on a daemon version mismatch (writer: %s)', async (mode) => {
     const before = await staleIndex(realRoot);
@@ -696,15 +722,29 @@ describe('Shared MCP daemon (issue #411)', () => {
     servers.push(server);
     sendInitialize(server.child, `file://${tempDir}`, 1);
     await waitFor(() => findResponse(server.stdout, 1), 10000);
-    await waitFor(() => (readLockPid(realRoot) ?? 0) > 0, 8000);
+    // initialize is answered locally, and a PID file can belong to a daemon
+    // still starting. Establish a real live session before measuring silence.
+    const attached = await waitFor(
+      () => server.stderr.find((line) => line.includes('Attached to shared daemon')),
+      10000,
+    );
+    sendMessage(server.child, {
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'codegraph_status', arguments: {} },
+    });
+    const status = await waitFor(() => findResponse(server.stdout, 2), 10000);
+    expect(status.error).toBeUndefined();
+    expect(status.result?.isError).not.toBe(true);
+    expect(JSON.stringify(status.result)).toContain('CodeGraph Status');
     const daemonPid = readLockPid(realRoot)!;
+    expect(attached).toContain(`(pid ${daemonPid},`);
     expect(isAlive(daemonPid)).toBe(true);
 
     // Stay silent well past several backstop windows. The live session's peer is
     // provably alive, so the daemon must keep running (and never log a backstop
     // shutdown), with its lockfile intact.
     await new Promise((r) => setTimeout(r, 4000)); // > 3× maxIdle
-    expect(isAlive(daemonPid)).toBe(true);
+    expect(isAlive(daemonPid), readDaemonLog(realRoot) + '\n' + server.stderr.join('\n')).toBe(true);
     expect(readDaemonLog(realRoot)).not.toContain('inactivity backstop');
     expect(readLockPid(realRoot)).toBe(daemonPid);
   }, 30000);

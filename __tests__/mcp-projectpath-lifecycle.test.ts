@@ -357,6 +357,7 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     }
   });
 
+  // Builds and reconciles nine real indexes; a Windows VM exceeds the default 5s.
   it('defers eviction and shutdown until an active catch-up finishes', async () => {
     const roots = [serviceA, serviceB];
     for (let i = roots.length; i <= MAX_CACHED_PROJECTS; i++) {
@@ -397,7 +398,7 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
       if (prev === undefined) delete process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
       else process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS = prev;
     }
-  });
+  }, 15_000);
 
 
   it('drains a tool operation before closing its cached graph', async () => {
