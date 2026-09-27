@@ -1531,17 +1531,15 @@ export class ToolHandler {
   // huge repo can't hang the first call (#905); cleared on first await so
   // subsequent calls don't pay any cost.
   private catchUpGate: Promise<void> | null = null;
-  // Optional worker-thread pool for off-loop read-tool dispatch (daemon mode).
-  // When set + healthy, the heavy read tools run on a worker so the daemon's
-  // main loop stays free for the MCP transport under concurrent load. Null in
-  // direct/in-process mode (one client, no concurrency to parallelize).
+  // Optional worker-thread pool for off-loop read-tool dispatch. When ready +
+  // healthy, heavy reads leave the main loop free for the MCP transport.
   private queryPool: QueryPool | null = null;
 
   constructor(private cg: CodeGraph | null) {}
 
   /**
    * Engine-only: attach (or detach with null) the worker-thread query pool. The
-   * shared daemon sets this once its default project is open; the workers each
+   * engine sets this after resolving its default project; the workers each
    * hold their own WAL read connection and run {@link executeReadTool}. A
    * worker's own ToolHandler never has a pool, so there is no nested off-loading.
    */
@@ -2207,15 +2205,15 @@ export class ToolHandler {
       }
 
       // Read tools: off-load the CPU-heavy dispatch to the worker pool when one
-      // is attached, healthy, AND has finished its first cold start (daemon
-      // mode), so the daemon's single event loop stays free for the MCP
+      // is attached, healthy, AND has finished its first cold start,
+      // so the server's single event loop stays free for the MCP
       // transport under concurrent load — otherwise N concurrent explores
       // serialize AND starve the transport until the whole batch drains
       // (clients then time out). Before the first worker is warm, calls run
       // in-process: a call queued behind a cold start sat invisible until the
       // 45s busy backstop — the daemon's first tool call stalling for however
       // long a worker spawn takes on a loaded machine (the #662 flake). With
-      // no pool (direct mode) or a degraded one, dispatch runs in-process
+      // no pool or a degraded one, dispatch runs in-process
       // exactly as before. Either way the result flows through the
       // cross-cutting notices — worktree-index mismatch (#155) and per-file
       // staleness (#403) — which need the watched MAIN instance and so are
@@ -2227,8 +2225,12 @@ export class ToolHandler {
       // structured-clone boundary into a worker, where a closure or a handler
       // field could not follow.
       const dispatchArgs = this.withSessionView(toolName, args, sessionState);
-      const raw = (this.queryPool && this.queryPool.healthy && this.queryPool.ready)
-        ? await this.queryPool.run(toolName, dispatchArgs)
+      // The default may have appeared after the workers started. Pass the
+      // main thread's current root explicitly; with no root or projectPath,
+      // keep the main handler's workspace-specific not-indexed guidance.
+      const projectPath = args.projectPath ?? this.cg?.getProjectRoot();
+      const raw = (projectPath && this.queryPool && this.queryPool.healthy && this.queryPool.ready)
+        ? await this.queryPool.run(toolName, { ...dispatchArgs, projectPath })
         : await this.executeReadTool(toolName, dispatchArgs);
       // Record + STRIP before anything else touches the result: the emission is
       // internal bookkeeping and must never reach the client, whether or not a
