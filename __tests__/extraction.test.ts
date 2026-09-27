@@ -5060,6 +5060,121 @@ import 'package:flutter/material.dart';
       expect(importNode?.name).toBe('price');
     });
 
+    /* Inside a {% liquid %} tag, each body line is a tag with no braces of
+       its own. Patterns anchored on `{%` miss these references. */
+    it('should extract render inside a {% liquid %} block', () => {
+      const code = [
+        '{% liquid',
+        '  assign heading = section.settings.title',
+        "  render 'card', title: heading",
+        '%}',
+      ].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const names = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(names).toContain('card');
+    });
+
+    it('should extract assign inside a {% liquid %} block', () => {
+      const code = ['{% liquid', '  assign heading = section.settings.title', '%}'].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const vars = result.nodes.filter((n) => n.kind === 'variable').map((n) => n.name);
+      expect(vars).toContain('heading');
+    });
+
+    it('should extract section inside a {% liquid %} block', () => {
+      const code = ['{% liquid', "  section 'header'", '%}'].join('\n');
+      const result = extractFromSource('layout/theme.liquid', code);
+
+      const names = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(names).toContain('header');
+    });
+
+    it('should report the real line number for a tag inside a {% liquid %} block', () => {
+      const code = ['<div>', '{% liquid', '  assign x = 1', "  render 'card'", '%}'].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const card = result.nodes.find((n) => n.kind === 'import' && n.name === 'card');
+      expect(card?.startLine).toBe(4);
+    });
+
+    it('should not count a tag twice when both spellings appear', () => {
+      const code = ["{% render 'card' %}", '{% liquid', "  render 'card'", '%}'].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const cards = result.nodes.filter((n) => n.kind === 'import' && n.name === 'card');
+      expect(cards.length).toBe(2);
+      expect(new Set(cards.map((n) => n.startLine)).size).toBe(2);
+    });
+
+    it('should not read a bare `render` outside a {% liquid %} block as a tag', () => {
+      // Prose and filters mentioning the word must not become references.
+      const code = ['<p>We render the card below.</p>', "{{ product | render_as: 'card' }}"].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const names = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(names).not.toContain('card');
+    });
+
+    it('should handle whitespace control on the {% liquid %} tag itself', () => {
+      const code = ['{%- liquid', "  render 'card'", '-%}'].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+
+      const names = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(names).toContain('card');
+    });
+
+    it('does not scan tag-like strings or inline comments twice', () => {
+      const code = [
+        `{% assign example = "{% render 'ghost'" %}`,
+        `{% # {% render 'ghost' %}`,
+        '{% liquid', `  assign example = "{% include 'ghost'"`,
+        "  # section 'ghost'", "  echo 'render ghost'", '%}',
+        "{% liquid render 'live' %}", "{% liquid include 'after' %}",
+      ].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+      expect(result.nodes.filter((n) => n.kind === 'import').map((n) => [n.name, n.startLine, n.startColumn]))
+        .toEqual([['live', 8, 10], ['after', 9, 10]]);
+      expect(result.unresolvedReferences.map((r) => r.referenceName))
+        .toEqual(['snippets/live.liquid', 'snippets/after.liquid']);
+    });
+
+    it.each(['\n', '\r\n'])('preserves Liquid block positions with %j line endings', (newline) => {
+      const code = [
+        '<div>', '{%- liquid', "  assign heading = 'x'", "\tinclude 'legacy'",
+        "  render 'card'", "  section 'footer'", '-%}', "  {% render 'after' %}",
+      ].join(newline);
+      const result = extractFromSource('sections/featured.liquid', code);
+      expect(result.nodes.filter((n) => n.kind === 'variable' || n.kind === 'import')
+        .map((n) => [n.name, n.startLine, n.startColumn, n.endColumn]).sort())
+        .toEqual([
+          ['after', 8, 2, 19], ['card', 5, 2, 15], ['footer', 6, 2, 18],
+          ['heading', 3, 2, 18], ['legacy', 4, 1, 17],
+        ]);
+      expect(result.unresolvedReferences.map((r) => [r.referenceName, r.line, r.column]).sort())
+        .toEqual([
+          ['sections/footer.liquid', 6, 2], ['snippets/after.liquid', 8, 2],
+          ['snippets/card.liquid', 5, 2], ['snippets/legacy.liquid', 4, 1],
+        ]);
+    });
+
+    it.each(['comment', 'raw'])('ignores %s regions in both tag spellings', (tag) => {
+      const code = [
+        `{%- ${tag} -%}`, "{% render 'ghost' %}", "{% include 'ghost' %}",
+        "{% section 'ghost' %}", '{% assign ghost = 1 %}',
+        '{% liquid', "  render 'ghost'", '%}', `{%- end${tag} -%}`,
+        '{% liquid', `  ${tag}`, "  render 'ghost'", "  include 'ghost'",
+        "  section 'ghost'", '  assign ghost = 1', `  end${tag}`,
+        "  # render 'ghost'", "  render 'live'", '%}', "{% include 'after' %}",
+      ].join('\n');
+      const result = extractFromSource('sections/featured.liquid', code);
+      expect(result.nodes.filter((n) => n.kind !== 'file').map((n) => n.name))
+        .toEqual(['live', 'live', 'after', 'after']);
+      expect(result.unresolvedReferences.map((r) => [r.referenceName, r.line]))
+        .toEqual([['snippets/live.liquid', 18], ['snippets/after.liquid', 20]]);
+    });
+
     it('should extract multiple imports', () => {
       const code = `
 {% section 'header' %}
@@ -7036,6 +7151,29 @@ describe('Liquid Shopify JSON template section resolution', () => {
   afterEach(() => {
     if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('resolves Liquid block snippets and sections without linking commented references', async () => {
+    for (const dir of ['sections', 'snippets', 'layout']) fs.mkdirSync(path.join(tempDir, dir));
+    for (const file of ['snippets/card.liquid', 'snippets/legacy.liquid', 'snippets/ghost.liquid', 'sections/footer.liquid']) {
+      fs.writeFileSync(path.join(tempDir, file), '<div>content</div>');
+    }
+    fs.writeFileSync(path.join(tempDir, 'layout/theme.liquid'), [
+      '{% liquid', "  assign heading = 'x'", "  render 'card'", "  include 'legacy'",
+      "  section 'footer'", '  comment', "  render 'ghost'", '  endcomment', '%}',
+      '{% raw %}', "{% render 'ghost' %}", '{% endraw %}',
+    ].join('\n'));
+    cg = CodeGraph.initSync(tempDir);
+    await cg.indexAll();
+    cg.resolveReferences();
+
+    for (const name of ['card', 'legacy', 'footer', 'ghost']) {
+      const file = cg.getNodesByKind('file').find((n) => n.name === `${name}.liquid`)!;
+      expect(file).toBeDefined();
+      expect(cg.getFileDependents(file.filePath).some((p) => p.endsWith('layout/theme.liquid')))
+        .toBe(name !== 'ghost');
+    }
+    expect(cg.getNodesByKind('variable').some((n) => n.name === 'heading')).toBe(true);
   });
 
   it('links a Shopify JSON template section `type` to its sections/<type>.liquid', async () => {
