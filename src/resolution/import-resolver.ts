@@ -1725,6 +1725,13 @@ export function resolveViaImport(
             // constant edge below rather than fabricating a wrong one.
             const instanceMember = resolveImportedInstanceMember(targetNode, ref, imp.localName, context);
             if (instanceMember) return instanceMember;
+
+            // Finding a named Python import proves the receiver exists, not
+            // its requested attribute. In particular, task.delay() enqueues
+            // work; it does not call the imported task function directly.
+            // Keep unknown members unresolved (including callback values)
+            // instead of falling back to the receiver as their target.
+            if (ref.language === 'python') return null;
           }
 
           return {

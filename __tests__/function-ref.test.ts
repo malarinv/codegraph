@@ -1085,6 +1085,56 @@ def static(pool):
     } finally { cg.close(); }
   });
 
+  it.each(['tasks', '.tasks'])('Python imported members do not fall back to their receiver (%s)', async (module) => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-import-members-'));
+    fs.writeFileSync(path.join(tmpDir, 'tasks.py'), `from celery import shared_task
+@shared_task
+def send_welcome(item_id):
+    return item_id
+class Store:
+    @staticmethod
+    def fetch():
+        return 1
+settings = None
+`);
+    fs.writeFileSync(path.join(tmpDir, 'main.py'), `from ${module} import send_welcome as welcome, Store as Actual, settings
+def direct():
+    welcome(1)
+def callback(pool):
+    pool.submit(welcome, 1)
+def enqueue():
+    welcome.delay(1)
+    welcome.apply_async(args=[1])
+def member_values(pool):
+    pool.submit(welcome.delay, 1)
+    cb = welcome.custom_attribute
+    return [welcome.apply_async]
+def missing_members():
+    Actual.missing()
+    settings.missing()
+def known_member():
+    Actual.fetch()
+def known_callback(pool):
+    pool.submit(Actual.fetch)
+def construct():
+    return Actual()
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const task = cg.getNodesByName('send_welcome').find(n => n.kind === 'function')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(task.id).filter(e => e.kind === 'calls'))).toEqual(['direct']);
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'send_welcome'))).toEqual(['callback']);
+      const missing = cg.getNodesByName('missing_members')[0]!;
+      expect(cg.getOutgoingEdges(missing.id).filter(e => e.kind === 'calls' || e.kind === 'instantiates')).toEqual([]);
+      const fetch = cg.getNodesByName('fetch').find(n => n.kind === 'method')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(fetch.id).filter(e => e.kind === 'calls'))).toEqual(['known_member']);
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'fetch'))).toEqual(['known_callback']);
+      const store = cg.getNodesByName('Store').find(n => n.kind === 'class')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(store.id).filter(e => e.kind === 'instantiates'))).toEqual(['construct']);
+    } finally { cg.close(); }
+  });
+
   it('#1820: same-file ambiguity and noncallable receivers stay unlinked', async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-ambiguity-'));
     fs.writeFileSync(path.join(tmpDir, 'main.py'), `class A:
