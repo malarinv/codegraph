@@ -224,6 +224,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A shared daemon now closes connections that are still mid-handshake when it stops, a peer that disconnects mid-handshake no longer leaves a phantom client that blocks idle exit, and a fallback that finds another process holding the writer lock serves reads instead of refusing. Thanks @bompus and @inth3shadows for the reports and @danusha2345. (#1963, #1356)
 - A query worker whose database open fails is now retired and replaced instead of answering every routed call with an error. Thanks @inth3shadows. (#1357)
 - Very large watchdog or startup-handshake timeouts are now capped at the largest delay a timer can hold, so they no longer fire after about 1 ms. Thanks @inth3shadows. (#1966)
+- `codegraph index` now coordinates with a running MCP daemon — it stops the daemon cleanly (refusing rather than guessing if it cannot verify it stopped) and then rebuilds — so it no longer fails with "database file is in use" on Windows, and MCP calls made during the rebuild are told to retry. Thanks @bithy0825 for the report and @hbui290. (#1325)
+- The local MCP proxy now arms the same liveness watchdog as the other launch modes, so a wedged proxy exits instead of lingering and piling up across client restarts on Windows. Thanks @Neurotoxin0 for the report and @snvtac. (#943)
+- On Windows, simply reading a file no longer shows up as a pending edit: watcher events whose file still has the indexed size and modification time (NTFS access-time notifications) are ignored. Thanks @radeilic for the report and @JJordan0C. (#1451)
+- The Windows bundle now includes an extensionless `codegraph` launcher, so Git Bash — and the Claude Code prompt hook that runs through it — can find `codegraph` instead of failing with exit code 127. Thanks @Dj-Khalle. (#1278)
+- Running `install.sh` from Git Bash, MSYS or Cygwin on Windows now prints the PowerShell install command instead of failing with "unsupported OS". Thanks @Dnllns. (#1294)
 
 #### Screens, links and navigation
 
