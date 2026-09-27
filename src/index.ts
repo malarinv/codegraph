@@ -47,6 +47,7 @@ import {
   createResolver,
   ResolutionResult,
 } from './resolution';
+import { hasSynthesisPattern } from './resolution/callback-synthesizer';
 import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
@@ -839,7 +840,20 @@ export class CodeGraph {
         const fullReconcile = !options.paths || options.paths.length === 0;
         const gitState = this.orchestrator.beginGitIndexState(fullReconcile);
 
-        const result = await this.orchestrator.sync(options.onProgress, options.paths, backpressure);
+        // An interrupted index may have absorbed its changed files before
+        // resolution/synthesis. Detect those orphans BEFORE this sync adds refs.
+        let refreshSynthesis = this.queries.getMetadata('synthesis_pending') === '1' ||
+          this.queries.getUnresolvedReferencesCount() > 0;
+        if (refreshSynthesis) this.queries.setMetadata('synthesis_pending', '1');
+        const result = await this.orchestrator.sync(options.onProgress, options.paths, backpressure,
+          (filePath, content) => {
+            if (!refreshSynthesis && (this.queries.hasSynthesizedEdgesTouchingFile(filePath) ||
+              this.queries.wasSynthesisInput(filePath) ||
+              (content !== undefined && hasSynthesisPattern(filePath, content)))) {
+              refreshSynthesis = true;
+              this.queries.setMetadata('synthesis_pending', '1');
+            }
+          });
 
         // Fold the store phase's WAL BEFORE the post-store reads below
         // (resolution reads on the main thread) — same rationale as
@@ -938,7 +952,8 @@ export class CodeGraph {
                   total: totalPasses,
                 });
               },
-              backpressure
+              backpressure,
+              false
             );
           }
         }
@@ -1008,7 +1023,8 @@ export class CodeGraph {
                 total: totalPasses,
               });
             },
-            backpressure
+            backpressure,
+            false
           );
           result.pendingRefsProcessed = recovery.stats.total;
           result.pendingRefsResolved = recovery.stats.resolved;
@@ -1025,9 +1041,16 @@ export class CodeGraph {
           await this.resolver.resolveDeferredThisMemberRefs();
         }
 
+        if (refreshSynthesis) {
+          await this.resolver.refreshSynthesis(this.db.getPath(), (done, total) => {
+            options.onProgress?.({ phase: 'linking', current: done, total });
+          }, backpressure);
+          this.queries.setMetadata('synthesis_pending', '0');
+        }
+
         // Refresh planner stats + checkpoint the WAL after bulk writes.
         // Off-thread — see indexAll's call site.
-        if (filesChanged || result.filesRemoved > 0 || orphanCount > 0) {
+        if (filesChanged || result.filesRemoved > 0 || orphanCount > 0 || refreshSynthesis) {
           await this.db.runMaintenance();
         }
 
@@ -1295,7 +1318,8 @@ export class CodeGraph {
     // resolution is timer-driven passive checkpoints, which the pool's
     // continuous reads keep perpetually partial — the WAL then accretes the
     // whole phase's write volume (22GB on a 4.6GB DB at kernel scale).
-    backpressure?: () => Promise<void> | null
+    backpressure?: () => Promise<void> | null,
+    synthesize: boolean = true
   ): Promise<ResolutionResult> {
     return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress, {
       dbPath: this.db.getPath(),
@@ -1313,7 +1337,7 @@ export class CodeGraph {
         end: () => this.db.endBulkRefLoad(),
       },
       backpressure,
-    });
+    }, synthesize);
   }
 
   /**

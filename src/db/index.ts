@@ -361,6 +361,7 @@ export class DatabaseConnection {
     'idx_edges_source_kind',
     'idx_edges_target_kind',
     'idx_edges_provenance',
+    'idx_edges_synthesis_site',
   ] as const;
 
   /**

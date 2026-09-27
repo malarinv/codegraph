@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Language, Node, UnresolvedReference, Edge } from '../types';
 import { QueryBuilder } from '../db/queries';
+import { SynthesisStage } from '../db/synthesis-stage';
 import {
   UnresolvedRef,
   ResolvedRef,
@@ -1683,7 +1684,8 @@ export class ReferenceResolver {
        *  each per-batch DELETE's B-tree work (DatabaseConnection.beginBulkRefLoad). */
       refIndexLoad?: { begin: () => void; end: () => void | Promise<void> };
       backpressure?: () => Promise<void> | null;
-    }
+    },
+    synthesize: boolean = true
   ): Promise<ResolutionResult> {
     // Resolution runs on the indexer's MAIN thread, and the #850 liveness
     // watchdog SIGKILLs a process whose event loop stalls past its window (60s
@@ -2105,7 +2107,7 @@ export class ReferenceResolver {
     // loop. See docs/design/callback-edge-synthesis.md.
     const tSynth = Date.now();
     try {
-      aggregateStats.byMethod['callback-synthesis'] = await synthesizeCallbackEdges(
+      if (synthesize) aggregateStats.byMethod['callback-synthesis'] = await synthesizeCallbackEdges(
         this.queries,
         this.context,
         onSynthesisProgress,
@@ -2131,6 +2133,25 @@ export class ReferenceResolver {
       unresolved: [],
       stats: aggregateStats,
     };
+  }
+
+  /** Replace synthesis only after every base-resolution pass has finished. */
+  async refreshSynthesis(
+    dbPath: string,
+    onProgress?: (done: number, total: number) => void,
+    backpressure?: () => Promise<void> | null
+  ): Promise<number> {
+    this.clearCaches();
+    const stage = new SynthesisStage(dbPath);
+    try {
+      const fresh = new ReferenceResolver(this.projectRoot, stage.queries);
+      const count = await synthesizeCallbackEdges(stage.queries, fresh.context, onProgress, null, backpressure);
+      await stage.publish(backpressure);
+      return count;
+    } finally {
+      stage.close();
+      this.clearCaches();
+    }
   }
 
   /**

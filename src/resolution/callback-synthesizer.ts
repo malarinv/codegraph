@@ -35,7 +35,7 @@ import { tanstackLinkEdges } from './tanstack-router-synthesizer';
 import { vueRouterLinkEdges } from './vue-router-synthesizer';
 import { svelteKitLinkEdges, svelteKitPageComponentEdges } from './sveltekit-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
-import { crossTierEdges } from './tier-synthesizer';
+import { crossTierEdges, hasCrossTierPattern } from './tier-synthesizer';
 import { enclosingFn, makeLineAt } from './synth-utils';
 import { resolveImportPath } from './import-resolver';
 import { crossesCodeBoundary } from './name-matcher';
@@ -889,9 +889,10 @@ async function goImplementsEdges(queries: QueryBuilder, onYield: MaybeYield): Pr
  *
  * Go guarantees a method's receiver type is declared in the SAME PACKAGE as the
  * method, and a Go package is a single directory — so this is a deterministic
- * structural link, not a heuristic: find the same-named type in the method's own
- * directory and add the missing `contains` edge (no `provenance: 'heuristic'`,
- * matching the same-file edges extraction already emits). Skips methods that
+ * structural link, not a heuristic: find the same-named type in the method's
+ * own directory and add the missing `contains` edge with no provenance, matching
+ * same-file extraction. Tag synthesis ownership so an incremental
+ * refresh can replace it alongside implicit `implements`. Skips methods that
  * already have a type parent (the same-file case). (#583, cross-file half)
  */
 async function goCrossFileMethodContainsEdges(queries: QueryBuilder, onYield: MaybeYield): Promise<Edge[]> {
@@ -940,7 +941,8 @@ async function goCrossFileMethodContainsEdges(queries: QueryBuilder, onYield: Ma
     const key = `${owner.id}>${method.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    edges.push({ source: owner.id, target: method.id, kind: 'contains', line: method.startLine });
+    edges.push({ source: owner.id, target: method.id, kind: 'contains', line: method.startLine,
+      metadata: { synthesizedBy: 'go-method-contains' } });
   }
   return edges;
 }
@@ -3608,6 +3610,36 @@ export interface SynthPassDef {
 
 const ALWAYS = (): boolean => true;
 
+/** Conservative input gates for SYNTH_PASSES; keep these in sync when adding a pass. */
+export function hasSynthesisPattern(filePath: string, content: string): boolean {
+  // These passes consume declarations/layouts as well as dispatch sites. A
+  // header or markup edit can change a channel whose endpoints live elsewhere.
+  if (/\.(?:vue|svelte|dfm|fmx|nix|xml)$/.test(filePath)) return true;
+  if (/\.(?:c|h|cc|cpp|cxx|hpp|hh|hxx|cppm|ipp|inl|tcc|def|inc|tbl)$/i.test(filePath) &&
+    /\b(?:struct|union|typedef|virtual|override)\b|#\s*(?:include|define|if)|=|->|\[/.test(content)) return true;
+  if (/\b(?:class|interface|protocol|trait|impl|extends|implements|expect|actual)\b/.test(content)) return true;
+  if (/\.go$/.test(filePath) && /\b(?:struct|interface)\b|\bfunc\s*\(/.test(content)) return true;
+  if (hasCrossTierPattern(content)) return true;
+  if (/\b(?:render|build|setState|defineStore|createStore|createApi|Store|href|sendEvent|sendEventWithName)\b|<\/|\/>/.test(content)) return true;
+  if (/\.(?:forEach|append|add|push|insert|fire|dispatchEvent|addListener|Use|GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any|Handle)\s*\(/.test(content)) return true;
+  if (/[\w$]\s*\[\s*[A-Za-z_$]/.test(content) || /\b(?:dispatch|commit)\s*\(/.test(content)) return true;
+  const patterns = [THUNK_DECL_RE, CELERY_TASK_DECORATOR_RE, CELERY_DISPATCH_RE,
+    SPRING_LISTENER_ANNO_RE, SPRING_APP_LISTENER_RE, SPRING_PUBLISH_RE,
+    MEDIATR_HANDLER_BASE_RE, MEDIATR_DISPATCH_RE, SIDEKIQ_WORKER_RE, SIDEKIQ_DISPATCH_RE,
+    ERLANG_CALLBACK_DECL_RE, ERLANG_DISPATCH_RE, LARAVEL_DISPATCH_RE, ARKUI_EMITTER_CALL_RE,
+    ARKUI_ROUTER_RE];
+  for (const re of patterns) {
+    re.lastIndex = 0;
+    const matches = re.test(content);
+    re.lastIndex = 0;
+    if (matches) return true;
+  }
+  // Field-backed observers use method-name gates rather than fixed call names.
+  return (content.match(/[A-Za-z_$][\w$]*/g) ?? []).some(
+    (name) => REGISTRAR_NAME.test(name) || DISPATCHER_NAME.test(name)
+  );
+}
+
 /**
  * The independent passes, in MERGE ORDER — the first-seen dedup in
  * synthesizeCallbackEdges follows this array, so reordering entries changes
@@ -3883,6 +3915,15 @@ export async function synthesizeCallbackEdges(
     await yieldToLoop();
     await foldIfOver();
   }
+  // Remember source gates, including inputs that currently produce NO edges
+  // (e.g. an over-cap channel). Deleting one may make the full pass viable.
+  const inputs: string[] = [];
+  for (const file of ctx.getAllFiles()) {
+    const content = ctx.readFile(file);
+    if (content !== null && hasSynthesisPattern(file, content)) inputs.push(file);
+    await yieldToLoop();
+  }
+  queries.replaceSynthesisInputs(inputs);
   __mark('insertMergedEdges');
   return merged.length + goImpl.length + goMethodContains.length;
 }
