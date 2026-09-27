@@ -8270,6 +8270,117 @@ describe('Nested non-submodule git repos', () => {
     expect(scope.ignores('pkg/build/')).toBe(true);
     expect(scope.ignores('pkg/build/out.ts')).toBe(true);
   });
+
+  it.each(['filesystem', 'untracked', 'tracked'])(
+    'keeps Java packages named build while excluding build output (%s, #1642)',
+    async (mode) => {
+      const sources = ['', 'module/'].flatMap((prefix) => ['main', 'test'].flatMap((sourceSet) => [
+        `${prefix}src/${sourceSet}/java/com/acme/build/RealtimePlusService.java`,
+        `${prefix}src/${sourceSet}/java/build/nested/build/Example.java`,
+      ]).concat([
+        `${prefix}src/androidTest/java/com/acme/build/DeviceProbe.java`,
+        `${prefix}src/main/kotlin/com/acme/build/KotlinProbe.kt`,
+        `${prefix}src/test/scala/com/acme/build/ScalaProbe.scala`,
+      ]));
+      const ignored = [
+        'build/generated/Generated.java',
+        'module/build/generated/Generated.java',
+        'build/src/main/java/com/build/Generated.java',
+        'module/build/src/test/java/build/Generated.java',
+        'src/main/resources/build/Generated.java',
+        'node_modules/pkg/src/main/java/com/build/Generated.java',
+        'target/src/test/java/com/build/Generated.java',
+        ...['src/main/java/com/build/', 'module/src/test/java/build/'].flatMap((prefix) => [
+          `${prefix}node_modules/pkg/a.js`,
+          `${prefix}target/A.java`,
+          `${prefix}target/build/A.java`,
+          `${prefix}dist/A.java`,
+          `${prefix}vendor/A.java`,
+          `${prefix}cmake-build-debug/A.java`,
+          `${prefix}res/layout/A.xml`,
+        ]),
+      ];
+      for (const rel of [...sources, ...ignored]) {
+        const abs = path.join(tempDir, rel);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, 'class Example {}\n');
+      }
+      if (mode !== 'filesystem') {
+        execFileSync('git', ['init', '-q'], { cwd: tempDir });
+        if (mode === 'tracked') execFileSync('git', ['add', '-f', '.'], { cwd: tempDir });
+      }
+
+      const defaults = buildDefaultIgnore(tempDir);
+      const scope = buildScopeIgnore(tempDir);
+      const files = scanDirectory(tempDir);
+      expect(await scanDirectoryAsync(tempDir)).toEqual(files);
+      for (const rel of sources) {
+        expect(defaults.ignores(rel), rel).toBe(false);
+        expect(scope.ignores(rel), rel).toBe(false);
+        // The watcher and filesystem walker must be able to reach each file.
+        const parts = rel.split('/');
+        for (let i = 1; i < parts.length; i++) {
+          expect(scope.ignores(parts.slice(0, i).join('/') + '/'), rel).toBe(false);
+        }
+        expect(files).toContain(rel);
+      }
+      for (const rel of ignored) {
+        expect(defaults.ignores(rel), rel).toBe(true);
+        expect(scope.ignores(rel), rel).toBe(true);
+        expect(files).not.toContain(rel);
+      }
+    },
+  );
+
+  it.each(['.gitignore', 'codegraph.json', 'src/main/java/.gitignore'])(
+    'lets explicit %s rules exclude a Java package named build (#1642)',
+    (ignoreFile) => {
+      const sourceFile = 'src/main/java/com/acme/build/Hidden.java';
+      const abs = path.join(tempDir, sourceFile);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, 'class Hidden {}\n');
+      execFileSync('git', ['init', '-q'], { cwd: tempDir });
+      fs.writeFileSync(path.join(tempDir, ignoreFile), ignoreFile === 'codegraph.json'
+        ? JSON.stringify({ exclude: ['src/main/java/**/build/'] })
+        : 'build/\n');
+
+      expect(buildScopeIgnore(tempDir).ignores(sourceFile)).toBe(true);
+      expect(scanDirectory(tempDir)).not.toContain(sourceFile);
+    },
+  );
+
+  it('retrieves and syncs indexed Java packages named build (#1642)', async () => {
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const sourceFile = 'src/main/java/com/ctrip/panda/es/build/RealtimePlusService.java';
+    const ignoredFile = 'src/main/java/com/ctrip/panda/es/build/target/Generated.java';
+    for (const rel of [sourceFile, ignoredFile]) {
+      fs.mkdirSync(path.dirname(path.join(tempDir, rel)), { recursive: true });
+    }
+    const source = 'package com.ctrip.panda.es.build;\npublic class RealtimePlusService { public int run() { return 1; } }\n';
+    fs.writeFileSync(path.join(tempDir, sourceFile), source);
+    fs.writeFileSync(path.join(tempDir, ignoredFile), 'public class Generated {}\n');
+    const cg = CodeGraph.initSync(tempDir);
+    try {
+      expect((await cg.indexAll()).filesIndexed).toBe(1);
+      expect(cg.getNodesInFile(sourceFile).some((node) => node.name === 'RealtimePlusService')).toBe(true);
+      const result = await new ToolHandler(cg).execute('codegraph_explore', { query: 'RealtimePlusService' });
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0]!.text).toContain('public class RealtimePlusService');
+
+      fs.writeFileSync(path.join(tempDir, sourceFile), source.replace('run()', 'updatedRun()'));
+      await cg.sync({ paths: [sourceFile, ignoredFile] });
+      expect(cg.getNodesInFile(sourceFile).some((node) => node.name === 'updatedRun')).toBe(true);
+      expect(cg.getNodesInFile(ignoredFile)).toEqual([]);
+
+      const addedFile = 'src/test/java/com/build/ServiceTest.java';
+      fs.mkdirSync(path.dirname(path.join(tempDir, addedFile)), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, addedFile), 'package com.build; public class ServiceTest {}\n');
+      expect((await cg.sync()).filesAdded).toBe(1);
+      expect(cg.getNodesInFile(addedFile).some((node) => node.name === 'ServiceTest')).toBe(true);
+    } finally {
+      cg.close();
+    }
+  });
 });
 
 // =============================================================================
