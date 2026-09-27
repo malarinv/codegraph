@@ -95,6 +95,33 @@ describe.skipIf(!kernelBuilt)('kernel C/C++ extraction parity', () => {
     expect(viaWasm.nodes.length).toBeGreaterThanOrEqual(minNodes);
   }
 
+  it.each(['c', 'cpp'] as const)('single-argument function macros and negative controls: %s (#1373)', (language) => {
+    const source = [
+      '#define NATIVE_FN(name) int name(void)',
+      'NATIVE_FN(get_version) { return helper(); }',
+      'int use_it(void) { return get_version(); }',
+      '#define FN(name) int name(void)',
+      'FN(short_macro) { return 0; }',
+      '#define POINTER_FN(name) const char *name(void)',
+      'POINTER_FN(get_text) { return 0; }',
+      '#define TEST_CASE(name) int test_ ## name(void)',
+      'TEST_CASE(candidate) { return 0; }',
+      '#define REGISTER_FN(name) register_test(name)',
+      'REGISTER_FN(registration) { return 0; }',
+      'int (parenthesized)(void) { return 1; }',
+      '',
+    ].join('\n');
+    assertParity(`fixtures/macros.${language}`, source, language);
+    assertParity(`fixtures/macros-crlf.${language}`, source.replace(/\n/g, '\r\n'), language);
+    const result = tryKernelExtract(`fixtures/macros.${language}`, source, language)!;
+    const names = result.nodes.filter((n) => n.kind === 'function').map((n) => n.name);
+    expect(names).toContain('get_version');
+    expect(names).toContain('get_text');
+    expect(names).toContain('short_macro');
+    expect(names).not.toContain('candidate');
+    expect(names).not.toContain('registration');
+  });
+
   it('torture fixture (c): fn-ptr tables, typedefs, file-scope consts, value-refs', () => {
     const file = path.join(FIXTURE_DIR, 'torture.c');
     assertParity('fixtures/torture.c', fs.readFileSync(file, 'utf8'), 'c');

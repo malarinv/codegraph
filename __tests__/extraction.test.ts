@@ -4001,6 +4001,52 @@ enum class EDenseMode : uint8
     });
   });
 
+  describe('C/C++ single-argument function macros (#1373)', () => {
+    it.each(['c', 'cpp'] as const)('recovers single-argument function macros in %s (#1373)', (language) => {
+      const code = '#define NATIVE_FN(name) int name(void)\n'
+        + 'NATIVE_FN(get_version) { return helper(); }\n'
+        + 'int use_it(void) { return get_version(); }\n';
+      const result = extractFromSource(`main.${language}`, code, language);
+      const functions = result.nodes.filter((n) => n.kind === 'function');
+      expect(functions.map((n) => n.name)).toEqual(['get_version', 'use_it']);
+      expect(functions[0]).toMatchObject({ qualifiedName: 'get_version', startLine: 2, endLine: 2, startColumn: 0 });
+      expect(result.unresolvedReferences).toEqual(expect.arrayContaining([
+        expect.objectContaining({ fromNodeId: functions[0].id, referenceName: 'helper', referenceKind: 'calls' }),
+        expect.objectContaining({ fromNodeId: functions[1].id, referenceName: 'get_version', referenceKind: 'calls' }),
+      ]));
+    });
+
+    it.each(['c', 'cpp'] as const)('does not guess single-argument macro names in %s (#1373)', (language) => {
+      for (const prefix of [
+        '',
+        '// #define NATIVE_FN(name) int name(void)\n',
+        '#define NATIVE_FN(name) int fixed(name)\n',
+        '#define NATIVE_FN(name) int test_ ## name(void)\n',
+        '#define NATIVE_FN(name) register_test(name)\n',
+        '#define NATIVE_FN(name) typedef int name(void)\n',
+        '#define NATIVE_FN(name) int name(void)\n#define NATIVE_FN int\n',
+        '#define NATIVE_FN(name) int name(void)\n#ifdef OTHER\n#undef NATIVE_FN\n#endif\n',
+        '#define NATIVE_FN(name) int name(void)\n#undef NATIVE_FN\n',
+        '#define NATIVE_FN(name) int name(void)\n#define NATIVE_FN(name) int fixed(name)\n',
+      ]) {
+        const result = extractFromSource(`main.${language}`, prefix + 'NATIVE_FN(candidate) { return 1; }\n', language);
+        expect(result.nodes.filter((n) => n.kind === 'function').map((n) => n.name)).not.toContain('candidate');
+      }
+      const alternate = extractFromSource(`main.${language}`, [
+        '#ifdef OTHER', '#define NATIVE_FN(name) int name(void)', '#else',
+        'NATIVE_FN(candidate) { return 1; }', '#endif', '',
+      ].join('\n'), language);
+      expect(alternate.nodes.filter((n) => n.kind === 'function').map((n) => n.name)).not.toContain('candidate');
+      const ordinary = extractFromSource(`main.${language}`, 'int (parenthesized)(void) { return 1; }\n', language);
+      expect(ordinary.nodes.find((n) => n.kind === 'function')?.name).toBe('(parenthesized)');
+      if (language === 'c') {
+        const knr = extractFromSource('knr.c', 'int old_style(arg) int arg; { return arg; }\n', 'c');
+        expect(knr.nodes.find((n) => n.kind === 'function')?.name).toBe('old_style');
+      }
+    });
+
+  });
+
   describe('CUDA extraction (#387)', () => {
     // CUDA parses with the C++ grammar. Three CUDA-only shapes misparse:
     // execution-space specifiers (`__global__ void f(…)`) shunt the real return

@@ -28,6 +28,55 @@ function findDeclaratorQualifiedId(declarator: SyntaxNode): SyntaxNode | undefin
 }
 
 /**
+ * Single-argument macros are ambiguous without their definition (#1373).
+ * Require a preceding local #define whose replacement uses its sole parameter
+ * as the function declarator; registration, token-pasting, and K&R forms stay
+ * untouched. Walk enclosing scopes, but never guess across conditional macros.
+ */
+function recoverSingleArgMacroDefinedName(node: SyntaxNode, source: string): string | undefined {
+  if (node.type !== 'function_definition') return undefined;
+  const declarator = getChildByField(node, 'declarator');
+  let macro: SyntaxNode | null = null;
+  let argument: SyntaxNode | null = null;
+  if (declarator?.type === 'parenthesized_declarator' && declarator.namedChildCount === 1) {
+    // C: NATIVE_FN is parsed as the return type, (name) as the declarator.
+    macro = getChildByField(node, 'type');
+    argument = declarator.namedChild(0);
+    if (macro?.type !== 'type_identifier' || argument?.type !== 'identifier') return undefined;
+  } else if (declarator?.type === 'function_declarator' && !getChildByField(node, 'type')) {
+    // C++: NATIVE_FN(name) is parsed as an implicit-return-type function.
+    macro = getChildByField(declarator, 'declarator');
+    const params = getChildByField(declarator, 'parameters');
+    const param = params?.namedChild(0);
+    if (macro?.type !== 'identifier' || params?.namedChildCount !== 1 ||
+        param?.type !== 'parameter_declaration' || param.namedChildCount !== 1) return undefined;
+    argument = param.namedChild(0);
+    if (argument?.type !== 'type_identifier') return undefined;
+  }
+  if (!macro || !argument) return undefined;
+  const macroName = getNodeText(macro, source);
+  for (let scope: SyntaxNode | null = node; scope; scope = scope.parent) {
+    if (scope.type === 'preproc_else' || scope.type.startsWith('preproc_elif')) return undefined;
+    for (let prev = scope.previousNamedSibling; prev; prev = prev.previousNamedSibling) {
+      if (prev.type.startsWith('preproc_if')) return undefined;
+      if (prev.type === 'preproc_call' && getChildByField(prev, 'directive')?.text === '#undef' &&
+          getChildByField(prev, 'argument')?.text.trim() === macroName) return undefined;
+      if (prev.type !== 'preproc_function_def' && prev.type !== 'preproc_def') continue;
+      if (getChildByField(prev, 'name')?.text !== macroName) continue;
+      const params = getChildByField(prev, 'parameters');
+      const param = params?.namedChild(0);
+      const value = getChildByField(prev, 'value');
+      if (params?.namedChildCount !== 1 || param?.type !== 'identifier' || !value) return undefined;
+      const replacement = getNodeText(value, source).replace(/\\\r?\n/g, ' ').trim();
+      const match = replacement.match(/^(?:[A-Za-z_][A-Za-z0-9_:]*\s+)+[*&\s]*([A-Za-z_]\w*)\s*\([^(){};#]*\)\s*$/);
+      if (!match || /\btypedef\b/.test(replacement) || match[1] !== param.text) return undefined;
+      return getNodeText(argument, source);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Recover the real function name from the macro-definition idiom
  * `MACRO_NAME(real_name, typed args…) { body }` — flash-attention's
  * `DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, …) { … }`
@@ -73,7 +122,7 @@ function recoverCppMacroDefinedName(node: SyntaxNode, source: string): string | 
 }
 
 function extractCppQualifiedMethodName(node: SyntaxNode, source: string): string | undefined {
-  const macroDefined = recoverCppMacroDefinedName(node, source);
+  const macroDefined = recoverSingleArgMacroDefinedName(node, source) ?? recoverCppMacroDefinedName(node, source);
   if (macroDefined) return macroDefined;
   const declarator = getChildByField(node, 'declarator');
   if (!declarator) return undefined;
@@ -207,6 +256,7 @@ function extractCppReturnType(node: SyntaxNode, source: string): string | undefi
 }
 
 export const cExtractor: LanguageExtractor = {
+  resolveName: recoverSingleArgMacroDefinedName,
   // CUDA in C-detected headers (content-gated blank; see preParseCSource).
   preParse: preParseCSource,
   // Universal net: recover a real name from any macro-mangled function name.

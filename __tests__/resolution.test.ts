@@ -39,6 +39,34 @@ describe('Resolution Module', () => {
     fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5 });
   });
 
+  it.each(['c', 'cpp'] as const)('connects single-argument function macros in %s (#1373)', async (language) => {
+    const file = `main.${language}`;
+    fs.writeFileSync(path.join(tempDir, file), [
+      '#define NATIVE_FN(name) int name(void)',
+      'int helper(void) { return 1; }',
+      'NATIVE_FN(get_version) { return helper(); }',
+      'int use_it(void) { return get_version(); }',
+      'int plain_func(void) { return 42; }',
+      '',
+    ].join('\n'));
+    cg = await CodeGraph.init(tempDir, { index: true });
+    const functions = cg.getNodesByKind('function');
+    const recovered = functions.find((n) => n.name === 'get_version');
+    expect(recovered).toBeDefined();
+    expect(cg.getCallers(recovered!.id).map((c) => c.node.name)).toContain('use_it');
+    expect(cg.getCallees(recovered!.id).map((c) => c.node.name)).toContain('helper');
+    const caller = functions.find((n) => n.name === 'use_it')!;
+    expect(cg.getCallees(caller.id).map((c) => c.node.id)).toContain(recovered!.id);
+    expect(functions.map((n) => n.name)).toContain('plain_func');
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const result = await new ToolHandler(cg).execute('codegraph_explore', { query: 'use_it get_version helper' });
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0]!.text!;
+    expect(text).toContain('Flow');
+    expect(text).toMatch(/use_it[^\n]*get_version[^\n]*helper/);
+
+  });
+
   describe('Name Matcher', () => {
     it('should match exact name references', () => {
       // Create a mock context
