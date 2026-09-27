@@ -220,6 +220,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Path finding no longer re-queues the same node many times through a dense fan-in hub. Thanks @inth3shadows. (#1359)
 - Everyday Portuguese/Spanish "como" and German "wie" no longer escalate a prompt to a full code search on their own. Thanks @AndreLFSMartins. (#1654)
 - The Antigravity installer now saves the permanent path of `codegraph` rather than fnm's per-shell directory, so the command keeps working after the installing shell exits. Thanks @kevocodes. (#1443)
+- A live writer's index lock is no longer treated as stale after two minutes, and the file watcher re-arms and reconciles after lock contention instead of leaving `serve --mcp` answering from a frozen index; the non-git scan fallback keeps honoring `.git/info/exclude`. Thanks @LunarWerxs for the report and @danusha2345. (#1959)
+- A shared daemon now closes connections that are still mid-handshake when it stops, a peer that disconnects mid-handshake no longer leaves a phantom client that blocks idle exit, and a fallback that finds another process holding the writer lock serves reads instead of refusing. Thanks @bompus and @inth3shadows for the reports and @danusha2345. (#1963, #1356)
+- A query worker whose database open fails is now retired and replaced instead of answering every routed call with an error. Thanks @inth3shadows. (#1357)
+- Very large watchdog or startup-handshake timeouts are now capped at the largest delay a timer can hold, so they no longer fire after about 1 ms. Thanks @inth3shadows. (#1966)
 
 #### Screens, links and navigation
 
