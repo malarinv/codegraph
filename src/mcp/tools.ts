@@ -2228,9 +2228,10 @@ export class ToolHandler {
       // The default may have appeared after the workers started. Pass the
       // main thread's current root explicitly; with no root or projectPath,
       // keep the main handler's workspace-specific not-indexed guidance.
-      const projectPath = args.projectPath ?? this.cg?.getProjectRoot();
-      const raw = (projectPath && this.queryPool && this.queryPool.healthy && this.queryPool.ready)
-        ? await this.queryPool.run(toolName, { ...dispatchArgs, projectPath })
+      const pooled = !!(this.queryPool && this.queryPool.healthy && this.queryPool.ready);
+      const projectPath = pooled ? args.projectPath ?? this.cg?.getProjectRoot() : undefined;
+      const raw = (pooled && projectPath)
+        ? await this.queryPool!.run(toolName, { ...dispatchArgs, projectPath })
         : await this.executeReadTool(toolName, dispatchArgs);
       // Record + STRIP before anything else touches the result: the emission is
       // internal bookkeeping and must never reach the client, whether or not a
