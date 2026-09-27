@@ -124,6 +124,26 @@ function nested(holder) {
     expect(result.unresolvedReferences.some((r) => r.referenceName === 'values.get')).toBe(true);
   });
 
+  describe.each([
+    ['ts', 'typescript'], ['tsx', 'tsx'], ['js', 'javascript'], ['jsx', 'jsx'],
+  ] as const)('private field receivers: %s (#1987)', (ext, language) => {
+    it.each(['LF', 'CRLF'])('preserves private fields and optional calls (%s)', (ending) => {
+      const source = `
+class Mailer { send() {} }
+class Vault {
+  #mailer = new Mailer();
+  #items = new Set();
+  notify() { this.#mailer?.send(); }
+  optional() { this.#mailer.send?.(); }
+  put() { this.#items?.add('x'); }
+}
+`;
+      const result = assertParity(`vault.${ext}`, ending === 'CRLF' ? source.replace(/\n/g, '\r\n') : source, language);
+      expect(result.unresolvedReferences.filter(r => r.referenceKind === 'calls').map(r => r.referenceName))
+        .toEqual(['this.#mailer.send', 'this.#mailer.send', 'this.#items.add']);
+    });
+  });
+
   it('torture fixture (tsx): components, stores, RTK, fn-refs, value-refs, decorators', () => {
     const file = path.join(FIXTURE_DIR, 'torture.tsx');
     assertParity('fixtures/torture.tsx', fs.readFileSync(file, 'utf8'), 'tsx');
