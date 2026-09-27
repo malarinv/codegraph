@@ -3,7 +3,7 @@ import { QueryBuilder } from './queries';
 import { createYielder } from '../resolution/cooperative-yield';
 
 // Ownership is independent of provenance: Go method containment is structural.
-export const SYNTHESIZED_EDGE = "json_extract(metadata, '$.synthesizedBy') IS NOT NULL";
+export const SYNTHESIZED_EDGE = "CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.synthesizedBy') END IS NOT NULL";
 
 /** A private edge overlay: passes see base edges plus their new Go prerequisites. */
 export class SynthesisStage {

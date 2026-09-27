@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 /**
  * Migration definition
@@ -187,9 +187,9 @@ const migrations: Migration[] = [
         CREATE TABLE IF NOT EXISTS synthesis_inputs (
           file_path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS idx_edges_synthesis_site ON edges(json_extract(metadata, '$.registeredAt'))
-          WHERE json_extract(metadata, '$.synthesizedBy') IS NOT NULL;
-        UPDATE edges SET metadata = json_set(COALESCE(metadata, '{}'), '$.synthesizedBy', 'go-method-contains')
+        CREATE INDEX IF NOT EXISTS idx_edges_synthesis_site ON edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.registeredAt') END)
+          WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.synthesizedBy') END IS NOT NULL;
+        UPDATE edges SET metadata = json_set(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.synthesizedBy', 'go-method-contains')
           WHERE kind = 'contains' AND provenance IS NULL AND EXISTS (
             SELECT 1 FROM nodes s JOIN nodes t ON t.id = edges.target
             WHERE s.id = edges.source AND s.language = 'go' AND t.language = 'go'
@@ -198,6 +198,21 @@ const migrations: Migration[] = [
           );
         INSERT OR REPLACE INTO project_metadata(key, value, updated_at)
           VALUES ('synthesis_pending', '1', 0);
+      `);
+    },
+  },
+  {
+    version: 11,
+    description: 'Guard synthesis metadata lookups against malformed JSON',
+    up: (db) => {
+      // Existing v10 indexes keep their old expression under IF NOT EXISTS.
+      // Rebuild transactionally; the guarded v10 definition also lets older
+      // databases containing malformed metadata reach this migration safely.
+      db.exec(`
+        DROP INDEX IF EXISTS idx_edges_synthesis_site;
+        CREATE INDEX idx_edges_synthesis_site
+          ON edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.registeredAt') END)
+          WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.synthesizedBy') END IS NOT NULL;
       `);
     },
   },
