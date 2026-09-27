@@ -329,6 +329,12 @@ export const SUPERTYPE_TARGET_KINDS = new Set<Node['kind']>([
   'type_alias', 'component', 'module', 'namespace',
 ]);
 
+/** Scala singleton objects are values, unlike inheritable Ruby modules. */
+export function isSupertypeTarget(node: Node): boolean {
+  return SUPERTYPE_TARGET_KINDS.has(node.kind) &&
+    !(node.language === 'scala' && node.kind === 'module');
+}
+
 /** True for the reference kinds that assert an inheritance/conformance relation. */
 export function isInheritanceRef(ref: UnresolvedRef): boolean {
   return ref.referenceKind === 'extends' || ref.referenceKind === 'implements';

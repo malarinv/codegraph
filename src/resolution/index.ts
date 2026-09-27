@@ -15,7 +15,7 @@ import {
   ResolutionContext,
   FrameworkResolver,
   ImportMapping,
-  SUPERTYPE_TARGET_KINDS,
+  isSupertypeTarget,
   isInheritanceRef,
   isImportableKind,
 } from './types';
@@ -634,7 +634,9 @@ export class ReferenceResolver {
         if (hit && hit.gen === this.supertypeGen) return hit.supers;
         const typeNodes = this.context
           .getNodesByName(typeName)
-          .filter((n) => SUPERTYPE_BEARING_KINDS.has(n.kind) && n.language === language);
+          // Scala singletons can inherit members even though they cannot be parents.
+          .filter((n) => n.language === language && (SUPERTYPE_BEARING_KINDS.has(n.kind) ||
+            (n.language === 'scala' && n.kind === 'module')));
         let supers: string[];
         if (typeNodes.length === 0) {
           supers = [];
@@ -2664,7 +2666,7 @@ export class ReferenceResolver {
 
     if (!isInheritanceRef(ref)) return result;
     const target = this.queries.getNodeById(result.targetNodeId);
-    if (target && !SUPERTYPE_TARGET_KINDS.has(target.kind)) return null;
+    if (target && !isSupertypeTarget(target)) return null;
     if (isBoundToOutOfRepoImport(ref, this.context)) return null;
     return result;
   }

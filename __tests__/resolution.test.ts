@@ -5049,6 +5049,110 @@ object Main {
     });
   });
 
+  describe('Scala companion object vs extends resolution', () => {
+    for (const parentKind of ['trait', 'class'] as const) {
+      for (const objectFirst of [true, false]) {
+        it.each([false, true])(
+          `resolves ${parentKind} companions (objectFirst=${objectFirst}, imported=%s) through every impact depth`,
+          async (imported) => {
+            const typeDef = `${parentKind} ExtAgreement {
+  def extId: String = "x"
+}
+`;
+            const objectDef = `object ExtAgreement {
+  val Kind = "agreement"
+}
+`;
+            fs.writeFileSync(path.join(tempDir, 'ExtAgreement.scala'),
+              'package contracts\n' + (objectFirst ? objectDef + typeDef : typeDef + objectDef));
+            fs.writeFileSync(path.join(tempDir, 'Audit.scala'),
+              'package contracts\nobject Audit {}\ntrait Audit { def audit(): String = "ok" }\n');
+            fs.writeFileSync(path.join(tempDir, 'MExtAgreement.scala'),
+              (imported ? 'package model\nimport contracts.ExtAgreement\nimport contracts.Audit\n' : 'package contracts\n') +
+              'class MExtAgreement extends ExtAgreement with Audit {\n  def render(): String = extId\n}\n');
+            fs.writeFileSync(path.join(tempDir, 'LeafAgreement.scala'),
+              (imported ? 'package model\n' : 'package contracts\n') +
+              'class LeafAgreement extends MExtAgreement {\n  def leaf(): String = render()\n}\n');
+            cg = await CodeGraph.init(tempDir, { index: true });
+
+            const parent = cg.getNodesByKind(parentKind).find((n) => n.name === 'ExtAgreement');
+            const companion = cg.getNodesByKind('module').find((n) => n.name === 'ExtAgreement');
+            expect(parent).toBeDefined();
+            expect(companion).toBeDefined();
+            expect(cg.getIncomingEdges(parent!.id).filter((e) => e.kind === 'extends')).toHaveLength(1);
+            for (const name of ['ExtAgreement', 'Audit']) {
+              const obj = cg.getNodesByKind('module').find((n) => n.name === name)!;
+              expect(cg.getIncomingEdges(obj.id).filter((e) => e.kind === 'extends')).toEqual([]);
+            }
+            const audit = cg.getNodesByKind('trait').find((n) => n.name === 'Audit')!;
+            expect(cg.getIncomingEdges(audit.id).filter((e) => e.kind === 'extends')).toHaveLength(1);
+
+            // Impact must traverse THROUGH the type to descendants and their methods.
+            const impactNames = [...cg.getImpactRadius(parent!.id, 5).nodes.values()].map((n) => n.name);
+            expect(impactNames).toEqual(expect.arrayContaining(['MExtAgreement', 'render', 'LeafAgreement', 'leaf']));
+          }
+        );
+      }
+    }
+
+    it.each([false, true])('rejects a sole singleton parent (imported=%s)', async (imported) => {
+      fs.writeFileSync(path.join(tempDir, 'OnlyObject.scala'),
+        'package contracts\nobject OnlyObject { def value(): Int = 1 }\n');
+      fs.writeFileSync(path.join(tempDir, 'Invalid.scala'),
+        (imported ? 'package model\nimport contracts.OnlyObject\n' : 'package contracts\n') +
+        'class Invalid extends OnlyObject {}\ntrait AlsoInvalid extends OnlyObject {}\n');
+      cg = await CodeGraph.init(tempDir, { index: true });
+      const obj = cg.getNodesByKind('module').find((n) => n.name === 'OnlyObject')!;
+      expect(obj).toBeDefined();
+      expect(cg.getIncomingEdges(obj.id).filter((e) => e.kind === 'extends' || e.kind === 'implements')).toEqual([]);
+    });
+
+    it('keeps singleton objects as inheritance sources and owners of methods', async () => {
+      fs.writeFileSync(path.join(tempDir, 'Service.scala'),
+        'trait Service { def inherited(): Int = 1 }\nobject LiveService extends Service { def run(): Int = this.inherited() }\n');
+      cg = await CodeGraph.init(tempDir, { index: true });
+      const service = cg.getNodesByKind('trait').find((n) => n.name === 'Service')!;
+      const obj = cg.getNodesByKind('module').find((n) => n.name === 'LiveService')!;
+      expect(cg.getIncomingEdges(service.id).some((e) => e.kind === 'extends' && e.source === obj.id)).toBe(true);
+      const run = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'LiveService::run')!;
+      expect(cg.getOutgoingEdges(obj.id).some((e) => e.kind === 'contains' && e.target === run.id)).toBe(true);
+      const inherited = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'Service::inherited')!;
+      expect(cg.getIncomingEdges(inherited.id).some((e) => e.kind === 'calls' && e.source === run.id)).toBe(true);
+    });
+
+    it('resolves inherited methods through a singleton receiver', async () => {
+      fs.writeFileSync(path.join(tempDir, 'Service.scala'),
+        'trait Service { def inherited(): Int = 1 }\n' +
+        'object LiveService extends Service {}\n' +
+        'object Unrelated { def inherited(): Int = 2 }\n' +
+        'object Client { def use(): Int = { val receiver = LiveService; receiver.inherited() } }\n');
+      cg = await CodeGraph.init(tempDir, { index: true });
+      const inherited = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'Service::inherited')!;
+      const use = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'Client::use')!;
+      expect(cg.getIncomingEdges(inherited.id).some((e) => e.kind === 'calls' && e.source === use.id)).toBe(true);
+    });
+
+    it('keeps object method calls anchored to their receiver', async () => {
+      fs.writeFileSync(path.join(tempDir, 'Api.scala'),
+        'class API { def send(): Int = 2 }\n' +
+        'object Api { def send(): Int = 1 }\n' +
+        'object Client { def run(): Int = Api.send() }\n');
+      cg = await CodeGraph.init(tempDir, { index: true });
+      const send = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'Api::send')!;
+      const run = cg.getNodesByKind('method').find((n) => n.qualifiedName === 'Client::run')!;
+      expect(cg.getIncomingEdges(send.id).some((e) => e.kind === 'calls' && e.source === run.id)).toBe(true);
+    });
+
+    it('preserves Ruby module inclusion', async () => {
+      fs.writeFileSync(path.join(tempDir, 'trackable.rb'),
+        'module Trackable\n  def track; end\nend\nclass Record\n  include Trackable\nend\n');
+      cg = await CodeGraph.init(tempDir, { index: true });
+      const mod = cg.getNodesByKind('module').find((n) => n.name === 'Trackable')!;
+      expect(cg.getIncomingEdges(mod.id).some((e) =>
+        (e.kind === 'extends' || e.kind === 'implements') && cg.getNode(e.source)?.name === 'Record')).toBe(true);
+    });
+  });
+
   describe('Dart chained static-factory / factory-constructor call resolution (#645/#608 mechanism)', () => {
     function callerNamesOf(qualifiedName: string): string[] {
       const target = cg.getNodesByKind('method').find((n) => n.qualifiedName === qualifiedName);

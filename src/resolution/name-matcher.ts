@@ -6,7 +6,7 @@
 
 import * as path from 'path';
 import { Language, Node } from '../types';
-import { UnresolvedRef, ResolvedRef, ResolutionContext, SUPERTYPE_TARGET_KINDS, isInheritanceRef, isImportableKind } from './types';
+import { UnresolvedRef, ResolvedRef, ResolutionContext, isSupertypeTarget, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
 
@@ -792,7 +792,7 @@ export function matchByExactName(
     // the real `trait`, and as the sole candidate was adopted outright by the
     // single-match shortcut. Restricting the pool BEFORE ranking lets the
     // legitimate supertype win instead of merely dropping the false edge.
-    .filter((n) => !isInheritanceRef(ref) || SUPERTYPE_TARGET_KINDS.has(n.kind))
+    .filter((n) => !isInheritanceRef(ref) || isSupertypeTarget(n))
     // Likewise for `imports`: a member that only exists inside a type is not
     // importable, so it is not a candidate. Without this a `path`/`id`/`url`
     // import resolved to some interface's same-named property.
@@ -2555,7 +2555,7 @@ export function matchMethodCall(
     );
 
     for (const classNode of classCandidates) {
-      if (classNode.kind === 'class' || classNode.kind === 'struct' || classNode.kind === 'union' || classNode.kind === 'interface') {
+      if (classNode.kind === 'class' || classNode.kind === 'struct' || classNode.kind === 'union' || classNode.kind === 'interface' || (classNode.language === 'scala' && classNode.kind === 'module')) {
         // Skip cross-language class matches
         if (classNode.language !== ref.language) continue;
 
@@ -2599,7 +2599,7 @@ export function matchMethodCall(
         ref.filePath,
       );
       for (const classNode of fuzzyClassCandidates) {
-        if (classNode.kind === 'class' || classNode.kind === 'struct' || classNode.kind === 'union' || classNode.kind === 'interface') {
+        if (classNode.kind === 'class' || classNode.kind === 'struct' || classNode.kind === 'union' || classNode.kind === 'interface' || (classNode.language === 'scala' && classNode.kind === 'module')) {
           // Skip cross-language class matches
           if (classNode.language !== ref.language) continue;
 

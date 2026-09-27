@@ -548,8 +548,12 @@ impl<'t> Walker<'t> {
                 self.extract_method_or_function(node);
                 return; // skipChildren
             }
-            "class_definition" | "object_definition" => {
+            "class_definition" => {
                 self.extract_class(node, "class");
+                return;
+            }
+            "object_definition" => {
+                self.extract_class(node, "module");
                 return;
             }
             "trait_definition" => {
@@ -1193,8 +1197,12 @@ impl<'t> Walker<'t> {
         // the inverse of kotlin). Body-local classes/objects/traits/enums DO
         // extract fully.
         match kind {
-            "class_definition" | "object_definition" => {
+            "class_definition" => {
                 self.extract_class(node, "class");
+                return;
+            }
+            "object_definition" => {
+                self.extract_class(node, "module");
                 return;
             }
             "trait_definition" => {

@@ -1095,6 +1095,8 @@ export class TreeSitterExtractor {
         this.extractInterface(node);
       } else if (classification === 'trait') {
         this.extractClass(node, 'trait');
+      } else if (classification === 'module') {
+        this.extractClass(node, 'module');
       } else {
         this.extractClass(node);
       }
@@ -5876,6 +5878,7 @@ export class TreeSitterExtractor {
         else if (classification === 'enum') this.extractEnum(node);
         else if (classification === 'interface') this.extractInterface(node);
         else if (classification === 'trait') this.extractClass(node, 'trait');
+        else if (classification === 'module') this.extractClass(node, 'module');
         else this.extractClass(node);
         return;
       }

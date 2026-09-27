@@ -4462,7 +4462,7 @@ class APXCharacter {  // the one real definition
 
       const scala = extractFromSource('M.scala', 'trait Marker\ncase object Red\nclass Foo\n');
       const scalaNames = scala.nodes
-        .filter((n) => ['class', 'trait', 'interface'].includes(n.kind))
+        .filter((n) => ['class', 'trait', 'interface', 'module'].includes(n.kind))
         .map((n) => n.name);
       expect(scalaNames).toEqual(expect.arrayContaining(['Marker', 'Red', 'Foo']));
     });
@@ -8681,15 +8681,27 @@ class UserService(private val repo: UserRepository) {
       expect(cls?.language).toBe('scala');
     });
 
-    it('should extract object definitions as class kind', () => {
-      const code = `
-object DatabaseConfig {
-  val url = "jdbc:postgresql://localhost/mydb"
-}
-`;
+    it.each(['\n', '\r\n'])('extracts objects as modules with method ownership (%j)', (eol) => {
+      const code = [
+        'object DatabaseConfig {',
+        '  val url = "jdbc:postgresql://localhost/mydb"',
+        '  def connect(): String = url',
+        '}',
+        'def scope(): Int = {',
+        '  object Local { def value(): Int = 1 }',
+        '  Local.value()',
+        '}',
+        'case object Empty',
+      ].join(eol);
       const result = extractFromSource('Config.scala', code);
-      const obj = result.nodes.find((n) => n.kind === 'class' && n.name === 'DatabaseConfig');
-      expect(obj).toBeDefined();
+      for (const [name, method] of [['DatabaseConfig', 'connect'], ['Local', 'value']]) {
+        const obj = result.nodes.find((n) => n.kind === 'module' && n.name === name)!;
+        const member = result.nodes.find((n) => n.kind === 'method' && n.name === method)!;
+        expect(obj).toBeDefined();
+        expect(member).toBeDefined();
+        expect(result.edges.some((e) => e.kind === 'contains' && e.source === obj.id && e.target === member.id)).toBe(true);
+      }
+      expect(result.nodes.some((n) => n.kind === 'module' && n.name === 'Empty')).toBe(true);
     });
 
     it('should extract trait definitions as trait kind', () => {

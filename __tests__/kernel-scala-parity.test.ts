@@ -104,6 +104,7 @@ describe.skipIf(!kernelBuilt)('kernel Scala extraction parity', () => {
 
   const FIXTURES = [
     ['torture.scala', 40],
+    ['ScalaCompanions.scala', 14],
     ['TortureDocs.scala', 3],
     ['TortureVref.scala', 4],
     ['TortureFnref.scala', 4],
@@ -126,6 +127,24 @@ describe.skipIf(!kernelBuilt)('kernel Scala extraction parity', () => {
       assertParity(`fixtures/${file} (crlf)`, crlf, minNodes);
     });
   }
+
+  it.each(['LF', 'CRLF'])('companion kinds and method ownership (%s)', (eol) => {
+    let source = fs.readFileSync(path.join(FIXTURE_DIR, 'ScalaCompanions.scala'), 'utf8');
+    if (eol === 'CRLF') source = source.replace(/\n/g, '\r\n');
+    const result = assertParity('ScalaCompanions.scala', source, 14);
+    for (const [owner, method] of [
+      ['ObjectFirst', 'create'], ['TraitFirst', 'factory'], ['Live', 'run'], ['Local', 'localMethod'],
+    ]) {
+      const obj = result.nodes.find((n) => n.kind === 'module' && n.name === owner)!;
+      const member = result.nodes.find((n) => n.kind === 'method' && n.name === method)!;
+      expect(obj).toBeDefined();
+      expect(member).toBeDefined();
+      expect(result.edges.some((e) => e.kind === 'contains' && e.source === obj.id && e.target === member.id)).toBe(true);
+    }
+    expect(result.nodes.some((n) => n.kind === 'class' && n.name === 'ObjectFirst')).toBe(true);
+    expect(result.nodes.some((n) => n.kind === 'trait' && n.name === 'TraitFirst')).toBe(true);
+    expect(result.nodes.some((n) => n.kind === 'module' && n.name === 'Empty')).toBe(true);
+  });
 
   it('torture pins: import first-segment names, companion pairs, value-ref edges', () => {
     const src = fs.readFileSync(path.join(FIXTURE_DIR, 'torture.scala'), 'utf8');
