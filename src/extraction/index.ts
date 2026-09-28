@@ -2235,8 +2235,11 @@ export class ExtractionOrchestrator {
       // window has room. When nothing is in flight but the window is still full,
       // the async commit chain is what's behind — await it so the cursor
       // advances (buffered items hold whole file contents, so this bound is
-      // load-bearing for memory).
-      while (nextSeq - nextToStore >= windowSize) {
+      // load-bearing for memory). Once a store has failed the cursor never
+      // moves again — flushOrdered returns at once — so stop waiting and let
+      // the drain below rethrow; waiting would spin on microtasks forever,
+      // pinning a core and starving every timer in the process.
+      while (nextSeq - nextToStore >= windowSize && !flushError && !aborted) {
         if (inFlight.size > 0) await Promise.race(inFlight);
         else await flushOrdered();
       }
@@ -2323,6 +2326,8 @@ export class ExtractionOrchestrator {
       await flushOrdered();
       if (flushError) {
         if (storeWriter) await storeWriter.close();
+        // Its worker threads would otherwise outlive the failed index.
+        if (pool) await pool.destroy();
         throw flushError;
       }
       // All bundles are posted; wait for the writer to apply them, then close
