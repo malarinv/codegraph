@@ -7,6 +7,7 @@
 import type CodeGraph from '../index';
 import type { QueryPool } from './query-pool';
 import { findNearestCodeGraphRoot, isSameIndexRoot } from '../directory';
+import { WslSharedIndexError } from '../db/wsl-shared-index';
 // Lazy-load the heavy CodeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
 // schemas), but it must NOT drag in sqlite/query layers before the daemon binds;
@@ -86,6 +87,22 @@ import {
  * malfunctions.
  */
 export class NotIndexedError extends Error {}
+
+/**
+ * The Windows/WSL shared-index failure (#995) phrased for the agent. It is an
+ * expected condition the USER fixes in their environment, so like
+ * {@link NotIndexedError} it answers SUCCESS-shaped — never `isError`, which
+ * would teach the agent to abandon codegraph for projects that work fine.
+ */
+function wslSharedIndexGuidance(err: WslSharedIndexError): string {
+  return (
+    `${err.message}\n\n` +
+    "If you are an AI agent: codegraph can't read this project's index from WSL until the user " +
+    'makes that change. Use your built-in tools (Read/Grep/Glob) for this task and pass the message ' +
+    "above on to the user — setting CODEGRAPH_DIR and building the index are the user's decisions, " +
+    "so don't do either yourself."
+  );
+}
 
 /**
  * A security refusal (sensitive system path). Stays `isError: true` WITHOUT
@@ -1593,6 +1610,10 @@ export class ToolHandler {
   // retry) — tool calls themselves never scan.
   private knownSubprojects: string[] = [];
   private knownSubprojectsBase: string | null = null;
+  // Why the default project failed to open, when that is worth telling the
+  // agent instead of "no project loaded" — today only the Windows/WSL
+  // shared-index error (#995). Engine-maintained; cleared by a successful open.
+  private defaultOpenFailure: WslSharedIndexError | null = null;
   // Per-start-path cache of the git worktree/index mismatch (issue #155). The
   // mismatch is a fixed property of (where the request came from → which
   // .codegraph/ it resolves to), so the up-to-two `git rev-parse` spawns run
@@ -1637,6 +1658,16 @@ export class ToolHandler {
    */
   setDefaultCodeGraph(cg: CodeGraph): void {
     this.cg = cg;
+    this.defaultOpenFailure = null;
+  }
+
+  /**
+   * Engine-only: record why the default project failed to open (#995), so a
+   * call that needs it answers with that fix rather than "no project loaded".
+   * `null` clears it.
+   */
+  setDefaultOpenFailure(err: WslSharedIndexError | null): void {
+    this.defaultOpenFailure = err;
   }
 
   /**
@@ -1839,6 +1870,7 @@ export class ToolHandler {
   private getCodeGraph(projectPath?: string): CodeGraph {
     if (!projectPath) {
       if (!this.cg) {
+        if (this.defaultOpenFailure) throw this.defaultOpenFailure;
         const searched = this.defaultProjectHint ?? process.cwd();
         throw new NotIndexedError(
           'No CodeGraph project is loaded for this session.\n' +
@@ -2428,6 +2460,10 @@ export class ToolHandler {
       if (err instanceof NotIndexedError || (err as Error | null)?.name === 'RebuildInProgressError') {
         return this.textResult((err as Error).message);
       }
+      // Windows and WSL sharing one index (#995): the user's fix, not a malfunction.
+      if (err instanceof WslSharedIndexError) {
+        return this.textResult(wslSharedIndexGuidance(err));
+      }
       // Security refusal: a clean error, no retry encouragement.
       if (err instanceof PathRefusalError) {
         return this.errorResult(err.message);
@@ -2513,6 +2549,9 @@ export class ToolHandler {
     } catch (err) {
       if (err instanceof NotIndexedError) {
         return this.textResult(err.message);
+      }
+      if (err instanceof WslSharedIndexError) {
+        return this.textResult(wslSharedIndexGuidance(err));
       }
       if (err instanceof PathRefusalError) {
         return this.errorResult(err.message);

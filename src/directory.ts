@@ -7,9 +7,17 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { isWslWindowsDrive } from './sync/watch-policy';
 
 /** The default per-project data directory name. */
-const DEFAULT_CODEGRAPH_DIR = '.codegraph';
+export const DEFAULT_CODEGRAPH_DIR = '.codegraph';
+
+/**
+ * The data directory name WSL gives a fresh project on a Windows drive, so it
+ * never shares one index with CodeGraph on Windows (issue #995). Indexing and
+ * watching skip every `.codegraph-*` sibling on both sides (#636).
+ */
+export const WSL_CODEGRAPH_DIR = '.codegraph-wsl';
 
 let warnedBadDirName = false;
 
@@ -80,10 +88,37 @@ export function isCodeGraphDataDir(name: string): boolean {
 }
 
 /**
+ * The data directory name for one project: {@link codeGraphDirName}, except
+ * for a project on a Windows drive under WSL (`/mnt/c/...`) with no
+ * `CODEGRAPH_DIR` set. Windows-native CodeGraph opens `.codegraph` in that
+ * same tree, and SQLite's locking doesn't hold across the 9p/DrvFs bridge, so
+ * the two sharing one index fails with "disk I/O error" (issue #995). There:
+ *
+ *   1. `.codegraph-wsl/` exists → it. Once WSL has its own index it keeps it,
+ *      even after Windows builds a `.codegraph` beside it.
+ *   2. `.codegraph/codegraph.db` exists → `.codegraph`. An index built before
+ *      this default is kept rather than silently rebuilt somewhere else.
+ *   3. neither → `.codegraph-wsl`, so a fresh WSL index never shares.
+ *
+ * Every other host keeps the plain name without a stat: the WSL check is
+ * cached per process.
+ */
+export function codeGraphDirNameFor(projectRoot: string): string {
+  if (process.env.CODEGRAPH_DIR?.trim() || !isWslWindowsDrive(projectRoot)) return codeGraphDirName();
+  try {
+    if (fs.statSync(path.join(projectRoot, WSL_CODEGRAPH_DIR)).isDirectory()) return WSL_CODEGRAPH_DIR;
+  } catch {
+    // absent — fall through
+  }
+  if (fs.existsSync(path.join(projectRoot, DEFAULT_CODEGRAPH_DIR, 'codegraph.db'))) return DEFAULT_CODEGRAPH_DIR;
+  return WSL_CODEGRAPH_DIR;
+}
+
+/**
  * Get the .codegraph directory path for a project
  */
 export function getCodeGraphDir(projectRoot: string): string {
-  return path.join(projectRoot, codeGraphDirName());
+  return path.join(projectRoot, codeGraphDirNameFor(projectRoot));
 }
 
 /**
