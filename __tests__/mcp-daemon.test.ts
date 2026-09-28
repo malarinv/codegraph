@@ -43,6 +43,7 @@ import { getDaemonSocketPath } from '../src/mcp/daemon-paths';
 import { CodeGraphPackageVersion } from '../src/mcp/version';
 import { once } from 'events';
 import { WASM_RUNTIME_FLAGS } from '../src/extraction/wasm-runtime-flags';
+import { recordSpawns, removeSpawnLog, settleLosingCandidates } from './daemon-candidates';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
@@ -53,13 +54,15 @@ interface SpawnedServer {
 }
 
 function spawnServer(cwd: string, env: NodeJS.ProcessEnv = {}, args: string[] = []): SpawnedServer {
-  const child = spawn(process.execPath, [...WASM_RUNTIME_FLAGS, BIN, 'serve', '--mcp', ...args], {
+  // Record the daemon candidates this launcher spawns, for the teardown.
+  const recorder = recordSpawns(cwd);
+  const child = spawn(process.execPath, [...WASM_RUNTIME_FLAGS, ...recorder.args, BIN, 'serve', '--mcp', ...args], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // #618: the daemon-attach log line is now off by default; opt the test
     // harness into it (CODEGRAPH_MCP_LOG_ATTACH=1) so the attach assertions
     // below can still observe a successful attach. A per-test env still wins.
-    env: { CODEGRAPH_MCP_LOG_ATTACH: '1', ...process.env, ...env },
+    env: { CODEGRAPH_MCP_LOG_ATTACH: '1', ...process.env, ...recorder.env, ...env },
   }) as ChildProcessWithoutNullStreams;
   // Swallow spawn/EPIPE errors so killing a child mid-write can't surface as an
   // unhandled error that crashes the vitest worker.
@@ -205,6 +208,10 @@ describe('Shared MCP daemon (issue #411)', () => {
       child.kill('SIGKILL');
       await exited;
     }));
+    // Racing launchers may each have spawned a daemon candidate, and a loser
+    // can still be starting on a loaded machine. Stopping the winner first
+    // would let it take over the fixture being removed (#1773).
+    await settleLosingCandidates(tempDir, () => readLockPid(realRoot));
     // The daemon is detached (not a tracked child) — reap it explicitly via the
     // pid it recorded, so a test can't leak a background daemon. Guard against
     // our own pid: the version-mismatch test plants `pid: process.pid` in the
@@ -216,14 +223,18 @@ describe('Shared MCP daemon (issue #411)', () => {
     }
     await new Promise((r) => setTimeout(r, 50));
     servers.length = 0;
+    removeSpawnLog(tempDir);
     await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  });
+  }, 45_000);
 
   it.runIf(process.platform !== 'win32')('stops despite a socket still waiting for its client hello (#1963)', async () => {
     const server = spawnServer(tempDir);
     servers.push(server);
     sendInitialize(server.child, `file://${tempDir}`, 1);
     await waitFor(() => findResponse(server.stdout, 1), 10000);
+    // The lock is written before the socket is bound; an attached proxy proves
+    // the daemon is listening (#1773).
+    await waitFor(() => server.stderr.some((l) => l.includes('Attached to shared daemon')), 10000);
     const pid = await waitFor(() => readLockPid(realRoot), 10000);
     const raw = net.connect(getDaemonSocketPath(realRoot));
     try {

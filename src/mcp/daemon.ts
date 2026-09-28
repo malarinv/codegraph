@@ -547,10 +547,21 @@ export class Daemon {
 }
 
 /**
+ * Waits between retries of the pid-file replace on Windows, doubling to a cap:
+ * eight attempts wait about 1.6s in all. Windows refuses to replace a file
+ * while any handle to it is open, so an antivirus scan, an indexer, or another
+ * session reading the lock can each hold it for a moment, and for longer on a
+ * loaded machine (#1773). The total stays well inside a launcher's ~6s connect
+ * window.
+ */
+const LOCK_REFRESH_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 400, 400];
+
+/**
  * Publish the bound socket without abandoning a live daemon on a transient
  * Windows sharing violation. Keep this startup step synchronous: accepting a
  * client before ownership is refreshed could initialize an engine too early.
- * Six attempts wait at most 375ms; permanent failures still abort startup.
+ * Retries wait per {@link LOCK_REFRESH_RETRY_DELAYS_MS}; permanent failures
+ * still abort startup.
  */
 export function refreshDaemonLock(
   pidPath: string,
@@ -571,10 +582,11 @@ export function refreshDaemonLock(
         return;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || attempt >= 5) {
+        const delay = LOCK_REFRESH_RETRY_DELAYS_MS[attempt];
+        if (platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || delay === undefined) {
           throw error;
         }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
       }
     }
   } finally {

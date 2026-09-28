@@ -50,7 +50,10 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs: number): Promis
   return check();
 }
 
-describe('MCP explicit projectPath lifecycle (#1835)', () => {
+// Every case drives real catch-up syncs and waits for them (see the gate note
+// below), so each gets room for a loaded Windows VM; cases that do more set
+// their own (#1773). These bounds only catch a hang.
+describe('MCP explicit projectPath lifecycle (#1835)', { timeout: 30_000 }, () => {
   let workspace: string;
   let serviceA: string;
   let serviceB: string;
@@ -58,7 +61,10 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
   const engines: MCPEngine[] = [];
   const children: ChildProcess[] = [];
   const prevDebounce = process.env.CODEGRAPH_WATCH_DEBOUNCE_MS;
+  const prevGate = process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
 
+  // Both hooks build indexes or wait out a sync; a loaded Windows VM exceeds
+  // the default 10s hook timeout, and has taken over 30s (#1773).
   beforeEach(async () => {
     workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-1835-')));
     serviceA = path.join(workspace, 'service-a');
@@ -66,6 +72,11 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     await makeProject(serviceA, 'alphaOriginal');
     await makeProject(serviceB, 'betaOriginal');
     process.env.CODEGRAPH_WATCH_DEBOUNCE_MS = '100';
+    // These cases assert what a call left behind, so wait for its catch-up
+    // rather than the gate's 3s serve-anyway deadline, which a loaded machine
+    // misses (#1773). That deadline has its own coverage in
+    // mcp-catchup-gate.test.ts; the eviction case sets its own values.
+    process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS = '0';
     opened.length = 0;
     onOpen = undefined;
     __setLoadCodeGraphForTests(RecordingCodeGraph as unknown as typeof CodeGraph);
@@ -73,7 +84,7 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     engines.push(engine);
     // Two indexed children, none at the root: no default project (#1607).
     await engine.ensureInitialized(workspace);
-  });
+  }, 60_000);
 
   afterEach(async () => {
     await Promise.all(engines.splice(0).map((e) => e.stop()));
@@ -88,8 +99,10 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     __setLoadCodeGraphForTests(null);
     if (prevDebounce === undefined) delete process.env.CODEGRAPH_WATCH_DEBOUNCE_MS;
     else process.env.CODEGRAPH_WATCH_DEBOUNCE_MS = prevDebounce;
+    if (prevGate === undefined) delete process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
+    else process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS = prevGate;
     fs.rmSync(workspace, { recursive: true, force: true });
-  });
+  }, 60_000);
 
   function names(root: string): string[] {
     const reader = CodeGraph.openSync(root);
@@ -97,13 +110,25 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     finally { reader.close(); }
   }
 
+  /**
+   * A daemon owner starts with idle exit OFF. Armed at startup, its 500ms
+   * timer raced this process's first connection and lost on a loaded machine,
+   * so the daemon exited before any engine reached it (#1773). A test that
+   * needs the idle exit enables it with {@link armIdleExit} once it holds a
+   * session; the daemon reads the value each time its last client leaves.
+   */
   async function startOwner(mode: 'direct' | 'daemon', slowCatchUp = false): Promise<ChildProcess> {
     const modulePath = path.resolve(__dirname, '../dist/mcp');
     const ownerScript = mode === 'daemon' ? `
       const { Daemon, tryAcquireDaemonLock } = require(process.argv[1] + '/daemon');
       const root = process.argv[2];
       tryAcquireDaemonLock(root);
-      const daemon = new Daemon(root, { idleTimeoutMs: 500 });
+      const daemon = new Daemon(root, { idleTimeoutMs: 0 });
+      process.on('message', (message) => {
+        if (message !== 'arm-idle') return;
+        daemon.idleTimeoutMs = 500;
+        process.send('idle-armed');
+      });
       daemon.start().then(() => { if (!process.env.CG_TEST_HOLD_CATCHUP) process.send('ready'); });
     ` : `
       const { MCPEngine } = require(process.argv[1] + '/engine');
@@ -140,6 +165,21 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
       child.once('exit', () => { clearTimeout(timer); reject(new Error(`Owner exited: ${stderr}`)); });
     });
     return child;
+  }
+
+  async function armIdleExit(owner: ChildProcess): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const onMessage = (message: unknown): void => {
+        if (message !== 'idle-armed') return;
+        owner.off('exit', onExit);
+        owner.off('message', onMessage);
+        resolve();
+      };
+      const onExit = (): void => { owner.off('message', onMessage); reject(new Error('Owner exited before arming idle exit')); };
+      owner.on('message', onMessage);
+      owner.once('exit', onExit);
+      owner.send('arm-idle');
+    });
   }
 
   async function search(projectPath: string, symbol: string): Promise<string> {
@@ -357,7 +397,8 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     }
   });
 
-  // Builds and reconciles nine real indexes; a Windows VM exceeds the default 5s.
+  // Builds and reconciles nine real indexes; a Windows VM exceeds the default
+  // 5s, and a loaded one exceeded 15s (#1773).
   it('defers eviction and shutdown until an active catch-up finishes', async () => {
     const roots = [serviceA, serviceB];
     for (let i = roots.length; i <= MAX_CACHED_PROJECTS; i++) {
@@ -398,7 +439,7 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
       if (prev === undefined) delete process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
       else process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS = prev;
     }
-  }, 15_000);
+  }, 60_000);
 
 
   it('drains a tool operation before closing its cached graph', async () => {
@@ -438,7 +479,7 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     fs.writeFileSync(path.join(serviceA, 'src/sample.ts'), 'export function realOwnerExit() {}\n');
     expect(await waitFor(async () => names(serviceA).includes('realOwnerExit'), 10000)).toBe(true);
     expect(opened[0]!.isWatching()).toBe(true);
-  }, 20000);
+  }, 60_000);
 
   it('retains a daemon while either accessing engine remains connected', async () => {
     const owner = await startOwner('daemon');
@@ -446,6 +487,9 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     const second = new MCPEngine();
     engines.push(second);
     await second.getToolHandler().execute('codegraph_search', { projectPath: serviceA, query: 'alphaOriginal' });
+    // Both engines now share one daemon session; from here on the daemon may
+    // idle out, and only losing that session should make it do so.
+    await armIdleExit(owner);
     await engine.stop();
     await new Promise((resolve) => setTimeout(resolve, 1000));
     expect(owner.exitCode).toBeNull();
@@ -456,6 +500,6 @@ describe('MCP explicit projectPath lifecycle (#1835)', () => {
     await second.stop();
     await exited;
     expect(owner.exitCode).toBe(0);
-  }, 20000);
+  }, 60_000);
 
 });
