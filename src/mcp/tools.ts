@@ -5648,6 +5648,48 @@ export class ToolHandler {
         }];
       };
 
+      /** Rendered cost of one source line, line numbering included. */
+      const lineCost = (ln: number): number =>
+        (fileLines[ln - 1] ?? '').length + 1 + (withLineNumbers ? String(ln).length + 1 : 0);
+      /** Rendered cost of one member on its own, context padding included. */
+      const paddedCost = (r: ExploreRange): number => {
+        let chars = 0;
+        const hi = Math.min(fileLines.length, r.end + contextPadding);
+        for (let ln = Math.max(1, r.start - contextPadding); ln <= hi; ln++) chars += lineCost(ln);
+        return chars;
+      };
+      /**
+       * A member the query asked for: one it named or that is an entry point
+       * (importance >= 9), or one on the rendered call path. The rest of a
+       * cluster — glue, connected nodes, edge lines, peripheral declarations —
+       * is incidental context that happens to sit within `gapThreshold` of it.
+       */
+      const isProtectedMember = (r: ExploreRange): boolean => r.importance >= 9 || r.spine;
+      /** Whole member ranges, re-merged in source order and rendered. */
+      const partsOfMembers = (members: ReadonlyArray<ExploreRange>): SectionPart[] => {
+        // Re-merge in source order so adjacent survivors read as one block
+        // rather than a stutter of one-symbol fragments.
+        const sorted = [...members].sort((a, b) => a.start - b.start);
+        const merged: Array<{ start: number; end: number }> = [];
+        for (const r of sorted) {
+          const last = merged[merged.length - 1];
+          if (last && r.start <= last.end + gapThreshold) last.end = Math.max(last.end, r.end);
+          else merged.push({ start: r.start, end: r.end });
+        }
+        return merged.flatMap((m) => buildSection(m));
+      };
+      /**
+       * What this cluster's protected members cost to render on their own, after
+       * the session history — the room a cluster ranked ABOVE it must leave for
+       * them. 0 for a cluster with nothing the query asked for.
+       */
+      const protectedCoreCost = (c: ExploreCluster): number => {
+        const core = c.members.filter(isProtectedMember);
+        if (core.length === 0) return 0;
+        const parts = core.length === c.members.length ? buildSection(c) : partsOfMembers(core);
+        return sectionText(dedupeSpans(parts).parts).length + GAP_MARKER.length;
+      };
+
       /**
        * Shrink an oversize cluster to the highest-importance symbols inside it
        * that fit `cap`, rendered in source order with gap markers (CG-12).
@@ -5676,14 +5718,30 @@ export class ToolHandler {
        * decide WHICH members survive: that is the ceiling trim's job, and CG-38 is
        * why that trim now protects the named spans instead of cutting in source
        * order. See `docs/benchmarks/explore-tail-render-cg38.md`.
+       *
+       * `incidentalCap` is set for a cluster holding a member the query asked for
+       * (see `renderCluster` and `protectedCoreCost`). Protected members are then
+       * chosen first, exactly as above; every other member must also fit
+       * `incidentalCap`, which is measured on the rendered text (padding, line
+       * numbers) because it is a bound — the ceiling past which the render is
+       * windowed, or bytes owed to a cluster below — not an estimate.
        */
-      const shrinkCluster = (c: ExploreCluster, cap: number): SectionPart[] | null => {
+      const shrinkCluster = (
+        c: ExploreCluster, cap: number, incidentalCap?: number,
+      ): SectionPart[] | null => {
         if (c.members.length < 2) return null;
+        const guarded = incidentalCap !== undefined;
         const byImportance = [...c.members].sort((a, b) =>
-          b.importance - a.importance || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
+          (guarded ? Number(isProtectedMember(b)) - Number(isProtectedMember(a)) : 0)
+          || b.importance - a.importance || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
         const sizeOf = (r: ExploreRange) => fileLines.slice(r.start - 1, r.end).join('\n').length;
         const keep: ExploreRange[] = [];
         let kept = 0;
+        // Rendered size of what is kept so far, once the first incidental member
+        // is weighed. Every protected member sorts ahead of it, so this is the
+        // exact cost of the protected set; each incidental member then adds its
+        // own padded span, an over-estimate that errs toward the cluster below.
+        let rendered: number | undefined;
         for (const r of byImportance) {
           const sz = sizeOf(r) + GAP_MARKER.length;
           // Always keep the most important range, even if it alone is oversize —
@@ -5691,20 +5749,17 @@ export class ToolHandler {
           // far it may overshoot is bounded by the caller's ceiling (CG-30), which
           // windows a runaway member instead of dropping it.
           if (keep.length > 0 && kept + sz > cap) continue;
+          if (guarded && keep.length > 0 && !isProtectedMember(r)) {
+            rendered ??= sectionText(dedupeSpans(partsOfMembers(keep)).parts).length;
+            const cost = paddedCost(r) + GAP_MARKER.length;
+            if (rendered + cost > incidentalCap) continue;
+            rendered += cost;
+          }
           keep.push(r);
           kept += sz;
         }
         if (keep.length === c.members.length) return null;
-        // Re-merge the kept ranges in source order so adjacent survivors read as
-        // one block rather than a stutter of one-symbol fragments.
-        keep.sort((a, b) => a.start - b.start);
-        const merged: Array<{ start: number; end: number }> = [];
-        for (const r of keep) {
-          const last = merged[merged.length - 1];
-          if (last && r.start <= last.end + gapThreshold) last.end = Math.max(last.end, r.end);
-          else merged.push({ start: r.start, end: r.end });
-        }
-        return merged.flatMap((m) => buildSection(m));
+        return partsOfMembers(keep);
       };
 
       /**
@@ -5721,9 +5776,6 @@ export class ToolHandler {
        * the call path IS the answer.
        */
       const MIN_WINDOW_LINES = 12;
-      /** Rendered cost of one source line, line numbering included. */
-      const lineCost = (ln: number): number =>
-        (fileLines[ln - 1] ?? '').length + 1 + (withLineNumbers ? String(ln).length + 1 : 0);
       /**
        * Longest prefix of `r` that fits `room`. `minLines` is the never-empty
        * floor — it may overrun `room`, so it is only ever asked for when nothing
@@ -5891,8 +5943,25 @@ export class ToolHandler {
          * never touched.
          */
         ceiling: number = Infinity,
+        /**
+         * What this cluster's INCIDENTAL members may render into, when a cluster
+         * ranked below it holds a member the query asked for — see the selection
+         * loop.
+         */
+        incidentalCap?: number,
       ): { parts: SectionPart[]; covered: ExploreLineRange[]; shrunk: boolean } => {
         const base = dedupeSpans(buildSection(c));
+        // In a cluster holding a member the query asked for, incidental members
+        // are never kept past `ceiling` either. The member shrink estimates on raw
+        // source, which runs well under the rendered size, so it kept helpers the
+        // render then had no room for, and the window back to the ceiling cut in
+        // source order — through the tail of a named body (gin's
+        // `handleHTTPRequest` lost 10 of 71 lines to the helpers above it), or,
+        // when its minimum windows overran a later cluster's room, costing that
+        // cluster its place. Every re-render into an exact room is the same case.
+        const guard = Number.isFinite(ceiling) && c.members.some(isProtectedMember)
+          ? Math.min(incidentalCap ?? Infinity, ceiling)
+          : incidentalCap;
         const bound = (
           r: { parts: SectionPart[]; covered: ExploreLineRange[]; shrunk: boolean },
         ) => {
@@ -5902,10 +5971,10 @@ export class ToolHandler {
           const parts = windowToCeiling(r.parts, ceiling, focusLinesOf(c));
           return { parts, covered: r.covered, shrunk: true };
         };
-        if (sectionText(base.parts).length <= cap) {
+        if (sectionText(base.parts).length <= Math.min(cap, guard ?? Infinity)) {
           return { parts: base.parts, covered: base.covered, shrunk: false };
         }
-        const shrunk = shrinkCluster(c, cap);
+        const shrunk = shrinkCluster(c, cap, guard);
         if (shrunk === null) {
           return bound({ parts: base.parts, covered: base.covered, shrunk: false });
         }
@@ -5969,7 +6038,32 @@ export class ToolHandler {
       const renderedClusters = new Map<number, ReturnType<typeof renderCluster>>();
       let anyClusterShrunk = false;
       let projectedChars = 0;
-      for (const rc of rankedClusters) {
+      // What the protected members of every cluster ranked BELOW position p cost
+      // to render. Rank orders clusters, not members: among clusters of equal
+      // max importance it prefers density, and density counts every member, so
+      // a named function with unrelated helpers merged around it outranks a
+      // cluster holding that same kind of function alone — the helpers' edge
+      // lines raise its density. Taken whole, the first cluster then spent the
+      // file's budget on the helpers and the isolated named function rendered
+      // nothing. So a cluster's incidental members may only use what is left
+      // once the named members below it are paid for. Its own protected members
+      // are never held back, so the trade-off between two named symbols is the
+      // one rank already made.
+      const owedFrom = new Array<number>(rankedClusters.length + 1).fill(0);
+      for (let p = rankedClusters.length - 1; p >= 0; p--) {
+        owedFrom[p] = owedFrom[p + 1]! + protectedCoreCost(rankedClusters[p]!.c);
+      }
+      // Measured against `fileBudget` even for a spine cluster: the clusters
+      // below it that are not on the spine are held to `fileBudget`, so room a
+      // spine cluster's incidental members take past it is room they never get.
+      const incidentalCapFor = (p: number, room: number): number | undefined => {
+        const owedBelow = owedFrom[p + 1]!;
+        if (owedBelow === 0) return undefined;
+        const spent = projectedChars + (chosenIndices.size > 0 ? GAP_MARKER.length : 0);
+        return Math.min(room, fileBudget - spent) - owedBelow;
+      };
+      for (let p = 0; p < rankedClusters.length; p++) {
+        const rc = rankedClusters[p]!;
         // The top-ranked cluster is always taken — an empty file section sends the
         // agent to Read, negating the savings. But "always taken" is not "taken at
         // any size": when it overruns the reservation it is SHRUNK to the
@@ -5987,7 +6081,7 @@ export class ToolHandler {
         // this holds it to it rather than letting the member rule walk past it.
         const ceiling = Math.max(cap, SPINE_CEILING);
         if (first) {
-          const section = renderCluster(rc.c, cap, ceiling);
+          const section = renderCluster(rc.c, cap, ceiling, incidentalCapFor(p, cap));
           renderedClusters.set(rc.idx, section);
           anyClusterShrunk = anyClusterShrunk || section.shrunk;
           chosenIndices.add(rc.idx);
@@ -6012,7 +6106,7 @@ export class ToolHandler {
         // fragments the next call's dedup then has to shred around.
         const room = cap - projectedChars - GAP_MARKER.length;
         if (room < EXPLORE_ALLOCATION.MIN_CHARS) continue;
-        const section = renderCluster(rc.c, room, room);
+        const section = renderCluster(rc.c, room, room, incidentalCapFor(p, room));
         const text = sectionText(section.parts);
         if (text.length === 0) continue;
         // The never-empty floors inside the windowing may overrun `room` (a

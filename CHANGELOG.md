@@ -164,6 +164,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `codegraph callers`, `codegraph callees` and `codegraph impact` (CLI and MCP) now report missing names with did-you-mean suggestions instead of another symbol's results, and exact matches with no callers stay empty; thanks @uvmplus. (#1473, #1481)
 - When `codegraph_explore` trims a large file, the gaps in its source now name the symbols that were left out, using only room the file's budget has left, so the names never push out the code itself. (#1711)
 - `codegraph_explore` no longer reports "runtime dispatch" through a base class that doesn't declare the method, so a common name shared by many unrelated subclasses no longer opens an answer with a list of thousands of implementations.
+- When you name several functions in one file and unrelated code sits between them, `codegraph_explore` now returns the functions you named before the code around them, instead of spending the file's room on that code and leaving one of the functions you asked for with no source at all.
 
 #### MCP / indexing
 

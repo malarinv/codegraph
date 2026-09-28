@@ -664,3 +664,173 @@ Full record: [`../benchmarks/explore-allocation-ab-1500.md`](../benchmarks/explo
   CG-15 session and this one — the same magnitude as the gap. Agent wall-clock on this repo is
   noise-dominated at this sample size, which is the known shape (host-model thinking dominates,
   not tool latency).
+
+## Named members before incidental ones (2026-09-28)
+
+A query naming five independent functions in one file got two to four of them back. Repro, small
+tier: `lib/response.ts` holds `sendBody`, `sendJson`, `renderView`, `redirectTo` and
+`sendFileStream`, ~36 lines each, with three unrelated `headerSlotN(res, value)` helpers between
+each pair and ~45 more after. Query: the five names. On `main`, `sendBody` rendered 0 of 36 lines
+and `sendFileStream` 4 while helper bodies rendered in full. The same five functions written
+contiguously all rendered.
+
+### Two places the helpers were paid first
+
+**Between clusters.** `rankedClusters` orders clusters of equal max importance by density, summed
+member importance over span. Density counts every member, so the helpers merged around a named
+function (a definition at 1, each `setHeader` edge line at 2) raised the density of its cluster,
+and a cluster holding a named function alone ranked below it: 0.39 against 0.95 and 0.84 in the
+repro. Taken whole, the two filler-heavy clusters spent the file's 9,100-char reservation and the
+isolated `sendBody` got nothing. Reordering does not fix this. Rank `sendBody` first and the
+victim moves to whichever named cluster is now last, because each cluster above it still pays for
+its helpers before the one below gets a turn.
+
+**Inside one cluster, at its ceiling.** Every render is bounded by a ceiling, and for a cluster
+taken after the first, and for every re-render the ceiling fit makes, that ceiling is its room
+exactly. The member shrink estimates on raw source, which runs well under the rendered size
+(padding and line numbers). Incidental members were kept on that estimate, the render overran the
+ceiling, and the window back to it cut in source order, through the tail of a named body. That is
+gin's `handleHTTPRequest` at 61 of 71 lines once the first fix had given it room, and, with the
+named-concentration branch merged, vscode's `_remoteCall` at 23 of 36 when that branch's regrow
+re-rendered `rpcProtocol.ts`. When the 12-line minimum
+windows overran the room instead, the loop dropped the whole cluster, named members and all, and
+the room went to clusters with nothing named in them.
+
+### The rule
+
+A member is **protected** if the query named it or it is an entry point (importance >= 9), or it
+sits on the rendered call path. Everything else in a cluster is incidental.
+
+- Before selection, `protectedCoreCost` prices each cluster's protected members rendered on their
+  own, after the session history. `owedFrom` sums that cost over every cluster ranked below each
+  position.
+- A cluster's incidental members may only use what is left of its room once the clusters below it
+  are paid their protected cost. Its own protected members are chosen first, against the same cap
+  as before, and are never held back. So when named bodies themselves do not all fit, the
+  trade-off between them is still the one rank makes.
+- In any cluster holding a protected member, incidental members are also never kept past the
+  render's ceiling, in rendered size. That is `renderCluster`'s own rule, so it covers selection
+  and every re-render alike: the render fits without being windowed, and nothing named is cut to
+  make space for its neighbours. For the first cluster the ceiling is the 1.5× spine bound, so
+  the rule only bites near the point where the render would be windowed anyway (a little before
+  it, since each incidental member's padded cost is an over-estimate).
+- A cluster with nothing protected in it renders byte-for-byte as before, and so does one that
+  fits its cap with room left for everything owed below it. A lone named function keeps the
+  helpers merged around it (the test's control).
+
+The incidental cap is measured against `fileBudget` even for a spine cluster: the clusters below
+it that are not on the spine are held to `fileBudget`, so room a spine cluster's incidental
+members take past it is room they never get.
+
+**Rejected: ranking by named density.** Dividing only protected members' importance by span, in
+the named tier, stops filler from raising a cluster's rank. Measured on top of the hold-back
+(before the ceiling guard was added), it changed 4 of 47 responses, left complete named
+bodies where they were (218), and put tokio-pin over the 25K inline cap (25,007). Rank is left
+alone.
+
+### Measured effect
+
+Deterministic, 47 fixed queries over the 7 README repos plus express: the README questions, the
+suite's prose questions, precise symbol bags, pinned-file flows and named-concentration stress
+queries (the set the unmerged named-concentration work was measured on). Baseline `main`
+`e63fe2ec`, same index for both builds. Named coverage means every definition of every queried
+name in every rendered file.
+
+| | `main` | this change |
+|---|---|---|
+| named bodies complete | 198 | **234** (17 responses up, **0 down**) |
+| named lines delivered | 6,912 | **7,631** (+10%) |
+| byte-identical responses | — | 17 of 47 |
+| responses over the 25K inline cap | 5 | **1** |
+| responses truncated by the final cut | 2 | 3 (see below) |
+
+No definition that rendered whole on `main` renders partially, except one 5-line overload: tokio's
+`park.rs` `park` (5 → 2), in a response that completes three other named bodies while the 46-line
+`park` beside it grows (11 → 20). Otherwise what gets smaller is the un-named part of a whole-class container
+too big to keep as one member, whose body had been arriving as incidental members: Alamofire's
+`Session` (133 → 103 of 1,301 lines), vscode's `RPCProtocol` (194 → 129) beside a now-complete
+`MessageIO` class, `ChannelClient` (109 → 63) where the file's incidental lines are now chosen by
+importance rather than by source order. No named method inside those classes loses a line.
+
+| query | complete named bodies | named lines |
+|---|---|---|
+| vscode `ipc.net.ts` pinned flow | 3 → 8 | 139 → 331 |
+| alamofire `Request.swift` pinned | 2 → 6 | 18 → 90 |
+| tokio `pb-worker2` | 7 → 10 | 104 → 168 |
+| tokio `worker.rs` pinned | 6 → 9 | 182 → 278 |
+| gin `gin.go ServeHTTP handleHTTPRequest addRoute` | 2 → 4 | 138 → 223 |
+| django symbol bag (`execute_sql` ×2) | 5 → 7 | 201 → 261 |
+| excalidraw symbol bag (`_renderStaticScene`) | 3 → 3 | 32 → 79 |
+
+**The one new truncation is django-bag, and it is not this rule's.** The named file now spends
+157 chars less than its reservation, the carry-forward moves that down the rank order, and the
+rank-3 file's funding rises from 963 to 1,777 because `owedPayableBelow` stops holding a partial
+share for the last file once that share falls under `MIN_CHARS` + overhead. A 32-char shift
+upstream crossed that threshold. The last file, a 151-char skeleton, is dropped, and the pointer
+list after it is cut by the final trim because the epilogue is never paid for in the render loop.
+The named-concentration branch reserves the epilogue; with both, the same query is not truncated
+and renders as many files as that branch does alone (below).
+
+### On the named-concentration branch
+
+`claude/inspiring-grothendieck-8a7b3e` (`fd8eab23`, unmerged) was cut before #2057, and its own
+tip is the wrong base to measure against: there `sectionText` still measures gaps with their names
+while the window to a ceiling measures them bare, so a bound render that "fits" overruns its room
+and the cluster is dropped. Merged onto `main` (one conflict: keep the branch's `buildSection` and
+`main`'s bare-gap `sectionText`), then this change on top (four hunks in `shrinkCluster`,
+`renderCluster` and the selection loop, all mechanical), the same 47 queries:
+
+| | `main` + named concentration | + this change |
+|---|---|---|
+| named bodies complete | 235 | **279** (19 responses up, 1 down) |
+| named lines delivered | 9,330 | **9,965** (+7%) |
+| responses over the 25K inline cap | 0 | 0 |
+| responses truncated by the final cut | 0 | 0 |
+
+The response that goes down is tokio's pinned stress query, the same 5-line `park` overload as on
+`main`. That branch's own tests (`explore-merged-spine-cluster`, `explore-named-file-valve`) pass
+with this change merged in. The two hold-backs apply together to a merged spine cluster: that
+branch's limits the whole first cluster to leave the other clusters' top members room, and this
+one limits only incidental members, of any cluster. On vscode's `rpcProtocol.ts` that moves room
+from `RPCProtocol`'s un-named methods to the named `MessageBuffer` class (66 → 187 of 187 lines,
+`RPCProtocol` 383 → 220), with every named method of `RPCProtocol` still whole.
+
+On that branch a lone named file's reservation rises to 12,800, which absorbs the filler of the
+original repro, so the hermetic fixture uses wider helper lines. It is red there without this
+change (`sendJson` 0 of 26 lines).
+
+### Coverage
+
+`__tests__/explore-isolated-named-cluster.test.ts`, one generated file in the repro's shape
+(26-line bodies, three wide helpers between each pair). Its shape block checks that helpers sit
+between every pair, that no named function calls another (so no call path ranks one), that the
+file is more than three times its reservation, that the named bodies cost under 90% of it, and
+that the same functions written contiguously all render whole under the same reservation.
+
+| Mutation | Red |
+|---|---|
+| `main`'s `tools.ts` | five-name gate: `sendBody` 0/26 |
+| `main` + named concentration, without this change | five-name gate: `sendJson` 0/26 |
+| No hold-back for clusters below (ceiling guard kept) | five-name gate: `sendBody` 21/26 |
+| No ceiling guard on incidental members (hold-back kept) | `renderView redirectTo`: `renderView` 22/26 |
+| Incidental members always dropped | control: the helper above a lone `renderView` |
+| Protected members not sorted first in the guarded shrink | none — and all 47 sweep responses are byte-identical |
+
+The last lever is kept on reasoning alone. Named members already sort first by importance, so the
+sort only matters for a call-path member below importance 9 that shares a guarded cluster with a
+higher-importance incidental one. There it keeps the incidental member from claiming the cap
+first, and it keeps the size the incidental test starts from exact: that is the rendered cost of
+the protected set only when every protected member has been weighed before the first incidental
+one.
+
+With the repro's exact geometry (36-line bodies), five padded bodies come to more than the 9,100
+reservation. This change renders four whole and `sendBody` at 29 of 36, the lowest-ranked named
+cluster windowed to what is left. That is the budget, not the defect: with the named-concentration
+branch as well, all five render whole.
+
+### Found, not fixed
+
+- **`owedPayableBelow`'s partial hold has a cliff at `MIN_CHARS` + overhead.** Just above it, the
+  last admitted file is held its partial share. Just below it, it is held nothing, and the file
+  above takes ~800 chars the last file needed. Any upstream shift of a few dozen chars can flip it
+  (django-bag above).
