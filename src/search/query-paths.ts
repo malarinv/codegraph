@@ -43,6 +43,23 @@ export interface QueryPathExtraction {
    * surfaced to the agent so the miss is visible instead of silent.
    */
   unresolvedPathSpans: string[];
+  /**
+   * Line spans the query anchored to a pinned file, 1-based and inclusive:
+   * `compiler.py:776`, `foo.ts:12-40`, `foo.ts#L88-L120`, or prose next to a
+   * path (`compiler.py lines 900-1003`, `L900-L1003 of compiler.py`). An agent
+   * writes these when it wants THOSE lines — typically the body a previous
+   * response elided — so a pin that drops them answers a different question
+   * (the file's most relevant clusters) than the one asked. Only a span whose
+   * path resolved to exactly one file is kept: a line number means nothing
+   * across two candidate files.
+   */
+  lineAnchors: QueryLineAnchor[];
+}
+
+export interface QueryLineAnchor {
+  file: string;
+  start: number;
+  end: number;
 }
 
 /**
@@ -107,14 +124,47 @@ function buildBasenameStems(indexedPaths: readonly string[]): Map<string, string
 }
 
 /**
+ * Line references that ride along in agent-written paths: `foo.ts:123`,
+ * `foo.ts:12-40`, `foo.ts#L88`, `foo.ts#L88-L120`.
+ */
+const LINE_REF_SUFFIX = /(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L?(\d+))?)$/;
+
+/**
+ * A standalone line-number token: `900`, `900-1003`, `900–1003`, `900..1003`,
+ * `L900`, `L900-L1003`. The `L` form is unambiguous on its own; a bare number
+ * only counts after a `line`/`lines` word or directly after a path.
+ */
+const LINE_NUMBER_TOKEN = /^(L?)(\d+)(?:(?:-|–|\.\.)L?(\d+))?$/;
+const LINE_WORD = /^lines?$/i;
+/** `lines 900 to 1003` — the connective between two bare numbers. */
+const RANGE_CONNECTIVE = /^(?:to|through|thru)$/i;
+/** Nothing real is this long; a larger number is a port, an id, a year typo. */
+const MAX_LINE_NUMBER = 1_000_000;
+
+function lineSpan(a: string | undefined, b: string | undefined): { start: number; end: number } | null {
+  const start = Number(a);
+  const end = b === undefined ? start : Number(b);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1) return null;
+  if (start > MAX_LINE_NUMBER || end > MAX_LINE_NUMBER) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+/** Prose punctuation a line-number token can carry: "lines 900-1003," / "(L88)". */
+function stripLineTokenPunctuation(token: string): string {
+  return token.replace(/^[('"`[]+/, '').replace(/[)'"`\].,;:!?]+$/, '');
+}
+
+/**
  * Strip prose punctuation wrapped around a token without eating punctuation
  * that is PART of the path: quotes/backticks always strip; a trailing `)`/`]`
  * strips only when the token has no matching opener (so `(protected)` and
  * `[id]` segments survive, while "…(see src/foo.ts)" loses its parenthesis);
  * a leading `(`/`[` mirrors that. Trailing sentence punctuation strips last,
- * so "src/foo.ts." resolves.
+ * so "src/foo.ts." resolves. A trailing line reference is split off and
+ * returned separately — the file is what resolves, the lines are what the
+ * agent wants from it.
  */
-function stripWrapping(token: string): string {
+function stripWrapping(token: string): { path: string; lines: { start: number; end: number } | null } {
   let s = token;
   for (;;) {
     const first = s[0];
@@ -134,10 +184,12 @@ function stripWrapping(token: string): string {
     if (last === '}' && !s.includes('{')) { s = s.slice(0, -1); continue; }
     break;
   }
-  // Line references ride along in agent-written paths: `foo.ts:123`,
-  // `foo.ts:12-40`, `foo.ts#L88`. The file is what gets pinned.
-  s = s.replace(/(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)$/, '');
-  return s;
+  const ref = LINE_REF_SUFFIX.exec(s);
+  if (!ref) return { path: s, lines: null };
+  return {
+    path: s.slice(0, ref.index),
+    lines: ref[1] !== undefined ? lineSpan(ref[1], ref[2]) : lineSpan(ref[3], ref[4]),
+  };
 }
 
 /** Normalize a span into the repo-relative shape the files table stores. */
@@ -213,6 +265,7 @@ export function extractQueryPaths(
     strippedQuery: query,
     pinnedFiles: [],
     unresolvedPathSpans: [],
+    lineAnchors: [],
   };
   if (!query.trim() || indexedPaths.length === 0) return passthrough;
 
@@ -226,12 +279,15 @@ export function extractQueryPaths(
   const pinned: string[] = [];
   const pinnedSeen = new Set<string>();
   const unresolved: string[] = [];
+  const anchors: QueryLineAnchor[] = [];
+  /** Token index → the ONE file it pinned, for binding prose line ranges. */
+  const singleFileAt = new Map<number, string>();
   let candidatesExamined = 0;
 
   for (let i = 0; i < tokens.length; i++) {
     if (pinned.length >= maxPins) break;
     if (candidatesExamined >= MAX_CANDIDATE_SPANS) break;
-    const stripped = stripWrapping(tokens[i]!);
+    const { path: stripped, lines } = stripWrapping(tokens[i]!);
     if (stripped.length < 4) continue;
     const hasSlash = /[/\\]/.test(stripped);
     if (!hasSlash && !DOTTED_BASENAME.test(stripped)) continue;
@@ -249,6 +305,10 @@ export function extractQueryPaths(
         if (pinnedSeen.has(m) || pinned.length >= maxPins) continue;
         pinnedSeen.add(m);
         pinned.push(m);
+      }
+      if (matches.length === 1 && pinnedSeen.has(matches[0]!)) {
+        singleFileAt.set(i, matches[0]!);
+        if (lines) anchors.push({ file: matches[0]!, ...lines });
       }
     } else if (
       ambiguous
@@ -289,7 +349,7 @@ export function extractQueryPaths(
   let basenameStems: Map<string, string[]> | null = null;
   for (let i = 0; i < tokens.length && pinned.length < maxPins; i++) {
     if (consumed.has(i)) continue;
-    const stripped = stripWrapping(tokens[i]!);
+    const { path: stripped, lines } = stripWrapping(tokens[i]!);
     if (stripped.length < 4 || !KEBAB_BASENAME.test(stripped)) continue;
     basenameStems ??= buildBasenameStems(indexedPaths);
     const matches = basenameStems.get(stripped.toLowerCase());
@@ -300,12 +360,64 @@ export function extractQueryPaths(
       pinnedSeen.add(m);
       pinned.push(m);
     }
+    if (matches.length === 1 && pinnedSeen.has(matches[0]!)) {
+      singleFileAt.set(i, matches[0]!);
+      if (lines) anchors.push({ file: matches[0]!, ...lines });
+    }
+  }
+
+  // Third pass — prose line ranges (`lines 900-1003`, `line 42`, `L88-L120`,
+  // `lines 900 to 1003`) bound to the NEAREST single-file path token. These
+  // are what an agent writes when a previous response elided a body and it
+  // asks for the rest; left in the query, the numbers match nothing and
+  // `lines` feeds FTS a word every file contains. A range with no path to
+  // bind to says nothing about which file, so it is left alone.
+  if (singleFileAt.size > 0) {
+    const pathIdx = [...singleFileAt.keys()];
+    const nearestFile = (i: number): string => {
+      let best = pathIdx[0]!;
+      for (const p of pathIdx) if (Math.abs(p - i) < Math.abs(best - i)) best = p;
+      return singleFileAt.get(best)!;
+    };
+    for (let i = 0; i < tokens.length; i++) {
+      if (consumed.has(i)) continue;
+      const tok = stripLineTokenPunctuation(tokens[i]!);
+      const afterWord = i > 0 && !consumed.has(i - 1) && LINE_WORD.test(stripLineTokenPunctuation(tokens[i - 1]!));
+      const afterPath = singleFileAt.has(i - 1);
+      const m = LINE_NUMBER_TOKEN.exec(tok);
+      if (!m) continue;
+      // A bare number is a line number only in a line context; `L900` is one
+      // on its own.
+      if (!m[1] && !afterWord && !afterPath) continue;
+      let span = lineSpan(m[2], m[3]);
+      const used = [i];
+      // `lines 900 to 1003`
+      if (span && m[3] === undefined && i + 2 < tokens.length
+          && RANGE_CONNECTIVE.test(stripLineTokenPunctuation(tokens[i + 1]!))) {
+        const tail = LINE_NUMBER_TOKEN.exec(stripLineTokenPunctuation(tokens[i + 2]!));
+        if (tail && tail[3] === undefined) {
+          span = lineSpan(m[2], tail[2]);
+          used.push(i + 1, i + 2);
+        }
+      }
+      if (!span) continue;
+      anchors.push({ file: nearestFile(i), ...span });
+      for (const u of used) consumed.add(u);
+      if (afterWord) consumed.add(i - 1);
+    }
   }
 
   if (consumed.size === 0) return passthrough;
+  const seenAnchor = new Set<string>();
   return {
     strippedQuery: tokens.filter((_, i) => !consumed.has(i)).join(' '),
     pinnedFiles: pinned,
     unresolvedPathSpans: unresolved,
+    lineAnchors: anchors.filter((a) => {
+      const key = `${a.file}:${a.start}-${a.end}`;
+      if (seenAnchor.has(key)) return false;
+      seenAnchor.add(key);
+      return true;
+    }),
   };
 }

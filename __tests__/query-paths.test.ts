@@ -151,7 +151,7 @@ describe('extractQueryPaths — resolution and stripping', () => {
   it('passes through untouched when nothing resolves', () => {
     const q = 'plain prose question about scrolling';
     const out = extractQueryPaths(q, INDEX);
-    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [] });
+    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [], lineAnchors: [] });
   });
 });
 
@@ -191,13 +191,13 @@ describe('extractQueryPaths — extension-less kebab basenames', () => {
   it('leaves kebab prose that names no indexed file untouched — and unreported', () => {
     const q = 'how does cross-call dedup make explore non-blocking';
     const out = extractQueryPaths(q, INDEX);
-    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [] });
+    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [], lineAnchors: [] });
   });
 
   it('leaves a stem shared by too many files alone — one hot name must not pin half the repo', () => {
     const q = 'refactor the user-profile rendering';
     const out = extractQueryPaths(q, INDEX);
-    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [] });
+    expect(out).toEqual({ strippedQuery: q, pinnedFiles: [], unresolvedPathSpans: [], lineAnchors: [] });
   });
 
   it('pins all files sharing a stem when within the ambiguity budget', () => {
@@ -315,5 +315,59 @@ describe('extractQueryPaths — dotless slashed spans, decided on disk', () => {
     expect(out.pinnedFiles).toEqual(['scripts/pre-commit']);
     expect(out.unresolvedPathSpans).toEqual([]);
     expect(p.asked).not.toContain('scripts/pre-commit');
+  });
+});
+
+describe('extractQueryPaths — line anchors', () => {
+  // The django follow-ups that went unanswered: an agent handed a signature for
+  // a 226-line method asks for the body by line, and explore used to pin the
+  // file but drop the lines — answering "the file's most relevant clusters"
+  // instead of the span it named.
+  const CHAT = 'src/lib/chat-manager.ts';
+
+  it('keeps a :line / :start-end / #L suffix as an anchor on the pinned file', () => {
+    expect(extractQueryPaths(`body of ${CHAT}:776`, INDEX).lineAnchors)
+      .toEqual([{ file: CHAT, start: 776, end: 776 }]);
+    expect(extractQueryPaths(`see ${CHAT}:12-40`, INDEX).lineAnchors)
+      .toEqual([{ file: CHAT, start: 12, end: 40 }]);
+    expect(extractQueryPaths('regression at src/lib/task-runner-manager.ts#L88-L120', INDEX).lineAnchors)
+      .toEqual([{ file: 'src/lib/task-runner-manager.ts', start: 88, end: 120 }]);
+  });
+
+  it('binds a prose line range to the path it sits next to and removes it from the query', () => {
+    const out = extractQueryPaths(`${CHAT} lines 900-1003 flushQueue tail`, INDEX);
+    expect(out.lineAnchors).toEqual([{ file: CHAT, start: 900, end: 1003 }]);
+    // `lines` would feed FTS a word every file holds; the numbers match nothing.
+    expect(out.strippedQuery).toBe('flushQueue tail');
+  });
+
+  it('accepts the other spellings agents write', () => {
+    const anchor = (q: string) => extractQueryPaths(q, INDEX).lineAnchors;
+    expect(anchor(`lines 900 to 1003 of ${CHAT}`)).toEqual([{ file: CHAT, start: 900, end: 1003 }]);
+    expect(anchor(`L900-L1003 in ${CHAT}`)).toEqual([{ file: CHAT, start: 900, end: 1003 }]);
+    expect(anchor(`${CHAT} line 42`)).toEqual([{ file: CHAT, start: 42, end: 42 }]);
+    expect(anchor(`${CHAT} 900-1003`)).toEqual([{ file: CHAT, start: 900, end: 1003 }]);
+    expect(anchor(`${CHAT} (lines 1003-900)`)).toEqual([{ file: CHAT, start: 900, end: 1003 }]);
+  });
+
+  it('binds each range to its NEAREST path when the query names two files', () => {
+    const out = extractQueryPaths(
+      `${CHAT} lines 10-20 and src/lib/task-runner-manager.ts lines 30-40`, INDEX,
+    );
+    expect(out.lineAnchors).toEqual([
+      { file: CHAT, start: 10, end: 20 },
+      { file: 'src/lib/task-runner-manager.ts', start: 30, end: 40 },
+    ]);
+  });
+
+  it('leaves line numbers alone when there is no path, or the path is ambiguous', () => {
+    const noPath = extractQueryPaths('flushQueue lines 900-1003', INDEX);
+    expect(noPath.lineAnchors).toEqual([]);
+    // A bare number with no line context is not a line number either.
+    expect(extractQueryPaths(`${CHAT} retries 3 times`, INDEX).lineAnchors).toEqual([]);
+    // `generic-modal` pins two files; a line number means nothing across both.
+    const twoFiles = extractQueryPaths('generic-modal.tsx:40', INDEX);
+    expect(twoFiles.pinnedFiles).toHaveLength(2);
+    expect(twoFiles.lineAnchors).toEqual([]);
   });
 });

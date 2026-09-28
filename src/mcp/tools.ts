@@ -34,7 +34,7 @@ import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
 import { isTestFile, normalizeNameToken } from '../search/query-utils';
 import { groupDefinitions, lastQualifierPart, matchesSymbol } from '../graph/symbol-lookup';
-import { extractQueryPaths, queryMightContainPaths } from '../search/query-paths';
+import { extractQueryPaths, queryMightContainPaths, type QueryLineAnchor } from '../search/query-paths';
 import {
   existsSync,
   readFileSync,
@@ -679,7 +679,10 @@ export interface ExploreAllocationCandidate {
    * self-referential generated file scores well on both.
    */
   worth: number;
-  /** Carries a symbol on the rendered flow spine. */
+  /**
+   * Carries a symbol on the rendered flow spine — or an exact target (a
+   * qualified name, a line anchor), which is the answer by the same argument.
+   */
   spine: boolean;
   /**
    * The query named this file by PATH (see query-paths.ts). Pinned files are
@@ -901,6 +904,23 @@ const POINTER_MAX_FILES = 10;
  * meta-text rivals the source it is pointing at.
  */
 const ELIDED_SYMBOL_CAP = 6;
+
+/**
+ * Kinds a single-line anchor (`compiler.py:776`) resolves to: the innermost
+ * one containing the line is the symbol the agent is pointing at. A class
+ * enclosing the line is deliberately NOT a target — it spans most of its file,
+ * and "the whole class" is not what a line number asks for.
+ */
+const ANCHOR_CALLABLE_KINDS = new Set(['method', 'function', 'constructor', 'component']);
+/** Lines either side of a single-line anchor that no callable encloses. */
+const ANCHOR_LINE_CONTEXT = 15;
+
+/**
+ * Most windows one oversize exact / named-spine body is cut into in the
+ * focused view: the head plus the call sites into the other symbols the
+ * question named. More turns a method into confetti.
+ */
+const MAX_BODY_FOCUS_LINES = 6;
 
 type ElidedSymbolRef = { name: string; kind: string; startLine: number };
 
@@ -3441,7 +3461,17 @@ export class ToolHandler {
    * that have no dependents (nothing to warn about), and returns '' when none
    * qualify so a leaf-only exploration stays clean.
    */
-  private buildBlastRadiusSection(cg: CodeGraph, subgraph: Subgraph): string {
+  private buildBlastRadiusSection(
+    cg: CodeGraph,
+    subgraph: Subgraph,
+    /**
+     * Exact targets (a qualified name, a line anchor) lead the list. The search
+     * roots are whatever FTS ranked first for the bare name, so without this a
+     * query for `SQLCompiler.as_sql` headlined `SQLInsertCompiler.as_sql` — and
+     * the agent took that as the tool having found the wrong method.
+     */
+    leadingIds: Iterable<string> = [],
+  ): string {
     const ROOT_CAP = 5; // only the symbols the query actually targeted
     const FILE_CAP = 4; // caller files listed per symbol before "+N more"
     const MEANINGFUL = new Set<string>([
@@ -3450,7 +3480,7 @@ export class ToolHandler {
     ]);
     const rel = (p: string) => p.replace(/\\/g, '/');
 
-    const roots = subgraph.roots
+    const roots = [...new Set([...leadingIds, ...subgraph.roots])]
       .map((id) => subgraph.nodes.get(id))
       .filter((n): n is Node => !!n && MEANINGFUL.has(n.kind))
       .slice(0, ROOT_CAP);
@@ -3656,6 +3686,7 @@ export class ToolHandler {
     // `+page.svelte`), starving the very files the agent asked for.
     let pinnedFiles: string[] = [];
     let unresolvedPathSpans: string[] = [];
+    let lineAnchors: QueryLineAnchor[] = [];
     let matchQuery = query;
     if (queryMightContainPaths(rawQuery)) {
       try {
@@ -3667,6 +3698,7 @@ export class ToolHandler {
         if (extraction.pinnedFiles.length > 0 || extraction.unresolvedPathSpans.length > 0) {
           pinnedFiles = extraction.pinnedFiles;
           unresolvedPathSpans = extraction.unresolvedPathSpans;
+          lineAnchors = extraction.lineAnchors;
           matchQuery = normalizeQuerySpelling(extraction.strippedQuery);
         }
       } catch { /* path pinning must never fail an explore call */ }
@@ -3750,6 +3782,42 @@ export class ToolHandler {
         .sort((a, b) => a.startLine - b.startLine)
         .slice(0, PINNED_FILE_NODE_CAP)
         .forEach((n) => { if (!subgraph.nodes.has(n.id)) subgraph.nodes.set(n.id, n); });
+    }
+
+    // EXACT targets: callables the agent pointed at with no ambiguity left — a
+    // qualified name that resolves to at most a handful of defs
+    // (`SQLCompiler.as_sql`, filled in by the seeding loop below) or the
+    // callable enclosing a line anchor (`compiler.py:776`). Every render path
+    // puts these first and never reduces one to a signature line: the agent
+    // has already said which of the 110 `as_sql`s it means, and an answer that
+    // spends the file on the named method's neighbours instead is the one it
+    // Reads the file to get past.
+    const exactNodeIds = new Set<string>();
+    // A multi-line anchor (`lines 900-1003`, `foo.ts:12-40`) names a SPAN, not
+    // a symbol — often the tail of a body a previous response windowed — and
+    // is rendered as exactly that span. A single-line anchor with no enclosing
+    // callable (a module-level line) becomes a small span around the line.
+    const anchorSpans = new Map<string, ExploreLineRange[]>();
+    for (const anchor of lineAnchors) {
+      let fileNodes: Node[] = [];
+      try { fileNodes = cg.getNodesInFile(anchor.file); } catch { continue; }
+      if (anchor.start === anchor.end) {
+        const enclosing = fileNodes
+          .filter((n) => ANCHOR_CALLABLE_KINDS.has(n.kind)
+            && n.startLine <= anchor.start && n.endLine >= anchor.start)
+          .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+        if (enclosing) {
+          exactNodeIds.add(enclosing.id);
+          if (!subgraph.nodes.has(enclosing.id)) subgraph.nodes.set(enclosing.id, enclosing);
+          continue;
+        }
+      }
+      const span = anchor.start === anchor.end
+        ? { start: Math.max(1, anchor.start - ANCHOR_LINE_CONTEXT), end: anchor.start + ANCHOR_LINE_CONTEXT }
+        : { start: anchor.start, end: anchor.end };
+      const spans = anchorSpans.get(anchor.file) ?? [];
+      spans.push(span);
+      anchorSpans.set(anchor.file, spans);
     }
 
     if (subgraph.nodes.size === 0) {
@@ -4040,6 +4108,11 @@ export class ToolHandler {
           // named-file sort below. (Previously only NEW injections were marked,
           // so a named symbol FTS already gathered never sorted to the top.)
           namedSeedIds.add(n.id);
+          // A QUALIFIED name that resolved to a handful of defs is the agent
+          // choosing one overload out of a family — `SQLCompiler.as_sql`, not
+          // the 109 other `as_sql`s. The bare name keeps the family rules; the
+          // qualified one is an exact target (see `exactNodeIds`).
+          if (isQual && cands.length <= 3 && CALLABLE.has(n.kind)) exactNodeIds.add(n.id);
         }
         // An interface's `method_signature` seeds (so RWR and the flow ranking
         // still see it, and a query that names it still reaches its file) but
@@ -4578,7 +4651,7 @@ export class ToolHandler {
     // Blast radius (always-on, compact): for the entry symbols, who depends on
     // them + which tests cover them — locations only, no source — so the agent
     // knows what to update/verify before editing without a separate call.
-    const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
+    const blastRadius = this.buildBlastRadiusSection(cg, subgraph, exactNodeIds);
     if (blastRadius) lines.push(blastRadius);
 
     // Relationship map — show how symbols connect
@@ -4625,6 +4698,33 @@ export class ToolHandler {
     await warmBranchGuardGrammars();
     const flow = this.buildFlowFromNamedSymbols(cg, matchQuery);
 
+    // The symbols the question is about: exact targets, the named ones, the spine.
+    const questionIds = new Set([...exactNodeIds, ...flow.pathNodeIds, ...flow.namedNodeIds]);
+    /**
+     * The lines a WINDOW of an oversize body must reach: an anchored line
+     * inside it, the spine's next-hop call, and every call it makes into
+     * another symbol the question is about — "the parts the question is
+     * about", in the graph's own terms rather than by matching words. Most
+     * important first, capped so a window stays a window.
+     */
+    const bodyFocusLines = (n: Node): number[] => {
+      const focus: number[] = [];
+      for (const a of lineAnchors) {
+        if (a.file === n.filePath && a.start > n.startLine && a.start <= n.endLine) focus.push(a.start);
+      }
+      const call = flow.spineCallSites.get(n.id);
+      if (call) focus.push(call);
+      const calls: number[] = [];
+      try {
+        for (const e of cg.getOutgoingEdges(n.id)) {
+          if (e.target === n.id || !questionIds.has(e.target) || !e.line) continue;
+          if (e.line > n.startLine && e.line <= n.endLine) calls.push(e.line);
+        }
+      } catch { /* focus is a nicety; the head window still renders */ }
+      focus.push(...calls.sort((a, b) => a - b));
+      return [...new Set(focus)].slice(0, MAX_BODY_FOCUS_LINES);
+    };
+
     // Snapshot every ranked candidate's scoring inputs, in final sort order, so
     // the diagnostic can show what each file's share of the envelope was BOUGHT
     // with (score, graph mass, term hits, flags) — not just what it cost.
@@ -4668,7 +4768,11 @@ export class ToolHandler {
         // A pinned file's bytes are worth full price by definition — the agent
         // asked for the file itself, generated/test or not.
         worth: pinnedSet.has(fp) ? 1 : rankPenalty(fp),
-        spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id)),
+        // A file holding an EXACT target is funded like a spine file: it is the
+        // answer to the question as asked, and clipping it is what sends the
+        // agent to Read — the exact reason the spine gets this treatment.
+        spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id) || exactNodeIds.has(n.id))
+          || anchorSpans.has(fp),
         pinned: pinnedSet.has(fp),
       })),
       budget,
@@ -5146,6 +5250,171 @@ export class ToolHandler {
         }
       };
 
+      // Window helpers — shared by the focused per-symbol view and the cluster
+      // path below, so an oversize body is cut by ONE set of rules wherever it
+      // renders. Parts are SPAN-KEYED: every part carries the exact line range
+      // its text was sliced from (see `buildSection`).
+      const SPINE_WINDOW = 28; // lines each side of a focus line (the next-hop call site)
+      type SectionPart = { range: ExploreLineRange; text: string };
+      /**
+       * Bounded overshoot for one cluster's render (CG-30).
+       *
+       * `shrinkCluster` keeps the highest-importance member whole even when that
+       * member alone is oversize — an empty file section sends the agent to Read,
+       * which is exactly what explore exists to prevent. But "never empty" is not
+       * "any size": with nothing bounding it, one 22K member rendered against a
+       * 9K reservation (2.4x), which collapses the headroom every file ranked
+       * below it draws from. Past the ceiling the member is WINDOWED rather than
+       * dropped — a leading window (signature + head of the body), plus a window
+       * on the spine's call site when the head misses it, since on a flow cluster
+       * the call path IS the answer.
+       */
+      const MIN_WINDOW_LINES = 12;
+      /** Rendered cost of one source line, line numbering included. */
+      const lineCost = (ln: number): number =>
+        (fileLines[ln - 1] ?? '').length + 1 + (withLineNumbers ? String(ln).length + 1 : 0);
+      /** `lineCostPrefix[n]` = rendered chars of lines 1..n, newlines included. */
+      let lineCostPrefix: number[] | null = null;
+      /** Rendered chars of lines `start..end` (line numbers included), in O(1). */
+      const renderedSpanCost = (start: number, end: number): number => {
+        if (!lineCostPrefix) {
+          lineCostPrefix = [0];
+          for (let ln = 1; ln <= fileLines.length; ln++) lineCostPrefix.push(lineCostPrefix[ln - 1]! + lineCost(ln));
+        }
+        const s = Math.max(1, start);
+        const e = Math.min(fileLines.length, end);
+        return e < s ? 0 : Math.max(0, lineCostPrefix[e]! - lineCostPrefix[s - 1]! - 1);
+      };
+      /**
+       * Longest prefix of `r` that fits `room`. `minLines` is the never-empty
+       * floor — it may overrun `room`, so it is only ever asked for when nothing
+       * else has been emitted and the alternative is an empty section.
+       */
+      const headWindowOf = (
+        r: ExploreLineRange, room: number, minLines = 0,
+      ): ExploreLineRange | null => {
+        let end = r.start - 1;
+        let chars = 0;
+        for (let ln = r.start; ln <= r.end; ln++) {
+          const cost = lineCost(ln);
+          if (chars + cost > room && end - r.start + 1 >= minLines) break;
+          chars += cost;
+          end = ln;
+        }
+        return end >= r.start ? { start: r.start, end } : null;
+      };
+      /** Widest window around `line` inside [lo, hi] that fits `room`. */
+      const centeredWindowOf = (
+        line: number, lo: number, hi: number, room: number,
+      ): ExploreLineRange | null => {
+        if (line < lo || line > hi) return null;
+        let start = line, end = line, chars = lineCost(line);
+        for (let grown = true; grown;) {
+          grown = false;
+          if (end + 1 <= hi && chars + lineCost(end + 1) <= room) { end += 1; chars += lineCost(end); grown = true; }
+          if (start - 1 >= lo && chars + lineCost(start - 1) <= room) { start -= 1; chars += lineCost(start); grown = true; }
+        }
+        return { start, end };
+      };
+      /**
+       * Reduce rendered parts to fit `ceiling`, never to nothing. Whole parts are
+       * kept while they fit; the first part that overruns is cut to a leading
+       * window on whole lines (a body is never cut mid-line), and everything past
+       * it is dropped. The GAP_MARKER between surviving parts — and the line-number
+       * jump — is what tells the agent the cut happened.
+       *
+       * A partial window shorter than MIN_WINDOW_LINES is not worth emitting, and
+       * emitting one is actively harmful: the session record then claims a 4-line
+       * sliver, and the NEXT call's dedup has to either shred a whole block around
+       * it or re-send it. Below that floor the part is simply dropped — unless
+       * nothing has been emitted at all, where the floor wins over the ceiling
+       * because an empty section is the one outcome worse than an oversize one.
+       *
+       * `focusLines` are the lines this trim must not lose: the spine's next-hop
+       * call site (CG-30) and every definition the agent NAMED inside the cluster
+       * (CG-38). The head fill is source-ordered, so a named def in the TAIL of a
+       * large file is otherwise always the first thing an over-ceiling render
+       * drops — the one span the agent asked for by name, cut in favour of
+       * head-of-file filler it did not ask for. The full-ceiling fill is tried
+       * FIRST and the 60% hold-back applies only when a focus line is actually
+       * left uncovered, so a cluster whose head already reaches its focus keeps
+       * the whole ceiling for source.
+       */
+      const windowToCeiling = (
+        parts: ReadonlyArray<SectionPart>,
+        ceiling: number,
+        focusLines: ReadonlyArray<number> = [],
+      ): SectionPart[] => {
+        const inParts = (line: number) =>
+          parts.some((p) => line >= p.range.start && line <= p.range.end);
+        const focus = [...new Set(focusLines)]
+          .filter((l) => typeof l === 'number' && l > 0 && inParts(l))
+          .sort((a, b) => a - b);
+        /** Source-ordered fill of whole parts, the overrunning one cut to a head window. */
+        const fill = (room: number): { emit: ExploreLineRange[]; used: number } => {
+          const emit: ExploreLineRange[] = [];
+          let used = 0;
+          for (const p of parts) {
+            const join = emit.length > 0 ? GAP_MARKER.length : 0;
+            if (used + join + p.text.length <= room) {
+              emit.push(p.range);
+              used += join + p.text.length;
+              continue;
+            }
+            const first = emit.length === 0;
+            const win = headWindowOf(
+              p.range, Math.max(0, room - used - join), first ? MIN_WINDOW_LINES : 0);
+            if (win && (first || win.end - win.start + 1 >= MIN_WINDOW_LINES)) {
+              emit.push(win);
+              used += join + renderSpan(win).length;
+            }
+            break;
+          }
+          return { emit, used };
+        };
+        let { emit, used } = fill(ceiling);
+        const reached = () => (emit.length ? emit[emit.length - 1]!.end : 0);
+        if (focus.some((l) => l > reached())) {
+          // Hold room back for the focus windows so the head can't eat all of it.
+          ({ emit, used } = fill(Math.floor(ceiling * 0.6)));
+        }
+        // What is left is SPLIT between the uncovered focus lines rather than
+        // handed to them in order. Greedy-in-source-order reproduces the very bug
+        // this guards: on a prose query resolving four focus lines, the two
+        // earliest took the whole reserve and `flushQueuedMessages` at L1102 —
+        // named in the question — was dropped again. A skipped or undersized
+        // window returns its share to the pool for the ones after it.
+        let covered = reached();
+        let room = Math.max(0, ceiling - used);
+        const pending = focus.filter((l) => l > covered);
+        for (let i = 0; i < pending.length; i++) {
+          const line = pending[i]!;
+          if (line <= covered) continue; // an earlier window already reached it
+          const share = Math.floor(room / (pending.length - i)) - GAP_MARKER.length;
+          if (share <= 0) continue;
+          const host = parts.find((p) => line >= p.range.start && line <= p.range.end)!;
+          const lo = Math.max(host.range.start, line - SPINE_WINDOW, covered + 1);
+          const hi = Math.min(host.range.end, line + SPINE_WINDOW);
+          const win = centeredWindowOf(line, lo, hi, share);
+          // Same sliver floor as the head window — a two-line peek at the call
+          // site teaches the next call's dedup to shred the block around it.
+          if (!win || win.end - win.start + 1 < MIN_WINDOW_LINES) continue;
+          emit.push(win);
+          const cost = GAP_MARKER.length + renderSpan(win).length;
+          used += cost;
+          room -= cost;
+          covered = win.end;
+        }
+        // Never empty: a section with no source sends the agent to Read.
+        if (emit.length === 0 && parts.length > 0) {
+          const first = headWindowOf(parts[0]!.range, ceiling, MIN_WINDOW_LINES);
+          if (first) emit.push(first);
+        }
+        return emit
+          .sort((a, b) => a.start - b.start)
+          .map((r) => ({ range: r, text: renderSpan(r) }));
+      };
+
       // Disk-drift gate (#1474): every render branch below except whole-file
       // slices fileContent (CURRENT bytes) at INDEXED line ranges. Content is
       // already in hand, so the check costs one stat (hash only on mismatch).
@@ -5189,7 +5458,11 @@ export class ToolHandler {
       const onSpineGodFile = hasSpineNode
         && namedBodyChars > allowance
         && group.nodes.some(n => CALLABLE_BODY.has(n.kind) && flow.uniqueNamedNodeIds.has(n.id) && !flow.pathNodeIds.has(n.id));
+      // A line RANGE the agent asked for (`lines 900-1003`) is not a symbol, so
+      // the per-symbol view has no way to show it — such a file takes the
+      // cluster path, which renders anchor spans first.
       if (!fileStale && adaptiveExploreEnabled() && flow.pathNodeIds.size > 0
+          && !anchorSpans.has(filePath)
           && (onSpineGodFile || (!hasSpineNode && isPolymorphicSibling(group.nodes) && !spared))) {
         const syms = group.nodes
           .filter(n => n.kind !== 'import' && n.kind !== 'export' && n.startLine > 0)
@@ -5197,33 +5470,92 @@ export class ToolHandler {
         // Pass 1: choose which symbols get a FULL body, by priority, greedily within
         // a per-file body cap — so one huge family file can't body every named method
         // and crowd out the other flow files (Django's query.py). A symbol earns a
-        // body if it's on-spine, or UNIQUELY named (`SQLCompiler.execute_sql`), or a
-        // co-named method WHEN this file DEFINES the family supertype (so the base
-        // `SQLCompiler.as_sql` body shows, but the 110 leaf `as_sql` overrides — and
-        // OkHttp's 5 `intercept`s if the agent names `intercept` — stay signatures).
+        // body if it's EXACT, on-spine, UNIQUELY named (`SQLCompiler.execute_sql`),
+        // or a co-named method WHEN this file DEFINES the family supertype (so the
+        // base `SQLCompiler.as_sql` body shows, but the 110 leaf `as_sql` overrides —
+        // and OkHttp's 5 `intercept`s if the agent names `intercept` — stay
+        // signatures). Tiers, most-wanted first:
+        //   0  EXACT — a qualified name or a line anchor (see `exactNodeIds`),
+        //   1  a spine step the agent NAMED,
+        //   2  a spine step it did not (the one unnamed bridge between two named),
+        //   3  a UNIQUELY named off-spine method,
+        //   4  a co-named method in the family's base file.
+        // Within a tier the spine keeps its CALL order, then source order. Source
+        // order alone let the smaller steps that happen to sit higher in the file
+        // take the cap: Django's `SQLCompiler.as_sql` — named, qualified, step 1 of
+        // the flow, 226 lines — lost to the unnamed bridge `get_qualify_sql` and to
+        // `get_select` and came back as its signature line, every time.
+        const chainPos = new Map([...flow.pathNodeIds].map((id, i) => [id, i]));
         const prio = (n: Node) => !CALLABLE_BODY.has(n.kind) ? 99
-          : flow.pathNodeIds.has(n.id) ? 0
-          : flow.uniqueNamedNodeIds.has(n.id) ? 1
-          : (fileDefinesSuper && flow.namedNodeIds.has(n.id)) ? 2 : 99;
+          : exactNodeIds.has(n.id) ? 0
+          : flow.pathNodeIds.has(n.id) ? (flow.namedNodeIds.has(n.id) ? 1 : 2)
+          : flow.uniqueNamedNodeIds.has(n.id) ? 3
+          : (fileDefinesSuper && flow.namedNodeIds.has(n.id)) ? 4 : 99;
+        // Tiers 0-1 are never reduced to a signature: a body too big for what is
+        // left is WINDOWED instead — its head plus the lines where it calls the
+        // other symbols the question named. A signature is the one render of a
+        // method the agent explicitly asked for that is guaranteed to send it to
+        // Read.
+        const WINDOWED_TIER = 1;
         // One WINDOW per file, sized by this file's RESERVATION. syms are taken by
-        // priority (spine first, then uniquely-named, then family-base), and the cap
-        // applies to ALL of them — including the spine — so a big-spine god-file
-        // (tokio's worker.rs: run→run_task→next_task→steal_work) can't eat the whole
-        // response and starve the co-flow file (harness.rs's poll). The native agent
-        // windows such a file too (~190 lines at a time), so this mimics, not
-        // truncates. Always emit ≥1 (never an empty section).
+        // priority, and the cap applies to ALL of them — including the spine — so a
+        // big-spine god-file (tokio's worker.rs: run→run_task→next_task→steal_work)
+        // can't eat the whole response and starve the co-flow file (harness.rs's
+        // poll). The native agent windows such a file too (~190 lines at a time),
+        // so this mimics, not truncates. Always emit ≥1 (never an empty section).
         //
         // Held to `fundedHeadroom` as well (CG-31) so this path cannot spend a
         // reservation still owed below it either. It never exceeds `allowance`
         // today, so the bound only bites once the ceiling is genuinely tight —
         // but "every render path" has to mean every one, or the guard is just a
         // detour the next god-file takes.
-        const bodyCap = Math.min(allowance, fundedHeadroom);
+        //
+        // Priced in RENDERED chars — line numbers included — and net of the
+        // signature lines the view also prints. Raw source length undercounts
+        // both, and once an oversize body is windowed to the room that is left
+        // the undercount stops being slack: the section ran 19% past what it
+        // was funded (excalidraw's App.tsx) and the four files below it
+        // rendered nothing.
+        const SIG_MAX = Math.max(12, budget.maxSymbolsInFileHeader * 2);
+        const sigReserve = syms.slice(0, SIG_MAX).reduce((sum, n) => sum + lineCost(n.startLine), 0);
+        const bodyCap = Math.max(0, Math.min(allowance, fundedHeadroom) - sigReserve);
         const bodyIds = new Set<string>();
+        /** Tier 0-1 bodies too big to fit whole, as the windows they render as. */
+        const bodyWindows = new Map<string, ExploreLineRange[]>();
         let bodyChars = 0;
-        for (const n of syms.filter(n => prio(n) < 99 && n.endLine >= n.startLine).sort((a, b) => prio(a) - prio(b))) {
-          const sz = fileLines.slice(n.startLine - 1, n.endLine).join('\n').length;
-          if (bodyChars + sz > bodyCap && bodyIds.size > 0) continue;
+        const ranked = syms
+          .filter(n => prio(n) < 99 && n.endLine >= n.startLine)
+          .sort((a, b) => prio(a) - prio(b)
+            || (chainPos.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (chainPos.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+            || a.startLine - b.startLine);
+        const deferred: Node[] = [];
+        for (const n of ranked) {
+          if (prio(n) > WINDOWED_TIER) continue;
+          const sz = renderedSpanCost(n.startLine, n.endLine);
+          if (bodyChars + sz <= bodyCap) {
+            bodyIds.add(n.id);
+            bodyChars += sz;
+          } else {
+            deferred.push(n);
+          }
+        }
+        for (const n of deferred) {
+          const room = bodyCap - bodyChars;
+          // Below MIN_CHARS a window cannot hold a readable block; with nothing
+          // emitted yet the never-empty floor inside `windowToCeiling` wins.
+          if (room < EXPLORE_ALLOCATION.MIN_CHARS && bodyIds.size + bodyWindows.size > 0) continue;
+          const range = { start: n.startLine, end: n.endLine };
+          const windows = windowToCeiling(
+            [{ range, text: renderSpan(range) }], Math.max(0, room), bodyFocusLines(n),
+          ).map((p) => p.range);
+          if (windows.length === 0) continue;
+          bodyWindows.set(n.id, windows);
+          bodyChars += windows.reduce((sum, w) => sum + renderedSpanCost(w.start, w.end), 0);
+        }
+        for (const n of ranked) {
+          if (prio(n) <= WINDOWED_TIER) continue;
+          const sz = renderedSpanCost(n.startLine, n.endLine);
+          if (bodyChars + sz > bodyCap && bodyIds.size + bodyWindows.size > 0) continue;
           bodyIds.add(n.id);
           bodyChars += sz;
         }
@@ -5233,7 +5565,6 @@ export class ToolHandler {
         const skel: Array<{ range: ExploreLineRange; text: string }> = [];
         let coveredUntil = 0; // skip symbols already inside an emitted body
         let sigCount = 0, sigDropped = 0;
-        const SIG_MAX = Math.max(12, budget.maxSymbolsInFileHeader * 2);
         for (const n of syms) {
           if (n.startLine <= coveredUntil) continue;
           if (bodyIds.has(n.id)) {
@@ -5244,6 +5575,19 @@ export class ToolHandler {
               text: withLineNumbers ? numberSourceLines(body, n.startLine) : body,
             });
             coveredUntil = end;
+          } else if (bodyWindows.has(n.id)) {
+            // Each hole in a windowed body is named with the explore query that
+            // returns it — a line range, which explore now honours — so the
+            // follow-up is one call, not a Read of the file.
+            const windows = bodyWindows.get(n.id)!;
+            windows.forEach((w, k) => {
+              const holeEnd = (windows[k + 1]?.start ?? n.endLine + 1) - 1;
+              const hole = holeEnd > w.end
+                ? `\n… lines ${w.end + 1}-${holeEnd} of \`${n.name}\` elided — codegraph_explore \`${filePath}:${w.end + 1}-${holeEnd}\` returns them`
+                : '';
+              skel.push({ range: w, text: renderSpan(w) + hole });
+            });
+            coveredUntil = n.endLine;
           } else {
             // Elide the body, emit the signature. node.startLine can point at a
             // decorator/annotation, so scan forward for the line that names the symbol.
@@ -5273,7 +5617,7 @@ export class ToolHandler {
           // (Session.swift, DataRequest.swift) that fired an over-investigation
           // spiral (the agent Read the skeletonized file, then kept digging).
           // CLAUDE.md: explore output must never tell the agent to Read.
-          const tag = bodyIds.size > 0
+          const tag = bodyIds.size + bodyWindows.size > 0
             ? 'focused (the methods you named in full, the rest as signatures — codegraph_explore a signature by name for its body; do NOT Read)'
             : 'skeleton (signatures only — codegraph_explore a name for its full body; do NOT Read)';
           // Dedup runs on the per-symbol parts, so a body the agent already has
@@ -5289,7 +5633,7 @@ export class ToolHandler {
             ranges: dd.parts.map((p) => p.range),
             covered: dd.covered,
             overhead: 120,
-            mode: bodyIds.size > 0 ? 'focused' : 'skeleton',
+            mode: bodyIds.size + bodyWindows.size > 0 ? 'focused' : 'skeleton',
             // Always "clipped": the per-symbol view elides bodies by construction.
             clipped: true,
             fullBody: withTail(skel),
@@ -5485,17 +5829,24 @@ export class ToolHandler {
       // budget — the agent explicitly asked for these symbols.
       const rangeNodes = new Map<string, Node>();
       for (const n of group.nodes) if (n.startLine > 0 && n.endLine > 0) rangeNodes.set(n.id, n);
-      for (const id of flow.namedNodeIds) {
+      for (const id of [...flow.namedNodeIds, ...exactNodeIds]) {
         if (rangeNodes.has(id)) continue;
         const n = cg.getNode(id);
         if (n && n.filePath === filePath && n.startLine > 0 && n.endLine > 0) rangeNodes.set(id, n);
       }
+      // EXACT targets outrank even the query's entry points: an entry is what the
+      // search matched, an exact target is the def the agent singled out. Their
+      // clusters rank first and get the spine's bounded overshoot (below), so a
+      // qualified `SQLCompiler.as_sql` is no longer outranked by a denser cluster
+      // around `SQLInsertCompiler.as_sql` that merely matched the bare name.
+      const EXACT_IMPORTANCE = 11;
       const ranges: Array<{ start: number; end: number; name: string; kind: string; importance: number; spine: boolean; spineCallLine?: number }> = [...rangeNodes.values()]
         // Drop whole-file envelope nodes (containers covering >50% of the file).
         .filter(n => !(ENVELOPE_KINDS.has(n.kind) && (n.endLine - n.startLine + 1) > fileLines.length * 0.5))
         .map(n => {
           let importance = 1;
-          if (entryNodeIds.has(n.id)) importance = 10;
+          if (exactNodeIds.has(n.id)) importance = EXACT_IMPORTANCE;
+          else if (entryNodeIds.has(n.id)) importance = 10;
           else if (flow.namedNodeIds.has(n.id)) importance = 9; // agent named it → keep its cluster
           else if (glueNodeIds.has(n.id)) importance = 6; // bridging caller/callee of an entry
           else if (connectedToEntry.has(n.id)) importance = 3;
@@ -5524,6 +5875,15 @@ export class ToolHandler {
           const targetName = targetNode?.name ?? edge.kind;
           ranges.push({ start: edge.line, end: edge.line, name: targetName, kind: edge.kind, importance: 2, spine: false });
         }
+      }
+
+      // Line spans the agent anchored in this file (`lines 900-1003`) are exact
+      // targets too — rendered as exactly the span asked for, not as the
+      // symbols around it.
+      for (const span of anchorSpans.get(filePath) ?? []) {
+        if (span.start > fileLines.length) continue;
+        const end = Math.min(span.end, fileLines.length);
+        ranges.push({ start: span.start, end, name: `lines ${span.start}-${end}`, kind: 'range', importance: EXACT_IMPORTANCE, spine: false });
       }
 
       ranges.sort((a, b) => a.start - b.start);
@@ -5595,7 +5955,6 @@ export class ToolHandler {
       // the exact gap this closes. Bounded, so a god-method can't blow the budget yet
       // the spine's call still appears in context.
       const OVERSIZE_SPINE_LINES = 200;
-      const SPINE_WINDOW = 28; // lines each side of the next-hop call site
       // Returns the rendered text as SPAN-KEYED PARTS. Every part carries the
       // exact line range its text was sliced from, which two things depend on:
       // the session record (CG-17) — a record claiming lines it never sent would
@@ -5604,7 +5963,6 @@ export class ToolHandler {
       // agent already holds the rest. Both read the spans from the function that
       // does the slicing; a second function mirroring these window/padding rules
       // would drift.
-      type SectionPart = { range: ExploreLineRange; text: string };
       // Every fit decision below measures parts joined by BARE gap markers.
       // Naming what a gap skipped (#1711) is added once, at assembly, from what
       // the file's budget has left: measured with the names, a shrunk cluster
@@ -5614,9 +5972,13 @@ export class ToolHandler {
       const sectionText = (parts: ReadonlyArray<SectionPart>): string =>
         joinPartsWithNamedGaps(filePath, parts, fileIndexNodes, 0);
       const buildSection = (
-        c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number },
+        c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number; maxImportance?: number },
       ): SectionPart[] => {
-        if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES) {
+        // Not for a cluster holding an exact target: its body is what was asked
+        // for, so it is kept whole up to the ceiling and only then windowed —
+        // by `windowToCeiling`, which keeps the call site AND the named defs.
+        if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES
+            && (c.maxImportance ?? 0) < EXACT_IMPORTANCE) {
           const call = c.spineCallLine;
           const winStart = Math.max(c.start, call - SPINE_WINDOW);
           const winEnd = Math.min(c.end, call + SPINE_WINDOW);
@@ -5648,9 +6010,6 @@ export class ToolHandler {
         }];
       };
 
-      /** Rendered cost of one source line, line numbering included. */
-      const lineCost = (ln: number): number =>
-        (fileLines[ln - 1] ?? '').length + 1 + (withLineNumbers ? String(ln).length + 1 : 0);
       /** Rendered cost of one member on its own, context padding included. */
       const paddedCost = (r: ExploreRange): number => {
         let chars = 0;
@@ -5665,19 +6024,23 @@ export class ToolHandler {
        * is incidental context that happens to sit within `gapThreshold` of it.
        */
       const isProtectedMember = (r: ExploreRange): boolean => r.importance >= 9 || r.spine;
-      /** Whole member ranges, re-merged in source order and rendered. */
-      const partsOfMembers = (members: ReadonlyArray<ExploreRange>): SectionPart[] => {
-        // Re-merge in source order so adjacent survivors read as one block
-        // rather than a stutter of one-symbol fragments.
-        const sorted = [...members].sort((a, b) => a.start - b.start);
+      /**
+       * Kept ranges re-merged in source order, the way a cluster merges — so
+       * adjacent survivors read as one block rather than a stutter of
+       * one-symbol fragments.
+       */
+      const mergeKept = (keep: ReadonlyArray<ExploreRange>): Array<{ start: number; end: number }> => {
         const merged: Array<{ start: number; end: number }> = [];
-        for (const r of sorted) {
+        for (const r of [...keep].sort((a, b) => a.start - b.start)) {
           const last = merged[merged.length - 1];
           if (last && r.start <= last.end + gapThreshold) last.end = Math.max(last.end, r.end);
           else merged.push({ start: r.start, end: r.end });
         }
-        return merged.flatMap((m) => buildSection(m));
+        return merged;
       };
+      /** Whole member ranges, re-merged in source order and rendered. */
+      const partsOfMembers = (members: ReadonlyArray<ExploreRange>): SectionPart[] =>
+        mergeKept(members).flatMap((m) => buildSection(m));
       /**
        * What this cluster's protected members cost to render on their own, after
        * the session history — the room a cluster ranked ABOVE it must leave for
@@ -5726,6 +6089,14 @@ export class ToolHandler {
        * numbers) because it is a bound — the ceiling past which the render is
        * windowed, or bytes owed to a cluster below — not an estimate.
        */
+      /**
+       * Exact rendered size of `keep` once merged, padded and joined — what
+       * `sectionText` will measure — via a prefix sum, so pricing a candidate
+       * member costs O(members), not a re-render.
+       */
+      const renderedSizeOfKept = (keep: readonly ExploreRange[]): number =>
+        mergeKept(keep).reduce((sum, m, i) =>
+          sum + renderedSpanCost(m.start - contextPadding, m.end + contextPadding) + (i > 0 ? GAP_MARKER.length : 0), 0);
       const shrinkCluster = (
         c: ExploreCluster, cap: number, incidentalCap?: number,
       ): SectionPart[] | null => {
@@ -5734,176 +6105,50 @@ export class ToolHandler {
         const byImportance = [...c.members].sort((a, b) =>
           (guarded ? Number(isProtectedMember(b)) - Number(isProtectedMember(a)) : 0)
           || b.importance - a.importance || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
-        const sizeOf = (r: ExploreRange) => fileLines.slice(r.start - 1, r.end).join('\n').length;
         const keep: ExploreRange[] = [];
-        let kept = 0;
-        // Rendered size of what is kept so far, once the first incidental member
-        // is weighed. Every protected member sorts ahead of it, so this is the
-        // exact cost of the protected set; each incidental member then adds its
-        // own padded span, an over-estimate that errs toward the cluster below.
-        let rendered: number | undefined;
-        for (const r of byImportance) {
-          const sz = sizeOf(r) + GAP_MARKER.length;
-          // Always keep the most important range, even if it alone is oversize —
-          // an empty section sends the agent to Read, which costs far more. How
-          // far it may overshoot is bounded by the caller's ceiling (CG-30), which
-          // windows a runaway member instead of dropping it.
-          if (keep.length > 0 && kept + sz > cap) continue;
-          if (guarded && keep.length > 0 && !isProtectedMember(r)) {
-            rendered ??= sectionText(dedupeSpans(partsOfMembers(keep)).parts).length;
-            const cost = paddedCost(r) + GAP_MARKER.length;
-            if (rendered + cost > incidentalCap) continue;
-            rendered += cost;
+        if (c.maxImportance >= EXACT_IMPORTANCE) {
+          // An EXACT target prices EVERY member in rendered chars, protected
+          // ones included. The raw estimate below over-keeps on purpose and
+          // leaves the ceiling trim to cut — but that trim fills in SOURCE
+          // order, so any member above the exact body in the file (an entry
+          // point, a named neighbour) was paid for first and the body the agent
+          // asked for lost its tail (Django's `SQLCompiler.as_sql` stopped at
+          // L944 of 1001 behind a 15-line neighbour). Priced exactly, the kept
+          // set fits and the trim has nothing left to cut unless the exact body
+          // ALONE overruns the ceiling — where it is windowed on its focus
+          // lines. Incidental members also fit `incidentalCap`, as below.
+          for (const r of byImportance) {
+            const limit = guarded && !isProtectedMember(r) ? Math.min(cap, incidentalCap!) : cap;
+            if (keep.length > 0 && renderedSizeOfKept([...keep, r]) > limit) continue;
+            keep.push(r);
           }
-          keep.push(r);
-          kept += sz;
+        } else {
+          const sizeOf = (r: ExploreRange) => fileLines.slice(r.start - 1, r.end).join('\n').length;
+          let kept = 0;
+          // Rendered size of what is kept so far, once the first incidental member
+          // is weighed. Every protected member sorts ahead of it, so this is the
+          // exact cost of the protected set; each incidental member then adds its
+          // own padded span, an over-estimate that errs toward the cluster below.
+          let rendered: number | undefined;
+          for (const r of byImportance) {
+            const sz = sizeOf(r) + GAP_MARKER.length;
+            // Always keep the most important range, even if it alone is oversize —
+            // an empty section sends the agent to Read, which costs far more. How
+            // far it may overshoot is bounded by the caller's ceiling (CG-30), which
+            // windows a runaway member instead of dropping it.
+            if (keep.length > 0 && kept + sz > cap) continue;
+            if (guarded && keep.length > 0 && !isProtectedMember(r)) {
+              rendered ??= sectionText(dedupeSpans(partsOfMembers(keep)).parts).length;
+              const cost = paddedCost(r) + GAP_MARKER.length;
+              if (rendered + cost > incidentalCap!) continue;
+              rendered += cost;
+            }
+            keep.push(r);
+            kept += sz;
+          }
         }
         if (keep.length === c.members.length) return null;
         return partsOfMembers(keep);
-      };
-
-      /**
-       * Bounded overshoot for one cluster's render (CG-30).
-       *
-       * `shrinkCluster` keeps the highest-importance member whole even when that
-       * member alone is oversize — an empty file section sends the agent to Read,
-       * which is exactly what explore exists to prevent. But "never empty" is not
-       * "any size": with nothing bounding it, one 22K member rendered against a
-       * 9K reservation (2.4x), which collapses the headroom every file ranked
-       * below it draws from. Past the ceiling the member is WINDOWED rather than
-       * dropped — a leading window (signature + head of the body), plus a window
-       * on the spine's call site when the head misses it, since on a flow cluster
-       * the call path IS the answer.
-       */
-      const MIN_WINDOW_LINES = 12;
-      /**
-       * Longest prefix of `r` that fits `room`. `minLines` is the never-empty
-       * floor — it may overrun `room`, so it is only ever asked for when nothing
-       * else has been emitted and the alternative is an empty section.
-       */
-      const headWindowOf = (
-        r: ExploreLineRange, room: number, minLines = 0,
-      ): ExploreLineRange | null => {
-        let end = r.start - 1;
-        let chars = 0;
-        for (let ln = r.start; ln <= r.end; ln++) {
-          const cost = lineCost(ln);
-          if (chars + cost > room && end - r.start + 1 >= minLines) break;
-          chars += cost;
-          end = ln;
-        }
-        return end >= r.start ? { start: r.start, end } : null;
-      };
-      /** Widest window around `line` inside [lo, hi] that fits `room`. */
-      const centeredWindowOf = (
-        line: number, lo: number, hi: number, room: number,
-      ): ExploreLineRange | null => {
-        if (line < lo || line > hi) return null;
-        let start = line, end = line, chars = lineCost(line);
-        for (let grown = true; grown;) {
-          grown = false;
-          if (end + 1 <= hi && chars + lineCost(end + 1) <= room) { end += 1; chars += lineCost(end); grown = true; }
-          if (start - 1 >= lo && chars + lineCost(start - 1) <= room) { start -= 1; chars += lineCost(start); grown = true; }
-        }
-        return { start, end };
-      };
-      /**
-       * Reduce rendered parts to fit `ceiling`, never to nothing. Whole parts are
-       * kept while they fit; the first part that overruns is cut to a leading
-       * window on whole lines (a body is never cut mid-line), and everything past
-       * it is dropped. The GAP_MARKER between surviving parts — and the line-number
-       * jump — is what tells the agent the cut happened.
-       *
-       * A partial window shorter than MIN_WINDOW_LINES is not worth emitting, and
-       * emitting one is actively harmful: the session record then claims a 4-line
-       * sliver, and the NEXT call's dedup has to either shred a whole block around
-       * it or re-send it. Below that floor the part is simply dropped — unless
-       * nothing has been emitted at all, where the floor wins over the ceiling
-       * because an empty section is the one outcome worse than an oversize one.
-       *
-       * `focusLines` are the lines this trim must not lose: the spine's next-hop
-       * call site (CG-30) and every definition the agent NAMED inside the cluster
-       * (CG-38). The head fill is source-ordered, so a named def in the TAIL of a
-       * large file is otherwise always the first thing an over-ceiling render
-       * drops — the one span the agent asked for by name, cut in favour of
-       * head-of-file filler it did not ask for. The full-ceiling fill is tried
-       * FIRST and the 60% hold-back applies only when a focus line is actually
-       * left uncovered, so a cluster whose head already reaches its focus keeps
-       * the whole ceiling for source.
-       */
-      const windowToCeiling = (
-        parts: ReadonlyArray<SectionPart>,
-        ceiling: number,
-        focusLines: ReadonlyArray<number> = [],
-      ): SectionPart[] => {
-        const inParts = (line: number) =>
-          parts.some((p) => line >= p.range.start && line <= p.range.end);
-        const focus = [...new Set(focusLines)]
-          .filter((l) => typeof l === 'number' && l > 0 && inParts(l))
-          .sort((a, b) => a - b);
-        /** Source-ordered fill of whole parts, the overrunning one cut to a head window. */
-        const fill = (room: number): { emit: ExploreLineRange[]; used: number } => {
-          const emit: ExploreLineRange[] = [];
-          let used = 0;
-          for (const p of parts) {
-            const join = emit.length > 0 ? GAP_MARKER.length : 0;
-            if (used + join + p.text.length <= room) {
-              emit.push(p.range);
-              used += join + p.text.length;
-              continue;
-            }
-            const first = emit.length === 0;
-            const win = headWindowOf(
-              p.range, Math.max(0, room - used - join), first ? MIN_WINDOW_LINES : 0);
-            if (win && (first || win.end - win.start + 1 >= MIN_WINDOW_LINES)) {
-              emit.push(win);
-              used += join + renderSpan(win).length;
-            }
-            break;
-          }
-          return { emit, used };
-        };
-        let { emit, used } = fill(ceiling);
-        const reached = () => (emit.length ? emit[emit.length - 1]!.end : 0);
-        if (focus.some((l) => l > reached())) {
-          // Hold room back for the focus windows so the head can't eat all of it.
-          ({ emit, used } = fill(Math.floor(ceiling * 0.6)));
-        }
-        // What is left is SPLIT between the uncovered focus lines rather than
-        // handed to them in order. Greedy-in-source-order reproduces the very bug
-        // this guards: on a prose query resolving four focus lines, the two
-        // earliest took the whole reserve and `flushQueuedMessages` at L1102 —
-        // named in the question — was dropped again. A skipped or undersized
-        // window returns its share to the pool for the ones after it.
-        let covered = reached();
-        let room = Math.max(0, ceiling - used);
-        const pending = focus.filter((l) => l > covered);
-        for (let i = 0; i < pending.length; i++) {
-          const line = pending[i]!;
-          if (line <= covered) continue; // an earlier window already reached it
-          const share = Math.floor(room / (pending.length - i)) - GAP_MARKER.length;
-          if (share <= 0) continue;
-          const host = parts.find((p) => line >= p.range.start && line <= p.range.end)!;
-          const lo = Math.max(host.range.start, line - SPINE_WINDOW, covered + 1);
-          const hi = Math.min(host.range.end, line + SPINE_WINDOW);
-          const win = centeredWindowOf(line, lo, hi, share);
-          // Same sliver floor as the head window — a two-line peek at the call
-          // site teaches the next call's dedup to shred the block around it.
-          if (!win || win.end - win.start + 1 < MIN_WINDOW_LINES) continue;
-          emit.push(win);
-          const cost = GAP_MARKER.length + renderSpan(win).length;
-          used += cost;
-          room -= cost;
-          covered = win.end;
-        }
-        // Never empty: a section with no source sends the agent to Read.
-        if (emit.length === 0 && parts.length > 0) {
-          const first = headWindowOf(parts[0]!.range, ceiling, MIN_WINDOW_LINES);
-          if (first) emit.push(first);
-        }
-        return emit
-          .sort((a, b) => a.start - b.start)
-          .map((r) => ({ range: r, text: renderSpan(r) }));
       };
 
       /**
@@ -5921,7 +6166,14 @@ export class ToolHandler {
           .sort((a, b) => b.importance - a.importance || a.start - b.start)
           .slice(0, MAX_FOCUS_LINES)
           .map((m) => m.start);
-        return c.spineCallLine ? [c.spineCallLine, ...named] : named;
+        // An exact body cut by the ceiling keeps its calls into the question's
+        // other symbols too, not only its def line — the same focus the
+        // per-symbol view windows by.
+        const exactFocus = c.maxImportance < EXACT_IMPORTANCE ? [] : [...exactNodeIds]
+          .map((id) => subgraph.nodes.get(id))
+          .filter((n): n is Node => !!n && n.filePath === filePath && n.startLine >= c.start && n.endLine <= c.end)
+          .flatMap((n) => bodyFocusLines(n));
+        return [...exactFocus, ...(c.spineCallLine ? [c.spineCallLine] : []), ...named];
       };
 
       /**
@@ -5995,10 +6247,14 @@ export class ToolHandler {
       const rankedClusters = clusters
         .map((c, i) => ({ idx: i, span: c.end - c.start + 1, c }))
         .sort((a, b) => {
-          // Spine clusters first — the rendered call path IS the flow answer, so it
+          // Exact-target clusters first — the def (or span) the agent singled out.
+          // Then spine clusters — the rendered call path IS the flow answer, so it
           // outranks any denser block of peripheral declarations (a low-density entry
           // method must not lose the budget to them). Within spine / within non-spine,
           // the existing importance → density → score → span order holds.
+          const aExact = a.c.maxImportance >= EXACT_IMPORTANCE;
+          const bExact = b.c.maxImportance >= EXACT_IMPORTANCE;
+          if (aExact !== bExact) return (bExact ? 1 : 0) - (aExact ? 1 : 0);
           if (a.c.hasSpine !== b.c.hasSpine) return (b.c.hasSpine ? 1 : 0) - (a.c.hasSpine ? 1 : 0);
           if (b.c.maxImportance !== a.c.maxImportance) return b.c.maxImportance - a.c.maxImportance;
           const densityA = a.c.score / a.span;
@@ -6062,6 +6318,9 @@ export class ToolHandler {
         const spent = projectedChars + (chosenIndices.size > 0 ? GAP_MARKER.length : 0);
         return Math.min(room, fileBudget - spent) - owedBelow;
       };
+      /** Rendered cost of a cluster's EXACT members on their own. */
+      const exactCostOf = (c: ExploreCluster): number =>
+        renderedSizeOfKept(c.members.filter((m) => m.importance >= EXACT_IMPORTANCE));
       for (let p = 0; p < rankedClusters.length; p++) {
         const rc = rankedClusters[p]!;
         // The top-ranked cluster is always taken — an empty file section sends the
@@ -6073,15 +6332,31 @@ export class ToolHandler {
         // A spine cluster (the rendered call path) is the flow answer — it may run
         // past the per-file budget up to the spine ceiling; non-spine clusters obey
         // the normal per-file budget.
-        const cap = rc.c.hasSpine ? SPINE_CEILING : fileBudget;
+        const cap = rc.c.hasSpine || rc.c.maxImportance >= EXACT_IMPORTANCE ? SPINE_CEILING : fileBudget;
         // CG-30: shrinking keeps the top member whole however big it is, so bound
         // how far that member may overshoot — the same 1.5x-of-reservation bound
         // SPINE_CEILING already draws, never below `cap` (a cluster that fits its
         // cap is never windowed). A spine cluster's cap already IS that bound, so
         // this holds it to it rather than letting the member rule walk past it.
         const ceiling = Math.max(cap, SPINE_CEILING);
+        // Several exact targets can land in different clusters of one big file —
+        // a pinned 13K-line App.tsx merges into a handful of giant clusters, and
+        // `App.triggerRender` and `App.handleCanvasPointerDown` sat in two. The
+        // one ranked first spent the whole cap on its own neighbours and the
+        // other target rendered nothing. So an exact cluster holds back what the
+        // exact clusters ranked BELOW it still owe — never cutting into its own
+        // targets — and each target renders, windowed if it must.
+        const owedExact = rc.c.maxImportance < EXACT_IMPORTANCE ? 0
+          : rankedClusters.slice(p + 1).reduce((n, other) => (other.c.maxImportance < EXACT_IMPORTANCE
+            ? n : n + exactCostOf(other.c) + GAP_MARKER.length), 0);
+        const holdBack = (room: number): number => (owedExact > 0
+          ? Math.min(room, Math.max(exactCostOf(rc.c), room - owedExact))
+          : room);
         if (first) {
-          const section = renderCluster(rc.c, cap, ceiling, incidentalCapFor(p, cap));
+          const firstCap = holdBack(cap);
+          const section = renderCluster(
+            rc.c, firstCap, owedExact > 0 ? firstCap : ceiling, incidentalCapFor(p, firstCap),
+          );
           renderedClusters.set(rc.idx, section);
           anyClusterShrunk = anyClusterShrunk || section.shrunk;
           chosenIndices.add(rc.idx);
@@ -6104,7 +6379,7 @@ export class ToolHandler {
         // nothing") applied between CLUSTERS. Below `MIN_CHARS` the remainder can't
         // hold one readable block, so it stays a drop rather than a stutter of
         // fragments the next call's dedup then has to shred around.
-        const room = cap - projectedChars - GAP_MARKER.length;
+        const room = holdBack(cap - projectedChars - GAP_MARKER.length);
         if (room < EXPLORE_ALLOCATION.MIN_CHARS) continue;
         const section = renderCluster(rc.c, room, room, incidentalCapFor(p, room));
         const text = sectionText(section.parts);
