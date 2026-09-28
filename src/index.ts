@@ -1368,7 +1368,8 @@ export class CodeGraph {
       // just degrade to scans until the recreate.
       bulkEdgeLoad: {
         begin: () => this.db.beginBulkEdgeLoad(),
-        end: () => this.db.endBulkEdgeLoad(),
+        end: () => this.db.endBulkEdgeLoad({ deferSynthesisSite: true }),
+        deferred: () => this.db.createSynthesisSiteIndex(),
       },
       refIndexLoad: {
         begin: () => this.db.beginBulkRefLoad(),

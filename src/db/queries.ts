@@ -278,6 +278,10 @@ export class QueryBuilder {
     getUnresolvedByName?: SqliteStatement;
     getNodesByName?: SqliteStatement;
     getNodesByNamePrefix?: SqliteStatement;
+    fileHasExportedNode?: SqliteStatement;
+    existingNodeIdsFull?: SqliteStatement;
+    getExportedNodesByFile?: SqliteStatement;
+    getNodesByFileAndName?: SqliteStatement;
     getFileNodesByNamePrefix?: SqliteStatement;
     getNodesByQualifiedNameExact?: SqliteStatement;
     getNodesByLowerName?: SqliteStatement;
@@ -310,6 +314,11 @@ export class QueryBuilder {
   // (and therefore resolution's insertion-order disambiguation) is identical
   // to the one-row-per-run path.
   private batchStmts: Map<string, SqliteStatement> = new Map();
+  // Kind-filtered edge reads build their SQL per call (a variable IN list),
+  // but from a handful of kind sets: prepare each shape once. Supertype walks
+  // and the member-lookup passes issue them per node, and preparing cost
+  // about a third of the read.
+  private edgeKindStmts: Map<string, SqliteStatement> = new Map();
   private static readonly BATCH_SIZES: readonly number[] = [128, 32, 8, 1];
 
   /**
@@ -369,6 +378,17 @@ export class QueryBuilder {
     this.db = db;
     this.stmts = {};
     this.batchStmts.clear();
+    this.edgeKindStmts.clear();
+  }
+
+  private edgeKindStmt(sql: string): SqliteStatement {
+    let stmt = this.edgeKindStmts.get(sql);
+    if (!stmt) {
+      if (this.edgeKindStmts.size >= 64) this.edgeKindStmts.delete(this.edgeKindStmts.keys().next().value!);
+      stmt = this.db.prepare(sql);
+      this.edgeKindStmts.set(sql, stmt);
+    }
+    return stmt;
   }
 
   /** Set the normalized project-name tokens used to down-weight non-discriminative
@@ -914,10 +934,17 @@ export class QueryBuilder {
     const uniqueIds = [...new Set(ids)];
     for (let i = 0; i < uniqueIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
       const chunk = uniqueIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
-      const placeholders = chunk.map(() => '?').join(',');
-      const rows = this.db
-        .prepare(`SELECT id FROM nodes WHERE id IN (${placeholders})`)
-        .all(...chunk) as { id: string }[];
+      // Every edge insert checks its endpoints here, a chunk at a time: the
+      // full-size statement is prepared once, the final partial chunk ad hoc.
+      let stmt: SqliteStatement;
+      if (chunk.length === SQLITE_PARAM_CHUNK_SIZE) {
+        stmt = this.stmts.existingNodeIdsFull ??= this.db.prepare(
+          `SELECT id FROM nodes WHERE id IN (${new Array(SQLITE_PARAM_CHUNK_SIZE).fill('?').join(',')})`
+        );
+      } else {
+        stmt = this.db.prepare(`SELECT id FROM nodes WHERE id IN (${chunk.map(() => '?').join(',')})`);
+      }
+      const rows = stmt.all(...chunk) as { id: string }[];
       for (const row of rows) {
         out.add(row.id);
       }
@@ -945,6 +972,39 @@ export class QueryBuilder {
    */
   clearCache(): void {
     this.nodeCache.clear();
+  }
+
+  /**
+   * Whether any node in `filePath` is exported — `getNodesByFile(f).some((n) =>
+   * n.isExported)` as one indexed probe, without decoding the file's nodes.
+   */
+  fileHasExportedNode(filePath: string): boolean {
+    if (!this.stmts.fileHasExportedNode) {
+      this.stmts.fileHasExportedNode = this.db.prepare(
+        'SELECT 1 FROM nodes WHERE file_path = ? AND is_exported = 1 LIMIT 1'
+      );
+    }
+    return this.stmts.fileHasExportedNode.get(filePath) !== undefined;
+  }
+
+  /** The exported nodes of a file, in {@link getNodesByFile} order, decoding only those rows. */
+  getExportedNodesByFile(filePath: string): Node[] {
+    if (!this.stmts.getExportedNodesByFile) {
+      this.stmts.getExportedNodesByFile = this.db.prepare(
+        'SELECT * FROM nodes WHERE file_path = ? AND is_exported = 1 ORDER BY start_line, id'
+      );
+    }
+    return (this.stmts.getExportedNodesByFile.all(filePath) as NodeRow[]).map(rowToNode);
+  }
+
+  /** The nodes of a file with one name, in {@link getNodesByFile} order, decoding only those rows. */
+  getNodesByFileAndName(filePath: string, name: string): Node[] {
+    if (!this.stmts.getNodesByFileAndName) {
+      this.stmts.getNodesByFileAndName = this.db.prepare(
+        'SELECT * FROM nodes WHERE file_path = ? AND name = ? ORDER BY start_line, id'
+      );
+    }
+    return (this.stmts.getNodesByFileAndName.all(filePath, name) as NodeRow[]).map(rowToNode);
   }
 
   /**
@@ -1176,6 +1236,23 @@ export class QueryBuilder {
     // materializing/sorting all of a large project's methods in memory.
     const stmt = this.db.prepare('SELECT * FROM nodes WHERE kind = ? ORDER BY file_path, start_line, id');
     for (const row of stmt.iterate(kind)) {
+      yield rowToNode(row as NodeRow);
+    }
+  }
+
+  /**
+   * iterateNodesByKind narrowed to some languages, in the same canonical
+   * order — the ORDER BY is total (`id` is unique), so this yields exactly the
+   * nodes a caller filtering iterateNodesByKind by language would keep, in the
+   * same sequence. A Go pass on a TypeScript monorepo otherwise materialized
+   * every method in the project to find a couple of Go ones.
+   */
+  *iterateNodesByKindIn(kind: NodeKind, languages: readonly string[]): IterableIterator<Node> {
+    if (languages.length === 0) return;
+    const stmt = this.db.prepare(
+      `SELECT * FROM nodes WHERE kind = ? AND language IN (${languages.map(() => '?').join(', ')}) ORDER BY file_path, start_line, id`
+    );
+    for (const row of stmt.iterate(kind, ...languages)) {
       yield rowToNode(row as NodeRow);
     }
   }
@@ -1992,7 +2069,7 @@ export class QueryBuilder {
       }
 
       sql += ' ORDER BY kind, target, line, col';
-      const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
+      const rows = this.edgeKindStmt(sql).all(...params) as EdgeRow[];
       return rows.map(rowToEdge);
     }
 
@@ -2012,7 +2089,7 @@ export class QueryBuilder {
   getIncomingEdges(targetId: string, kinds?: EdgeKind[]): Edge[] {
     if (kinds && kinds.length > 0) {
       const sql = `SELECT * FROM edges WHERE target = ? AND kind IN (${kinds.map(() => '?').join(',')}) ORDER BY kind, source, line, col`;
-      const rows = this.db.prepare(sql).all(targetId, ...kinds) as EdgeRow[];
+      const rows = this.edgeKindStmt(sql).all(targetId, ...kinds) as EdgeRow[];
       return rows.map(rowToEdge);
     }
 
