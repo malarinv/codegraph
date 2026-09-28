@@ -594,6 +594,15 @@ export const EXPLORE_ALLOCATION = {
    * Safety valve, as a fraction of the envelope. Not the primary guard any more —
    * the proportional split is — so this only has to stop a pathological
    * single-file response.
+   *
+   * It does not apply to a file the query NAMED — one that defines a symbol the
+   * query spelled, or that the query named by path. The valve hedges against a
+   * mis-ranked dominant file, and a file the agent asked for by name is not
+   * one. It also never redistributed: a clamped file's excess was simply left
+   * unreserved, and the carry-forward only moves reservations, so nobody could
+   * spend it. On express, "response.js res.send res.json res.render …" admits
+   * one file, clamps it at 9,100 with 3,700 of the pool unreserved, and cuts
+   * the named `send` body at 55 of 97 lines in a 10.9K response to a 13K budget.
    */
   MAX_SHARE: 0.7,
   /**
@@ -691,6 +700,12 @@ export interface ExploreAllocationCandidate {
    * graph scores (which a pure-path query doesn't produce) defeats the ask.
    */
   pinned?: boolean;
+  /**
+   * The query named a symbol this file defines (the named-first sort tier). Like
+   * a pinned file, it is exempt from the `MAX_SHARE` valve: its proportional
+   * share stands, bounded only by the pool.
+   */
+  named?: boolean;
 }
 
 export interface ExploreAllocation {
@@ -702,6 +717,11 @@ export interface ExploreAllocation {
   cliffAt: number;
   /** Chars actually split among the admitted files. */
   pool: number;
+}
+
+/** A file the query asked for by name — a symbol it defines, or its path. */
+function isNamedCandidate(c: Pick<ExploreAllocationCandidate, 'named' | 'pinned'>): boolean {
+  return c.named === true || c.pinned === true;
 }
 
 /**
@@ -795,10 +815,12 @@ export function allocateExploreBudget(
   // exactly — the render loop spends them, so an over-allocation is an over-long
   // response the hard ceiling then has to truncate. Flooring costs at most one
   // char per file.
+  // The valve spares a file the query named (see MAX_SHARE): its share is already
+  // a slice of `pool`, so the reservations still fit the pool exactly.
   for (const c of admitted) {
     const share = Math.floor(floors / admitted.length)
       + Math.floor((remainder * (weights.get(c.path) ?? 0)) / total);
-    allowances.set(c.path, Math.min(share, ceiling));
+    allowances.set(c.path, isNamedCandidate(c) ? share : Math.min(share, ceiling));
   }
   return { allowances, cliffed, cliffAt, pool };
 }
@@ -4774,6 +4796,7 @@ export class ToolHandler {
         spine: group.nodes.some((n) => flow.pathNodeIds.has(n.id) || exactNodeIds.has(n.id))
           || anchorSpans.has(fp),
         pinned: pinnedSet.has(fp),
+        named: namedSeedFiles.has(fp),
       })),
       budget,
       maxFiles,
@@ -4871,7 +4894,21 @@ export class ToolHandler {
         const g = fileGroups.get(fp);
         return g ? n + pointerLineFor(fp, g.nodes).length + 1 : n;
       }, cliffedFiles.size > 0 ? POINTER_HEADER.length + 2 : 0);
-    const epilogueFloor = EPILOGUE_LOST_NOTE.length + 2 + cliffPointerFloor;
+    // The summary line ("Found N symbols across M files. …") is written only
+    // after the final cut, and sits in `lines` as an empty placeholder until
+    // then — so the loop never paid for it, and a response filled to the
+    // ceiling ended up past it by the line's length once it was filled in: five
+    // of 47 measured responses over the 25K inline cap (up to 25,032), or the
+    // lost-pointer note above squeezed out.
+    // Reserved at its worst case: the gather's symbol and file counts bound the
+    // shown ones from above.
+    const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const summaryReserve = `Found ${plural(subgraph.nodes.size, 'symbol')} across ${plural(fileGroups.size, 'file')}.`.length
+      + (pinnedFiles.length > 0 ? ` ${plural(pinnedFiles.length, 'file')} pinned from the query.`.length : 0)
+      + (unresolvedPathSpans.length > 0
+        ? ` No indexed file uniquely matches ${unresolvedPathSpans.map((sp) => `\`${sp}\``).join(', ')}.`.length
+        : 0);
+    const epilogueFloor = EPILOGUE_LOST_NOTE.length + 2 + cliffPointerFloor + summaryReserve;
     // Absolute stop for the render loop. Reservations already fit the envelope, so
     // this only catches their bounded overshoot (the whole-file grace, an oversize
     // first cluster) — and catches it HERE, where a file can be skipped cleanly and
@@ -4936,16 +4973,42 @@ export class ToolHandler {
     // `sourceSpent` outrun `reservedSoFar`, which suppresses slack until a later
     // under-spend covers the debt. So the pool is conserved in both directions,
     // and no file is ever cut BELOW the reservation it was promised.
+    //
+    // Both totals count what a file is GUARANTEED (below), which is its whole
+    // reservation for every file but a named one. A named file's share above
+    // the `MAX_SHARE` valve is spare-room money, not a promise: it is entered
+    // only once the loop has moved past the file, and only as far as the file
+    // actually spent it (`unsettledSoft`). Booked in full up front, whatever the
+    // file could not spend would flow down as slack that exists only in the
+    // ledger, and count against the buy rule's funding line as a debt nobody
+    // owes.
     let reservedSoFar = 0;
     let sourceSpent = 0;
+    let unsettledSoft = 0;
+    const valveCap = Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE);
+    const isNamedFile = (path: string): boolean =>
+      isNamedCandidate({ named: namedSeedFiles.has(path), pinned: pinnedSet.has(path) });
+    /**
+     * What the render loop GUARANTEES a file, whatever that costs the files
+     * below it: its reservation, except a named file's share above the
+     * `MAX_SHARE` valve. The allocator lifts the valve for a named file to hand
+     * it budget no other file would spend, not to take room a lower file is
+     * owed — so that part is funded only from spare room, and is never held back
+     * for it either. Guaranteeing the whole reservation dropped two admitted
+     * files from a saturated django response so the named `query.py` could ship
+     * 3K more of itself.
+     */
+    const guaranteedOf = (path: string, reserved: number): number =>
+      (isNamedFile(path) ? Math.min(reserved, valveCap) : reserved);
     // Funding line for the whole-file BUY rule: the response's SOURCE may reach
     // everything the allocator promised plus one bounded overshoot, and no more.
     // Measured against the promise rather than `renderCeiling` on purpose — the
     // ceiling sits 50% above the envelope and says nothing about who is owed
     // what, so funding a buy from it just moves the shortfall to whichever file
-    // the loop reaches last. See WHOLE_FILE_BUY_OVERSHOOT_FRACTION.
-    const reservedTotal = [...allocation.allowances.values()].reduce((sum, n) => sum + n, 0);
-    const sourceCeiling = reservedTotal + Math.round(
+    // the loop reaches last. See WHOLE_FILE_BUY_OVERSHOOT_FRACTION. The promise
+    // grows as a named file's soft share is settled (see `unsettledSoft`).
+    let reservedTotal = [...allocation.allowances].reduce((sum, [path, n]) => sum + guaranteedOf(path, n), 0);
+    const buyOvershoot = Math.round(
       budget.maxOutputChars * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_OVERSHOOT_FRACTION,
     );
     /**
@@ -4994,12 +5057,29 @@ export class ToolHandler {
      * whole reservation, and when they do not, the carry-forward hands the
      * difference to whoever comes next anyway.
      */
+    /**
+     * Everything still owed below `fileIndex`, in render-space chars, whether the
+     * ceiling can pay it or not — the bar a named file's extension has to clear
+     * (see the render loop). What is left above it is room no admitted file will
+     * ever claim.
+     */
+    const owedInFullBelow = (fileIndex: number): number => {
+      let owed = 0;
+      for (let j = fileIndex + 1; j < sortedFiles.length; j++) {
+        const [path, g] = sortedFiles[j]!;
+        const r = allocation.allowances.get(path);
+        if (r !== undefined) owed += guaranteedOf(path, r) + sectionOverhead(path, g.nodes);
+      }
+      return owed;
+    };
     const owedPayableBelow = (fileIndex: number, budgetLeft: number): number => {
       let held = 0;
       for (let j = fileIndex + 1; j < sortedFiles.length; j++) {
         const path = sortedFiles[j]![0];
-        const r = allocation.allowances.get(path);
-        if (r === undefined) continue;
+        const reservedBelow = allocation.allowances.get(path);
+        if (reservedBelow === undefined) continue;
+        // Only what that file is guaranteed is owed to it (see `guaranteedOf`).
+        const r = guaranteedOf(path, reservedBelow);
         const overhead = sectionOverhead(path, sortedFiles[j]![1].nodes);
         const need = r + overhead;
         if (held + need > budgetLeft) {
@@ -5021,6 +5101,16 @@ export class ToolHandler {
     };
 
     for (let fileIndex = 0; fileIndex < sortedFiles.length; fileIndex++) {
+      // Settle the soft share of the file the loop just left: what it spent past
+      // its guarantee becomes a promise it kept; the rest was never available.
+      // Here rather than after its render, because every exit path below —
+      // however it `continue`s — comes back through this line.
+      if (unsettledSoft > 0) {
+        const settled = Math.min(unsettledSoft, Math.max(0, sourceSpent - reservedSoFar));
+        reservedSoFar += settled;
+        reservedTotal += settled;
+        unsettledSoft = 0;
+      }
       const [filePath, group] = sortedFiles[fileIndex]!;
       if (filesIncluded >= maxFiles) {
         if (diag) for (const [fp] of sortedFiles) diag.recordSkip(fp, 'max-files');
@@ -5049,13 +5139,14 @@ export class ToolHandler {
       // order because that is the only file a single-pass loop can still pay;
       // `MAX_SHARE` keeps that from turning a weak tail file into the response,
       // so the allocator's share ceiling holds end-to-end and not just at
-      // reservation time.
-      const allowance = Math.min(
-        reserved + Math.max(0, reservedSoFar - sourceSpent),
-        Math.max(reserved, Math.round(budget.maxOutputChars * EXPLORE_ALLOCATION.MAX_SHARE)),
-      );
-      reservedSoFar += reserved;
-      diag?.recordSpendable(filePath, allowance);
+      // reservation time. (A named file may go past it — but only into spare
+      // room; see below the displacement guard.)
+      const slack = Math.max(0, reservedSoFar - sourceSpent);
+      const guaranteed = guaranteedOf(filePath, reserved);
+      const ruleAllowance = Math.min(guaranteed + slack, Math.max(guaranteed, valveCap));
+      let allowance = ruleAllowance;
+      reservedSoFar += guaranteed;
+      unsettledSoft = reserved - guaranteed;
       // DISPLACEMENT GUARD, in render space (CG-31). `allowance` says what this
       // file MAY spend; it does not say the bytes are still there to spend. The
       // hard ceiling is shared with every file the loop has not reached yet, and
@@ -5072,7 +5163,8 @@ export class ToolHandler {
       //
       // Floored at this file's OWN reservation, never below: a kept promise is
       // not a displacement, and cutting a file under what it earned is the
-      // failure this whole allocation layer exists to prevent.
+      // failure this whole allocation layer exists to prevent. (For a named
+      // file, the part of the reservation it is `guaranteed` — see above.)
       //
       // Slack still reaches the file: a file above that under-spends leaves
       // `totalChars` lower, which raises `headroom` one-for-one, so the
@@ -5080,9 +5172,30 @@ export class ToolHandler {
       // this bound funds.
       const headroom = Math.max(0, renderCeiling - totalChars - sectionOverhead(filePath, group.nodes));
       const fundedHeadroom = Math.max(
-        Math.min(reserved, headroom),
-        headroom - owedPayableBelow(fileIndex, Math.max(0, headroom - reserved)),
+        Math.min(guaranteed, headroom),
+        headroom - owedPayableBelow(fileIndex, Math.max(0, headroom - guaranteed)),
       );
+      // A file the query NAMED may spend past the rule above — its share over the
+      // `MAX_SHARE` valve, and slack past the valve — but only into SPARE room:
+      // the call's BUDGET left once every file below is paid its full
+      // reservation, payable or not. Two bars that look right and are not:
+      //   - `fundedHeadroom` holds back only the payable prefix of what is owed
+      //     below (CG-31), so on a saturated response the room it releases still
+      //     belongs to a partially-payable file: reaching it cost vscode an
+      //     admitted rank-4 file its whole section.
+      //   - the render CEILING sits above the budget to absorb the render's own
+      //     bounded overshoot (named gap markers, never-empty windows). Spend up
+      //     to it and that overshoot lands on the files below: django's named
+      //     `query.py` ran 561 chars past its bound and cut a lower file to 53%
+      //     of its reservation.
+      // Where nothing is spare the extension is zero and the file renders
+      // exactly as it did before the valve was lifted for it.
+      if (isNamedFile(filePath)) {
+        const spare = budget.maxOutputChars - totalChars - sectionOverhead(filePath, group.nodes)
+          - owedInFullBelow(fileIndex);
+        allowance = Math.max(allowance, Math.min(reserved + slack, spare));
+      }
+      diag?.recordSpendable(filePath, allowance);
       diag?.recordFunded(filePath, fundedHeadroom);
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) {
@@ -5607,7 +5720,6 @@ export class ToolHandler {
             }
           }
         }
-        const sigTail = sigDropped > 0 ? `… +${sigDropped} more (signatures elided)` : '';
         if (skel.length > 0) {
           const names = [...new Set(group.nodes.filter(n => n.kind !== 'import' && n.kind !== 'export').map(n => n.name))]
             .slice(0, budget.maxSymbolsInFileHeader).join(', ');
@@ -5625,12 +5737,39 @@ export class ToolHandler {
           // (a one-line signature is far under MIN_COVERED_LINES and is never
           // withheld — the structure map is what makes this render legible).
           const dd = dedupeSpans(skel);
-          const withTail = (parts: ReadonlyArray<{ text: string }>) =>
-            [...parts.map((p) => p.text), ...(sigTail ? [sigTail] : [])].join('\n');
+          const withTail = (parts: ReadonlyArray<{ text: string }>, extraDropped = 0) => {
+            const dropped = sigDropped + extraDropped;
+            const tail = dropped > 0 ? `… +${dropped} more (signatures elided)` : '';
+            return [...parts.map((p) => p.text), ...(tail ? [tail] : [])].join('\n');
+          };
+          const header = fileSectionHeader(filePath, `${names} · ${tag}`);
+          // The ceiling fit test every other render path has (CG-26), which this
+          // one lacked: it emitted whatever it built, so a skeleton at the tail
+          // of a full response ran past the ceiling and the final cut threw away
+          // it, the section before it, and the pointer list behind them. Trim
+          // from the end instead — trailing signatures first, then trailing
+          // bodies — and skip the file only if not one part fits.
+          let parts = dd.parts;
+          let trimmedSigs = 0;
+          const sectionCost = (ps: ReadonlyArray<{ text: string }>) =>
+            header.length + 2 + (ps.length > 0 ? withTail(ps, trimmedSigs).length + lang.length + 11 : 0);
+          while (parts.length > 1 && totalChars + sectionCost(parts) > renderCeiling) {
+            let drop = -1;
+            for (let k = parts.length - 1; k >= 0; k--) {
+              if (parts[k]!.range.start === parts[k]!.range.end) { drop = k; break; }
+            }
+            if (drop < 0) drop = parts.length - 1;
+            else trimmedSigs++;
+            parts = parts.filter((_, k) => k !== drop);
+          }
+          if (dd.parts.length > 0 && totalChars + sectionCost(parts) > renderCeiling) {
+            diag?.recordSkip(filePath, 'budget-clusters');
+            continue;
+          }
           emitFileSection({
-            header: fileSectionHeader(filePath, `${names} · ${tag}`),
-            body: dd.parts.length > 0 ? withTail(dd.parts) : '',
-            ranges: dd.parts.map((p) => p.range),
+            header,
+            body: parts.length > 0 ? withTail(parts, trimmedSigs) : '',
+            ranges: parts.map((p) => p.range),
             covered: dd.covered,
             overhead: 120,
             mode: bodyIds.size + bodyWindows.size > 0 ? 'focused' : 'skeleton',
@@ -5719,7 +5858,7 @@ export class ToolHandler {
       // the emission site below, so it cannot displace either.
       const buysWhole = fileContent.length <= graceBound
         || (reserved >= fileContent.length * EXPLORE_ALLOCATION.WHOLE_FILE_BUY_FRACTION
-            && sourceSpent + fileContent.length + owedBelow <= sourceCeiling
+            && sourceSpent + fileContent.length + owedBelow <= reservedTotal + buyOvershoot
             && fileContent.length <= fundedHeadroom);
       // Set by the whole-file arm when it actually emits. A whole render that
       // does not FIT no longer ends the file's turn (CG-26) — it falls through
@@ -5950,11 +6089,54 @@ export class ToolHandler {
       const contextPadding = 3;
       // An oversize spine method (the call path runs THROUGH a god-method — n8n's
       // processRunExecutionData is 962 lines) is windowed to its next-hop CALL site
-      // plus the signature head, NOT dumped whole. Without this the cluster is too big
+      // plus the signature head, NOT dumped whole. Without this the method is too big
       // for any per-file cap and gets dropped, so the agent Reads the method back —
       // the exact gap this closes. Bounded, so a god-method can't blow the budget yet
       // the spine's call still appears in context.
+      //
+      // The size test is on the spine METHOD, never on the cluster holding it. A
+      // cluster merges every symbol within `gapThreshold` lines of the next, so on a
+      // dense file — and on every PINNED file, whose whole symbol list enters the
+      // gather — it spans hundreds of lines around a short spine method. Windowing
+      // that merge threw away every other symbol in it: vscode's pinned
+      // `rpcProtocol.ts` merged into one cluster over lines 20–968 around a 77-line
+      // `_receiveOneMessage`, and the five `MessageIO.serialize*` bodies and the
+      // `MessageType` enum the query named were cut to a 5-line file head plus ±28
+      // lines of one call site — 2,910 chars spent of a 16,800 reservation, and
+      // reported unclipped. A cluster that is long only because it merged goes
+      // through the shrink-by-member path like any other oversize cluster.
       const OVERSIZE_SPINE_LINES = 200;
+      /**
+       * Spine methods too long to render whole, in source order. Not one that is,
+       * or holds, an EXACT target (a qualified name, an anchored line span): its
+       * body is what was asked for, so it is kept whole up to the ceiling and only
+       * then windowed — by `windowToCeiling`, which keeps the call site AND the
+       * named defs. Windowed here, an anchored `lines 900-1003` inside it would go
+       * with the rest of the body.
+       */
+      const exactRanges = ranges.filter((r) => r.importance >= EXACT_IMPORTANCE);
+      const oversizeSpine = ranges
+        .filter((r) => r.spine && r.spineCallLine !== undefined
+          && r.end - r.start + 1 > OVERSIZE_SPINE_LINES
+          && r.spineCallLine >= r.start && r.spineCallLine <= r.end
+          && !exactRanges.some((x) => x.start <= r.end && x.end >= r.start))
+        .sort((a, b) => a.start - b.start);
+      const oversizeSpineSet = new Set<typeof ranges[number]>(oversizeSpine);
+      /** What an oversize spine method renders as: its signature head plus its call site. */
+      const spineWindowOf = (g: { start: number; end: number; spineCallLine?: number }): ExploreLineRange[] => {
+        const call = g.spineCallLine!;
+        const winStart = Math.max(g.start, call - SPINE_WINDOW);
+        const winEnd = Math.min(g.end, call + SPINE_WINDOW);
+        // Signature head, only when it sits clearly above the window (else the
+        // window already covers the method opening).
+        const headEnd = Math.min(g.start + 4, winStart - 2);
+        return headEnd >= g.start
+          ? [{ start: g.start, end: headEnd }, { start: winStart, end: winEnd }]
+          : [{ start: winStart, end: winEnd }];
+      };
+      /** Whether rendering [start, end] windows an oversize spine method inside it. */
+      const windowsSpineIn = (start: number, end: number): boolean =>
+        oversizeSpine.some((g) => g.start >= start && g.end <= end);
       // Returns the rendered text as SPAN-KEYED PARTS. Every part carries the
       // exact line range its text was sliced from, which two things depend on:
       // the session record (CG-17) — a record claiming lines it never sent would
@@ -5971,44 +6153,41 @@ export class ToolHandler {
       // 3-line stub where ~5,200 chars of its body had fit.
       const sectionText = (parts: ReadonlyArray<SectionPart>): string =>
         joinPartsWithNamedGaps(filePath, parts, fileIndexNodes, 0);
-      const buildSection = (
-        c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number; maxImportance?: number },
-      ): SectionPart[] => {
-        // Not for a cluster holding an exact target: its body is what was asked
-        // for, so it is kept whole up to the ceiling and only then windowed —
-        // by `windowToCeiling`, which keeps the call site AND the named defs.
-        if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES
-            && (c.maxImportance ?? 0) < EXACT_IMPORTANCE) {
-          const call = c.spineCallLine;
-          const winStart = Math.max(c.start, call - SPINE_WINDOW);
-          const winEnd = Math.min(c.end, call + SPINE_WINDOW);
-          const parts: SectionPart[] = [];
-          // Signature head, only when it sits clearly above the window (else the
-          // window already covers the method opening).
-          const headEnd = Math.min(c.start + 4, winStart - 2);
-          if (headEnd >= c.start) {
-            const head = fileLines.slice(c.start - 1, headEnd).join('\n');
-            parts.push({
-              range: { start: c.start, end: headEnd },
-              text: withLineNumbers ? numberSourceLines(head, c.start) : head,
-            });
-          }
-          const win = fileLines.slice(winStart - 1, winEnd).join('\n');
-          parts.push({
-            range: { start: winStart, end: winEnd },
-            text: withLineNumbers ? numberSourceLines(win, winStart) : win,
-          });
-          return parts;
+      /**
+       * The line spans `buildSection` renders for [start, end] — split out so the
+       * exact pricing below (`renderedSizeOfKept`) prices a member window as the
+       * window it renders, not as the body it elides.
+       */
+      const sectionRangesOf = (c: { start: number; end: number }): ExploreLineRange[] => {
+        // Plain source for [start, end], except each oversize spine method inside
+        // it, which renders as its window. Context padding goes on the outer edges
+        // of PLAIN source only: padding past a windowed method would add lines
+        // after a tail that was elided.
+        const spans: Array<{ range: ExploreLineRange; plain: boolean }> = [];
+        let cursor = c.start;
+        for (const g of oversizeSpine) {
+          if (g.start < cursor || g.start < c.start || g.end > c.end) continue;
+          if (g.start > cursor) spans.push({ range: { start: cursor, end: g.start - 1 }, plain: true });
+          for (const w of spineWindowOf(g)) spans.push({ range: w, plain: false });
+          cursor = g.end + 1;
         }
-        const startIdx = Math.max(0, c.start - 1 - contextPadding);
-        const endIdx = Math.min(fileLines.length, c.end + contextPadding);
-        const slice = fileLines.slice(startIdx, endIdx).join('\n');
-        // startIdx is 0-based, so the slice's first line is line startIdx + 1.
-        return [{
-          range: { start: startIdx + 1, end: endIdx },
-          text: withLineNumbers ? numberSourceLines(slice, startIdx + 1) : slice,
-        }];
+        if (cursor <= c.end) spans.push({ range: { start: cursor, end: c.end }, plain: true });
+        const first = spans[0];
+        const last = spans[spans.length - 1];
+        if (first?.plain) first.range.start = Math.max(1, first.range.start - contextPadding);
+        if (last?.plain) last.range.end = Math.min(fileLines.length, last.range.end + contextPadding);
+        // Spans that touch in the file are one block, not two parts with a gap
+        // marker between adjacent lines.
+        const merged: ExploreLineRange[] = [];
+        for (const { range } of spans) {
+          const prev = merged[merged.length - 1];
+          if (prev && range.start <= prev.end + 1) prev.end = Math.max(prev.end, range.end);
+          else merged.push({ ...range });
+        }
+        return merged;
       };
+      const buildSection = (c: { start: number; end: number }): SectionPart[] =>
+        sectionRangesOf(c).map((r) => ({ range: r, text: renderSpan(r) }));
 
       /** Rendered cost of one member on its own, context padding included. */
       const paddedCost = (r: ExploreRange): number => {
@@ -6092,18 +6271,29 @@ export class ToolHandler {
       /**
        * Exact rendered size of `keep` once merged, padded and joined — what
        * `sectionText` will measure — via a prefix sum, so pricing a candidate
-       * member costs O(members), not a re-render.
+       * member costs O(members), not a re-render. Priced on the spans
+       * `buildSection` renders, so an oversize spine member costs its window.
        */
       const renderedSizeOfKept = (keep: readonly ExploreRange[]): number =>
-        mergeKept(keep).reduce((sum, m, i) =>
-          sum + renderedSpanCost(m.start - contextPadding, m.end + contextPadding) + (i > 0 ? GAP_MARKER.length : 0), 0);
+        mergeKept(keep).flatMap((m) => sectionRangesOf(m)).reduce((sum, r, i) =>
+          sum + renderedSpanCost(r.start, r.end) + (i > 0 ? GAP_MARKER.length : 0), 0);
       const shrinkCluster = (
         c: ExploreCluster, cap: number, incidentalCap?: number,
       ): SectionPart[] | null => {
         if (c.members.length < 2) return null;
         const guarded = incidentalCap !== undefined;
+        // Protected members first when a hold-back applies (see `renderCluster`);
+        // then an EXACT target, then the spine, as `rankedClusters` ranks spine
+        // clusters first: the call path IS the answer. An unnamed bridge on it
+        // (vscode's `_receiveRequest`, the Flow section's own step 2) otherwise
+        // ranks with incidental helpers and is the member the cap drops. Exact
+        // ahead of spine because the exact branch below keeps members in this
+        // order until the cap: a long spine method first would price out the
+        // body the agent singled out.
         const byImportance = [...c.members].sort((a, b) =>
           (guarded ? Number(isProtectedMember(b)) - Number(isProtectedMember(a)) : 0)
+          || Number(b.importance >= EXACT_IMPORTANCE) - Number(a.importance >= EXACT_IMPORTANCE)
+          || (b.spine ? 1 : 0) - (a.spine ? 1 : 0)
           || b.importance - a.importance || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
         const keep: ExploreRange[] = [];
         if (c.maxImportance >= EXACT_IMPORTANCE) {
@@ -6123,7 +6313,11 @@ export class ToolHandler {
             keep.push(r);
           }
         } else {
-          const sizeOf = (r: ExploreRange) => fileLines.slice(r.start - 1, r.end).join('\n').length;
+          // An oversize spine method costs its window, not its body — `buildSection`
+          // windows it wherever it lands. Charging the full body kept it as the
+          // most important member and then had no room left for anything beside it.
+          const sizeOf = (r: ExploreRange) => (oversizeSpineSet.has(r) ? spineWindowOf(r) : [r])
+            .reduce((n, w) => n + fileLines.slice(w.start - 1, w.end).join('\n').length, 0);
           let kept = 0;
           // Rendered size of what is kept so far, once the first incidental member
           // is weighed. Every protected member sorts ahead of it, so this is the
@@ -6214,6 +6408,10 @@ export class ToolHandler {
         const guard = Number.isFinite(ceiling) && c.members.some(isProtectedMember)
           ? Math.min(incidentalCap ?? Infinity, ceiling)
           : incidentalCap;
+        // A windowed spine method elides source even when nothing else is cut, so
+        // it counts as shrunk: reported unclipped, the one-file-head-plus-a-call-
+        // site render hid in the diagnostic as a complete section.
+        const windowed = windowsSpineIn(c.start, c.end);
         const bound = (
           r: { parts: SectionPart[]; covered: ExploreLineRange[]; shrunk: boolean },
         ) => {
@@ -6224,11 +6422,11 @@ export class ToolHandler {
           return { parts, covered: r.covered, shrunk: true };
         };
         if (sectionText(base.parts).length <= Math.min(cap, guard ?? Infinity)) {
-          return { parts: base.parts, covered: base.covered, shrunk: false };
+          return { parts: base.parts, covered: base.covered, shrunk: windowed };
         }
         const shrunk = shrinkCluster(c, cap, guard);
         if (shrunk === null) {
-          return bound({ parts: base.parts, covered: base.covered, shrunk: false });
+          return bound({ parts: base.parts, covered: base.covered, shrunk: windowed });
         }
         const dd = dedupeSpans(shrunk);
         return bound({ parts: dd.parts, covered: dd.covered, shrunk: true });
@@ -6286,8 +6484,11 @@ export class ToolHandler {
       // spine can't run away or starve co-flow files entirely. The 1.5x is drawn
       // from the shared envelope, so it is exactly the overshoot the displacement
       // guard has to fund: past `fundedHeadroom` the extra half-reservation is
-      // another file's, not spare room.
-      const SPINE_CEILING = Math.min(Math.round(allowance * 1.5), fundedHeadroom);
+      // another file's, not spare room. The half is of `ruleAllowance`: a named
+      // file's spare-room extension is already the budget's last spare byte, and
+      // half again of it ran a 13K-budget response to 19.3K of its 19.5K ceiling.
+      //
+      const SPINE_CEILING = Math.min(Math.max(Math.round(ruleAllowance * 1.5), allowance), fundedHeadroom);
       const chosenIndices = new Set<number>();
       // Final renders (deduped, shrunk where oversize) by cluster index. Computed
       // during selection and reused at emission so the two never disagree.
@@ -6395,7 +6596,6 @@ export class ToolHandler {
         chosenIndices.add(rc.idx);
         projectedChars += text.length + GAP_MARKER.length;
       }
-
       // Gap names (#1711) are paid from what selection left of this file's
       // budget, never from source: selection measured every gap as bare.
       const namedGapBudget = Math.max(fileBudget, projectedChars);
@@ -6459,13 +6659,16 @@ export class ToolHandler {
       const headerFor = (
         symbols: readonly string[],
         elided: ReadonlyArray<ElidedSymbolRef> = [],
+        /** Longest the header may run; fewer names are listed to meet it (never under one). */
+        maxLength = Infinity,
       ): string => {
-        const { shown, omitted } = biasHeaderSymbols(
-          symbols, elided, budget.maxSymbolsInFileHeader,
-        );
-        return fileSectionHeader(filePath, omitted > 0
-          ? `${shown.join(', ')}, +${omitted} more`
-          : shown.join(', '));
+        for (let cap = budget.maxSymbolsInFileHeader; ; cap--) {
+          const { shown, omitted } = biasHeaderSymbols(symbols, elided, cap);
+          const header = fileSectionHeader(filePath, omitted > 0
+            ? `${shown.join(', ')}, +${omitted} more`
+            : shown.join(', '));
+          if (header.length <= maxLength || cap <= 1) return header;
+        }
       };
 
       // Last stop before the hard ceiling. The reservation already bounded cluster
@@ -6488,6 +6691,20 @@ export class ToolHandler {
       let chosenNow = chosenIndices;
       const costOfSection = (header: string, body: string) =>
         header.length + 2 + (body.length > 0 ? body.length + lang.length + 11 : 0);
+      // Every file was funded for SOURCE against an ESTIMATED header
+      // (`sectionOverhead`: the file's symbol names), and the real one also lists
+      // the edge lines' targets (`filter(calls)`, `QuerySet(imports)`), so it can
+      // run past the estimate. Where the section no longer fits, the header pays
+      // that back first by listing fewer names — a name it drops is still in the
+      // gap markers and the pointer list; a source line the trim drops is not.
+      // Without this, a file above spending exactly its funded line (an exact
+      // target's overshoot, #2063) left the one below its estimate, and the trim
+      // took the difference out of source: 922 of the 1,031 it was owed.
+      let headerLimit = Infinity;
+      if (totalChars + costOfSection(fileHeader, assembled.text) > renderCeiling) {
+        headerLimit = sectionOverhead(filePath, group.nodes) - 2 - lang.length - 11;
+        fileHeader = headerFor(assembled.symbols, assembled.elided, headerLimit);
+      }
       // The weakest cluster is SHRUNK into the room that is left before it is
       // dropped (CG-36). Dropping it whole makes this loop as all-or-nothing as
       // the selection above it was, and at the same cost: on excalidraw's
@@ -6530,7 +6747,7 @@ export class ToolHandler {
           chosenNow = trimmed;
         }
         assembled = assembleSection(chosenNow);
-        fileHeader = headerFor(assembled.symbols, assembled.elided);
+        fileHeader = headerFor(assembled.symbols, assembled.elided, headerLimit);
         anyFileTrimmed = true;
       }
       // One cluster left and still over — by the header estimate's error, at
@@ -6546,6 +6763,23 @@ export class ToolHandler {
           - (fileHeader.length + 2 + lang.length + 11);
         if (room > 0) {
           const reshrunk = renderCluster(clusters[idx]!, room, room);
+          // Every budget upstream charges a gap as a bare GAP_MARKER, but the
+          // joined text NAMES what each gap elides (#1711). A cluster shrunk to
+          // scattered members has dozens of gaps, and their names can outweigh
+          // the source: re-rendered into the room, it still overran, and a
+          // pinned 1,300-line file with every named body inside its render was
+          // skipped whole. Drop whole parts until the REAL text fits instead —
+          // the last one that holds no focus line first, never the final part.
+          const focus = focusLinesOf(clusters[idx]!);
+          while (reshrunk.parts.length > 1 && sectionText(reshrunk.parts).length > room) {
+            const holdsFocus = (p: SectionPart) => focus.some((l) => l >= p.range.start && l <= p.range.end);
+            let drop = reshrunk.parts.length - 1;
+            for (let k = reshrunk.parts.length - 1; k >= 0; k--) {
+              if (!holdsFocus(reshrunk.parts[k]!)) { drop = k; break; }
+            }
+            reshrunk.parts.splice(drop, 1);
+            reshrunk.shrunk = true;
+          }
           renderedClusters.set(idx, reshrunk);
           anyClusterShrunk = anyClusterShrunk || reshrunk.shrunk;
           assembled = assembleSection(chosenNow);
@@ -6730,7 +6964,9 @@ export class ToolHandler {
     // document order.
     const roomFor = (block: readonly string[]): number =>
       block.reduce((n, s) => n + s.length + 1, 0);
-    let room = hardCeiling - (flow.text.length + lines.join('\n').length);
+    // Less what the summary line will grow by when its sentinel is filled in.
+    let room = hardCeiling - (flow.text.length + lines.join('\n').length)
+      - Math.max(0, summaryReserve - SUMMARY_SENTINEL.length);
 
     const keepCompleteness = completenessBlock.length > 0
       && roomFor(completenessBlock) <= room;

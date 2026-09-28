@@ -834,3 +834,249 @@ branch as well, all five render whole.
   last admitted file is held its partial share. Just below it, it is held nothing, and the file
   above takes ~800 chars the last file needed. Any upstream shift of a few dozen chars can flip it
   (django-bag above).
+
+## Named concentration — merged spine clusters and the valve (2026-09-27)
+
+Found in a pre-release agent A/B on microsoft/vscode (14,698 files, the 24K tier), identical on
+v1.6.0 and `main`. The query
+
+```
+MessageType enum rpcProtocol.ts _receiveOneMessage MessageIO serializeRequest serializeReplyOK serializeReplyErr serializeCancel serializeAcknowledged
+```
+
+came back at 8.6K. `rpcProtocol.ts` rendered lines 20–24 and 269–325: none of the five
+`MessageIO.serialize*` bodies, not the `MessageType` enum, and not the Flow section's own step 2.
+The agent Read the file five times.
+
+### It was not the per-file cap
+
+The report's hypothesis was that the named file hit its per-file cap while the call budget sat
+unspent. The diagnostic said otherwise: `rpcProtocol.ts` was **reserved 16,800** (the `MAX_SHARE`
+valve), **funded 18,948, and spent 2,910**, with the render reported as `clusters`, *unclipped*.
+The bytes were there. The render path threw them away.
+
+`buildSection` windows an oversize spine method (n8n's 962-line `processRunExecutionData`) to its
+signature head plus ±28 lines of its next-hop call. It decided that on the **cluster's** span.
+A cluster merges every symbol within `gapThreshold` lines of the next, so a pinned file (whose
+whole symbol list enters the gather), or any dense gather, becomes one cluster spanning the file
+around a short spine method. `rpcProtocol.ts` was one cluster over lines 20–968 around a 77-line
+`_receiveOneMessage`: head 20–24, call site 297 ± 28. The window fit the cap, so nothing reported
+it as clipped, and the large tiers' completeness line told the agent the file was complete.
+
+### The window is a member rule
+
+The size test is now on the spine member itself. A cluster that is long only because it merged
+renders plainly and, if it overruns, shrinks by member like any other cluster. A god-method
+inside a merged cluster is windowed where it sits, with its neighbours rendered around it. Six
+consequences surfaced while validating that change; each is fixed:
+
+| # | Consequence | Fix |
+|---|---|---|
+| 1 | The window elided source and reported the section unclipped | A windowed spine member marks the cluster shrunk (`clipped` in the diagnostic, the trimmed note on small tiers) |
+| 2 | Shrink ranked members by importance alone, so an unnamed spine bridge lost to smaller incidental members (vscode's `_receiveRequest`: 4/36 lines) | Spine members first, as `rankedClusters` already ranks spine clusters first → 36/36 |
+| 3 | Past the 300-node pin cap a pinned file splits. Its spine cluster (receiveOne plus 300 unrelated methods) ranks first and, shrunk against its own members only, filled the cap with filler while the named serializers one cluster down rendered **nothing** | For a merged spine cluster only, room for the other clusters' top members (spine, importance ≥ 9, never a container's whole span, never under `MIN_CHARS`) is held back; what they don't spend returns to it |
+| 4 | Every budget upstream charges a gap as a bare `GAP_MARKER`, but gaps are named (#1711). A cluster shrunk to scattered members overran even the last-resort re-render, and the file was **skipped whole** | The last resort drops whole parts (non-focus first, never the final part) until the real text fits |
+| 5 | The adaptive (focused/skeleton) path had no ceiling fit test. With the named file now spending its reservation, tail skeletons ran past the ceiling and the final cut took them and the pointer list | Same fit test as the other paths: trim trailing signatures, then trailing bodies; skip only if nothing fits |
+| 6 | The summary line ("Found N symbols across M files. …") sits in `lines` as an empty placeholder and is filled in after the final cut, so nothing paid for it: responses ran up to 70 chars past the 25K inline cap, or squeezed out the lost-pointer note | Reserved at its worst case (the gather's counts bound the shown ones) in the epilogue floor and in the epilogue fit |
+
+Two alternatives for #3 were measured and rejected. **An unscoped hold-back** (every first
+cluster) re-orders a trade-off that predates this change, and measured net-negative: tokio's
+`run_task`, a spine method, fell from 60 lines to 2. **Charging containers** (a named 1,022-line
+class) for their whole span over-reserved, and vscode's `RPCProtocol` lost 44 lines to room
+nobody used.
+
+### The valve, for a file the query named
+
+This is the lever the report asked for. It turned out to matter less than the render bug, but it
+is real: on express, "response.js res.send res.json res.render …" admits one file, clamps it at
+9,100 with 3,700 of the pool unreserved, and cuts the named `send` at 55 of 97 lines in a 10.9K
+response to a 13K budget. `MAX_SHARE` hedges against a mis-ranked dominant file, and it **never
+redistributed**: the clamped excess was left unreserved, and the carry-forward only moves
+reservations.
+
+- **Allocation:** a file the query named (the named-first tier, `namedSeedFiles`) or pinned is
+  exempt from the valve; its proportional share stands. Reservations still fit the pool exactly.
+- **Render:** the part of that share above the valve is a *soft* share. The loop *guarantees*
+  `min(reserved, valve)` (the `fundedHeadroom` floor, and what `owedPayableBelow` holds for it).
+  The file may spend past the old rule only into **spare budget**: the call's `maxOutputChars`
+  left after every file below is paid its **full** reservation, payable or not. The spine's 1.5×
+  overshoot applies to the old rule's allowance, not to the extension. A soft share enters the
+  carry-forward ledger once the loop has moved past the file, and only as far as it was spent.
+
+Each part of the guard was the fix for a measured failure:
+
+| Variant | What happened |
+|---|---|
+| Guarantee the whole uncapped reservation | django (saturated 24K): two admitted files **dropped** so the named `query.py` could ship 3K more |
+| Bound the extension by `fundedHeadroom` | It holds back only the *payable* prefix of what is owed below (CG-31), so on vscode the room it released still belonged to a partially-payable rank-4 file, which was **dropped** |
+| Measure spare against the render ceiling, not the budget | The ceiling exists to absorb the render's own overshoot (named gaps, never-empty windows). django's named file overran its bound by 561 and a lower file was cut to **53%** of its reservation |
+| Book the soft share in the ledger up front | What the file couldn't spend flowed down as slack that existed only in the ledger |
+
+### Measured effect
+
+Deterministic, 47 queries over the 7 README repos plus express. They are the README questions,
+the suite's prose questions, precise symbol bags, pinned-file flows, and named-concentration
+stress queries. Baseline is `main` `1cbac0af`. Named coverage means every definition of every
+queried name in every rendered file.
+
+| | baseline | this change |
+|---|---|---|
+| named bodies complete | 140 | **183** (14 responses up, **0 down**) |
+| named lines delivered | 5,397 | **7,876** (+46%; 2 responses −3 and −9 lines, the summary-line reserve) |
+| responses truncated by the final cut | 3 | **0** |
+| responses over the 25K inline cap | 5 (max 25,032) | **0** (max 24,999) |
+| byte-identical responses | — | 15 of 47 |
+
+The reported query and the shapes it stands for:
+
+| query | complete named bodies | named lines | response |
+|---|---|---|---|
+| vscode, the report | 0 → **8 of 8** (+ the Flow's `_receiveRequest`) | 46 → 356 | 8.6K → 24.9K |
+| same, without the path | 0 → 8 of 8 | 46 → 356 | 11.0K → 24.1K |
+| django `query.py` pinned flow | 1 → 6 | 87 → 317 | 10.9K → 19.3K |
+| okhttp `RealCall` named concentration | 4 → 9 | 187 → 732 | 13.8K → 24.7K |
+| okhttp `RealInterceptorChain.kt` pinned | 2 → 3 | 107 → 356 | 24,058 → 24,978 |
+| express `response.js` (the valve) | 5 → 6 | 192 → 234 | 10.9K → 13.8K |
+
+Files fall in four responses: django-pin 6 → 5, vscode-bag 5 → 4, okhttp-pb-chain 6 → 4,
+excalidraw-pin 6 → 5 (that one was over the 25K cap on baseline). In each, the rank-1 named file
+used to spend a fraction of its own reservation because of the windowing bug, and the
+under-spend was passing down to incidental files. Of the five files that drop out, four are
+still named in the pointer list. The fifth (okhttp's `ExchangeCodec.kt`) is counted in its
+"… and 24 more files" line, which is CG-26's elastic list running out of room.
+
+### Coverage
+
+| File | Guards |
+|---|---|
+| `__tests__/explore-merged-spine-cluster.test.ts` | the member rule (pinned rpcProtocol shape), a real god-method still windowed with its named neighbours whole and the file clipped, the merged-spine hold-back past the pin cap, the last-resort trim at the 24K tier |
+| `__tests__/explore-named-file-valve.test.ts` | the valve for a named file far from its budget, and the spare-budget guard on a saturated 24K response |
+| `__tests__/explore-proportional-allocation.test.ts` | the allocator exemption: peers unchanged, pool fit at every tier, tier monotonicity |
+
+Mutation-tested, same method as CG-14:
+
+| Mutation | Red |
+|---|---|
+| `main`'s `tools.ts` | 9 of the 19 new e2e tests (6 of 11 render, 3 of 8 valve) |
+| Windowing not reported as clipped | god-method `clipped` |
+| No hold-back for other clusters | past-the-pin-cap named bodies |
+| No last-resort trim | 24K file skipped (0 chars) |
+| Allocator exemption removed, or render extension removed | far-from-spent: 3 of 5 named bodies |
+| Extension bounded by `fundedHeadroom` | saturated: lower file dropped |
+| Spare measured against the render ceiling | saturated: lower file cut below its reservation |
+
+Four levers are validated only by the deterministic sweep. No hermetic fixture reproduced them
+without over-fitting:
+
+- **spine-first member order:** vscode's `_receiveRequest`, 4/36 → 36/36
+- **top-up of unspent hold-back:** alamofire's `Session.swift`, 876 chars and a named method short without it
+- **adaptive-path fit test and summary-line reserve:** 3 truncated and 5 over-cap responses → 0
+
+### Agent A/B
+
+`scripts/agent-eval/ab-new-vs-baseline.sh`, baseline pinned to `1cbac0af` by SHA, Sonnet
+`--effort high`, `RUNS=2`, prompts of the form `Use codegraph to answer: <question>`. Raw logs are
+not committed. The three questions: vscode's rpcProtocol serialization and dispatch (the reported
+shape); django's `SQLCompiler.as_sql` / `pre_sql_setup` / `get_select`; and tokio's worker `run` /
+`run_task` / `next_task` / `steal_work` / `park`.
+
+| repo | Read (new / base) | explore calls | duration median | do the builds differ on these queries? |
+|---|---|---|---|---|
+| vscode | **0, 0 / 1, 0** | 3, 3 / 2, 3 | 69s / 48s | yes: +82 to +320 source lines on the `rpcProtocol.ts` / `MessageIO` queries |
+| django | 0, 2 / 1, 1 | 3, 2 / 2, 2 | 43s / 30s | no: 4 of 9 byte-identical, the rest ≤1 line apart except one tail-file swap |
+| tokio | 0, 2 / 0, 1 | 3, 3 / 2, 2 | 177s [49–306] / 31s | no: 0–1 lines apart on 7 of 10, 22–46 on 3 |
+
+Reads tie overall (4 / 4). On vscode, the one repo where the builds actually return different
+bytes, the baseline's Read was the reported symptom itself (`rpcProtocol.ts lines 299 to 355`
+after an explore). The new arm's answers covered the named serializers in both runs (11 of 13
+key symbols vs 9 and 11).
+
+The new arm was slower in every repo. Attribution, per the CG-22 rule (never quote a wall-clock
+gap without the explore-latency and response-size probes):
+
+- **vscode:** model time was equal or lower in the new arm (30.7s / 23.4s vs 31.6s / 30.2s). The
+  gap sat inside explore calls (39s per run vs 12–17s). Replaying the new arm's six queries, CPU
+  per call was within 1–4% across new/base build × new/base index, while the machine's load
+  average was 7–10 from other sessions. Load, not the change.
+- **django, tokio:** the two builds return near-identical responses to these agents' own queries,
+  so a difference between the arms there cannot be the change. tokio's 306s run is a model-side
+  stall (302s of API time, 1.2s in tools).
+- The new arm made 3 explore calls in all 6 runs vs 2.3 per run for baseline. On django and tokio
+  that is sampling for the same reason. A larger n would settle whether vscode's richer responses
+  prompt a deeper follow-up.
+
+Every Read in the django runs, on both builds, is a separate pre-existing gap:
+`SQLCompiler.as_sql`'s 226-line body is never returned, not even to a query that names it and
+its line number.
+
+### Found, not fixed
+
+- **`SQLCompiler.as_sql` is never returned** (above). It is the cause of every django Read in the
+  A/B, on both builds.
+- **Density ranking starves an isolated named cluster.** Among clusters of equal max importance,
+  `rankedClusters` orders by summed member importance ÷ span. Edge-line members inflate the
+  density of a named-function-plus-filler cluster, so a cluster holding only a named function
+  loses the room. Repro: five named functions interleaved with helpers, where two render 0 lines
+  on both builds. *Fixed by #2062 ("Named members before incidental ones", above).*
+- **A pinned file past the 300-node pin cap drops named symbols beyond the cap.** Identical on
+  baseline. The named symbols were in fact gathered (a search entry at importance 10) and
+  injected; the render dropped them, by the same density starvation as the item above. *Fixed by
+  #2062; `__tests__/explore-pinned-cap-named.test.ts` (#2064) guards the pinned entry path.*
+- **The large tiers' completeness line** ("Complete source for N files is included above") is
+  unconditional, so it overclaims whenever a section was trimmed. *Still open.*
+
+### Landing on `main` (2026-09-28)
+
+This work sat unmerged while #2062 and #2063 landed in the same render path, so it was
+re-applied onto `main` rather than merged as written:
+
+- **The merged-spine hold-back (#3 above) and its top-up were dropped.** #2062 holds back, for
+  every cluster, room for the protected members (named, entry point, spine) of the clusters
+  ranked below it. That is #3 without the scoping. The scoping existed because an unscoped
+  hold-back of *top-member room* cost tokio's `run_task` its body; #2062's form never holds back a
+  cluster's own protected members, only its incidental ones, which is why it can apply everywhere.
+  The past-the-pin-cap test above (`a merged spine cluster leaves room for the file's other
+  clusters`) passes on #2062's hold-back.
+- **#2063's exact-target rule moves to the member.** `main` skipped the spine window for any
+  cluster holding an exact target (a qualified name, a line anchor). With the window now a
+  member rule, a spine method is not windowed if it is, or contains, an exact target, so an
+  anchored `lines 900-1003` inside it is never elided with the rest of the body.
+- **The shrink orders exact targets ahead of spine members.** #2063's exact branch keeps members
+  in sort order until the cap, so a long spine method sorted first would price out the body the
+  agent singled out. Order: protected (when a hold-back applies), exact, spine, importance.
+- **Exact pricing sees member windows.** `renderedSizeOfKept` prices the spans `buildSection`
+  renders (`sectionRangesOf`), so an oversize spine member costs its window.
+- **The final fit shortens the file header before it cuts source.** Every file is funded for
+  source against an *estimated* header (`sectionOverhead`, the file's own symbol names). The
+  real header also lists edge-line targets (`filter(calls)`) and can run past the estimate.
+  Once #2063 gave exact targets the spine's cap, a named file with qualified targets spent right
+  up to its funded line, and the saturated valve fixture's lower file lost 109 chars of source
+  to its own header (922 of 1,031; 995 on `main`). Where a section no longer fits, the header now
+  lists fewer names until it is back within its estimate, and only then is source cut. The
+  valve test asserts funding in full and delivery to the line: #2062's exact rendering stops at
+  the last whole line that fits, so a lower file may come in under its reservation by less than
+  one line.
+
+Measured on the same 47-query replay, `main` `7506dbff` vs this re-application, one index:
+
+| | `main` | `main` + named concentration |
+|---|---|---|
+| named bodies complete | 230 | **272** (13 responses up, 1 down) |
+| named lines delivered | 7,986 | **10,282** (+29%) |
+| responses over the 25K inline cap | 2 | **0** |
+| byte-identical responses | — | 16 of 47 |
+
+The one response down is okhttp's pinned `RealCall.kt`, which drops the mock server's
+`QueueDispatcher.kt`, holding an `enqueue` namesake, as the named file spends its reservation.
+The named definitions that lose lines all sit in responses that gain more: vscode's
+`MessageBuffer` class (187 → 65, with three more named bodies complete and +258 named lines),
+alamofire's `Session.request` (17 → 12, +48), and one swap: vscode's stress query renders
+`_doActivateExtension` whole (0 → 33) where `main` rendered `_startExtensionHost` (19 → 0), four
+complete bodies either way. Files also fall where the record above says they do (okhttp's
+`RealInterceptorChain.kt` pin, 6 → 4).
+
+A second replay: 17 queries that pin a real file past the 300-node pin cap and name symbols beyond
+it (vscode's `editorOptions.ts`, `chatService.ts`, `languages.ts`, `extHostTypes.ts`,
+`extHost.protocol.ts`; excalidraw's `App.tsx`; okhttp's `URLConnectionTest.kt`), most with an
+unpinned twin: 48 → 49 complete named bodies, 0 responses down, 753 → 760 named lines, and 3 → 0
+over the 25K cap (the summary-line reserve).
