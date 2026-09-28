@@ -1023,7 +1023,9 @@ its line number.
   injected; the render dropped them, by the same density starvation as the item above. *Fixed by
   #2062; `__tests__/explore-pinned-cap-named.test.ts` (#2064) guards the pinned entry path.*
 - **The large tiers' completeness line** ("Complete source for N files is included above") is
-  unconditional, so it overclaims whenever a section was trimmed. *Still open.*
+  unconditional, so it overclaims whenever a section was trimmed. *Fixed by #2077: completeness is
+  measured from the ranges each section actually sent (`elidedWantedSpans`), and a trimmed
+  response says which files were trimmed; see `docs/benchmarks/explore-completeness-note.md`.*
 
 ### Landing on `main` (2026-09-28)
 
