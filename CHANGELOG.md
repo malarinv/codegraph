@@ -167,6 +167,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - When you name several functions in one file and unrelated code sits between them, `codegraph_explore` now returns the functions you named before the code around them, instead of spending the file's room on that code and leaving one of the functions you asked for with no source at all.
 - `codegraph_explore` now returns the body of a method you name together with its class, such as `SQLCompiler.as_sql`, even in a file full of same-named overrides. It used to shrink the method you asked for to its signature line while smaller methods around it came back in full. A method too long for the answer now comes back as its opening lines plus the places it calls the other symbols you named, with the exact follow-up query that returns the rest.
 - `codegraph_explore` now honours line numbers in a query: `compiler.py:776` returns the method containing that line, and `compiler.py lines 900-1003` (or `:900-1003`, `#L900-L1003`, `L900-L1003`) returns exactly those lines. It used to pin the file and ignore the numbers.
+- When a file name in a `codegraph_explore` query matches files in more than one folder, only the ones defining a function or class the query also names are pinned, and the summary line lists the files left out. Every match used to be pinned, so the file you meant got half the room it gets when you leave its name out; a name shared by many files, like `models.py`, now resolves the same way instead of being reported as ambiguous.
 
 #### MCP / indexing
 

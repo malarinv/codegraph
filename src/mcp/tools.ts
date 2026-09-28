@@ -33,8 +33,13 @@ import {
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
 import { isTestFile, normalizeNameToken } from '../search/query-utils';
-import { groupDefinitions, lastQualifierPart, matchesSymbol } from '../graph/symbol-lookup';
-import { extractQueryPaths, queryMightContainPaths, type QueryLineAnchor } from '../search/query-paths';
+import { groupDefinitions, isQualifiedSymbol, lastQualifierPart, matchesSymbol } from '../graph/symbol-lookup';
+import {
+  extractQueryPaths,
+  queryMightContainPaths,
+  type QueryLineAnchor,
+  type QuerySetAsideMatch,
+} from '../search/query-paths';
 import {
   existsSync,
   readFileSync,
@@ -193,6 +198,29 @@ function pathIsProjectFile(projectRoot: string, relPath: string): boolean {
     return abs !== null && statSync(abs).isFile();
   } catch {
     return false;
+  }
+}
+
+/** Kinds that name a thing without defining it in the file that holds them. */
+const NOT_A_DEFINITION = new Set(['file', 'import', 'export', 'parameter']);
+
+/**
+ * Which indexed files define a symbol spelled like this query token?
+ *
+ * The `symbolFiles` lookup `extractQueryPaths` takes, split out for the same
+ * reason as `pathIsProjectFile`: that module stays DB-free. Exact names only —
+ * and the shared matcher for a qualified token (`SQLCompiler.as_sql`) — so it
+ * agrees with what explore's named-symbol seeding resolves. Lookup errors
+ * answer "none", which leaves the span's pins as they were.
+ */
+function filesDefiningSymbol(cg: CodeGraph, symbol: string): string[] {
+  try {
+    const nodes = isQualifiedSymbol(symbol)
+      ? cg.getNodesByName(lastQualifierPart(symbol)).filter((n) => matchesSymbol(n, symbol))
+      : cg.getNodesByName(symbol);
+    return nodes.filter((n) => !NOT_A_DEFINITION.has(n.kind)).map((n) => n.filePath);
+  } catch {
+    return [];
   }
 }
 
@@ -3709,22 +3737,36 @@ export class ToolHandler {
     let pinnedFiles: string[] = [];
     let unresolvedPathSpans: string[] = [];
     let lineAnchors: QueryLineAnchor[] = [];
+    let setAsideMatches: QuerySetAsideMatch[] = [];
     let matchQuery = query;
     if (queryMightContainPaths(rawQuery)) {
       try {
         const extraction = extractQueryPaths(
           rawQuery,
           cg.getFiles().map((f) => f.path),
-          { maxPins: maxFiles, existsOnDisk: (rel) => pathIsProjectFile(projectRoot, rel) },
+          {
+            maxPins: maxFiles,
+            existsOnDisk: (rel) => pathIsProjectFile(projectRoot, rel),
+            symbolFiles: (symbol) => filesDefiningSymbol(cg, symbol),
+          },
         );
         if (extraction.pinnedFiles.length > 0 || extraction.unresolvedPathSpans.length > 0) {
           pinnedFiles = extraction.pinnedFiles;
           unresolvedPathSpans = extraction.unresolvedPathSpans;
           lineAnchors = extraction.lineAnchors;
+          setAsideMatches = extraction.setAsideMatches;
           matchQuery = normalizeQuerySpelling(extraction.strippedQuery);
         }
       } catch { /* path pinning must never fail an explore call */ }
     }
+    // A same-named file the span did not pin is named in the summary line, so
+    // an agent that did mean it sees where it went instead of a silent drop.
+    const setAsideNote = setAsideMatches.map((s) => {
+      const which = s.files.length <= 2
+        ? s.files.map((f) => `\`${f}\``).join(', ')
+        : `${s.files.length} other \`${s.span}\` files`;
+      return ` Not pinned: ${which}, which define${s.files.length === 1 ? 's' : ''} none of the named symbols.`;
+    }).join('');
     const pinnedSet = new Set(pinnedFiles);
     const pinnedOrder = new Map(pinnedFiles.map((p, i) => [p, i]));
 
@@ -4907,7 +4949,8 @@ export class ToolHandler {
       + (pinnedFiles.length > 0 ? ` ${plural(pinnedFiles.length, 'file')} pinned from the query.`.length : 0)
       + (unresolvedPathSpans.length > 0
         ? ` No indexed file uniquely matches ${unresolvedPathSpans.map((sp) => `\`${sp}\``).join(', ')}.`.length
-        : 0);
+        : 0)
+      + setAsideNote.length;
     const epilogueFloor = EPILOGUE_LOST_NOTE.length + 2 + cliffPointerFloor + summaryReserve;
     // Absolute stop for the render loop. Reservations already fit the envelope, so
     // this only catches their bounded overshoot (the whole-file grace, an oversize
@@ -7071,6 +7114,7 @@ export class ToolHandler {
     if (unresolvedPathSpans.length > 0) {
       summaryLine += ` No indexed file uniquely matches ${unresolvedPathSpans.map((s) => `\`${s}\``).join(', ')}.`;
     }
+    summaryLine += setAsideNote;
     finalText = finalText.replace(SUMMARY_SENTINEL, summaryLine);
 
     // Emit the allocation diagnostic from the FINAL text, so per-file bytes and

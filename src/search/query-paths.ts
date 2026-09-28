@@ -54,6 +54,18 @@ export interface QueryPathExtraction {
    * across two candidate files.
    */
   lineAnchors: QueryLineAnchor[];
+  /**
+   * Files a span matched but did NOT pin: the span named several files, some
+   * of which define a symbol the query also names, and these define none.
+   * Surfaced so a set-aside file is visible, not silently dropped.
+   */
+  setAsideMatches: QuerySetAsideMatch[];
+}
+
+export interface QuerySetAsideMatch {
+  /** The span as the query wrote it, normalized (`editorOptions.ts`). */
+  span: string;
+  files: string[];
 }
 
 export interface QueryLineAnchor {
@@ -99,6 +111,43 @@ const KEBAB_BASENAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
 
 /** A basename's last dot-extension, same shape DOTTED_BASENAME accepts. */
 const LAST_EXTENSION = /\.[A-Za-z][A-Za-z0-9]{0,7}$/;
+
+/**
+ * A query token that names a symbol, in the shape explore's named-symbol
+ * seeder reads: `clampedInt`, `SQLCompiler.as_sql`, `Engine::ServeHTTP`.
+ */
+const SYMBOL_TOKEN = /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/;
+/** Symbol tokens consulted per query — the seeder's cap. */
+const MAX_SYMBOL_TOKENS = 16;
+
+/**
+ * The seeder's NL-stopword test: camelCase, PascalCase, snake_case, `$` and
+ * qualified tokens are unmistakably code. A bare lowercase word (`options`,
+ * `render`) is also English, and a file defining one proves nothing about
+ * which same-named file the agent meant.
+ */
+function isPreciseSymbolToken(t: string): boolean {
+  return /[._$]|::/.test(t) || /[a-z][A-Z]/.test(t) || /^[A-Z]/.test(t);
+}
+
+/**
+ * The precise symbol tokens a query names, excluding the files it names
+ * (`editorOptions.ts` is identifier-shaped too). Split on the same brackets
+ * the seeder splits on, so `clampedInt()` still counts.
+ */
+function querySymbolTokens(tokens: readonly string[], indexedBasenames: ReadonlySet<string>): string[] {
+  const out = new Set<string>();
+  for (const raw of tokens) {
+    for (const part of raw.split(/[,()[\]{}]+/)) {
+      const t = part.replace(/^['"`<]+/, '').replace(/['"`>.,;:!?]+$/, '');
+      if (t.length < 3 || !SYMBOL_TOKEN.test(t) || !isPreciseSymbolToken(t)) continue;
+      if (indexedBasenames.has(t.toLowerCase())) continue;
+      out.add(t);
+      if (out.size >= MAX_SYMBOL_TOKENS) return [...out];
+    }
+  }
+  return [...out];
+}
 
 /**
  * Lowercased basename stems of the hyphen-named indexed files, stem → paths.
@@ -256,6 +305,16 @@ export function extractQueryPaths(
      * Must not throw — the caller absorbs fs errors and returns false.
      */
     existsOnDisk?: (relPath: string) => boolean;
+    /**
+     * Which indexed files define a symbol spelled like this query token
+     * (`clampedInt`, `SQLCompiler.as_sql`)? Optional, injected by the caller
+     * for the same reason as `existsOnDisk`: the answer lives in the index,
+     * and this module stays DB-free. Consulted only when a span matches
+     * several files (a basename two directories share): the matches that
+     * define a symbol the query also names are pinned, the rest set aside.
+     * Must not throw — the caller absorbs lookup errors and returns nothing.
+     */
+    symbolFiles?: (symbol: string) => Iterable<string>;
   } = {},
 ): QueryPathExtraction {
   const maxPins = Math.max(1, opts.maxPins ?? 8);
@@ -266,6 +325,7 @@ export function extractQueryPaths(
     pinnedFiles: [],
     unresolvedPathSpans: [],
     lineAnchors: [],
+    setAsideMatches: [],
   };
   if (!query.trim() || indexedPaths.length === 0) return passthrough;
 
@@ -280,9 +340,59 @@ export function extractQueryPaths(
   const pinnedSeen = new Set<string>();
   const unresolved: string[] = [];
   const anchors: QueryLineAnchor[] = [];
+  const setAside: QuerySetAsideMatch[] = [];
   /** Token index → the ONE file it pinned, for binding prose line ranges. */
   const singleFileAt = new Map<number, string>();
   let candidatesExamined = 0;
+
+  // A bare basename two directories share (`editorOptions.ts` is both vscode's
+  // editor option registry and a workbench helper) used to pin EVERY match,
+  // and the matches split the pinned reservation — so a query that also named
+  // three functions in one of them got half the room for them it would have
+  // got without the path. When the query names symbols, the file it means is
+  // the one defining them: keep the matches that define at least one, set the
+  // rest aside. When no match defines one, or every match does, the symbols
+  // pick nothing out and the span resolves exactly as before.
+  //
+  // The same test lets a basename shared by more files than the ambiguity
+  // budget (django's 40 `models.py`) resolve after all — to the one defining
+  // the named class — so a span is collected past the budget only while
+  // narrowing is possible, and still reports as ambiguous if it doesn't
+  // narrow into the budget.
+  let symbolTokens: string[] | null = null;
+  const definersOf = new Map<string, ReadonlySet<string>>();
+  const narrowBySymbols = (matches: readonly string[]): string[] | null => {
+    if (!opts.symbolFiles || matches.length < 2) return null;
+    if (symbolTokens === null) {
+      const basenames = new Set<string>();
+      for (const p of indexedPaths) {
+        basenames.add(p.slice(Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')) + 1).toLowerCase());
+      }
+      symbolTokens = querySymbolTokens(tokens, basenames);
+    }
+    const candidates = new Set(matches);
+    const definers = new Set<string>();
+    for (const t of symbolTokens) {
+      let files = definersOf.get(t);
+      if (!files) {
+        files = new Set(opts.symbolFiles(t));
+        definersOf.set(t, files);
+      }
+      for (const f of files) if (candidates.has(f)) definers.add(f);
+    }
+    if (definers.size === 0 || definers.size === candidates.size) return null;
+    return matches.filter((m) => definers.has(m));
+  };
+  /** Narrow a span's matches, recording what was set aside; null = over budget. */
+  const pinnableMatches = (span: string, matches: string[]): string[] | null => {
+    const narrowed = matches.length > 1 ? narrowBySymbols(matches) : null;
+    if (narrowed && narrowed.length <= maxMatchesPerSpan) {
+      setAside.push({ span, files: matches.filter((m) => !narrowed.includes(m)) });
+      return narrowed;
+    }
+    return matches.length > maxMatchesPerSpan ? null : matches;
+  };
+  const collectLimit = opts.symbolFiles ? Number.POSITIVE_INFINITY : maxMatchesPerSpan;
 
   for (let i = 0; i < tokens.length; i++) {
     if (pinned.length >= maxPins) break;
@@ -296,9 +406,10 @@ export function extractQueryPaths(
     if (!normalized) continue;
     candidatesExamined++;
 
-    const { matches, ambiguous } = resolveSpan(
-      normalized.toLowerCase(), lowerToOriginal, maxMatchesPerSpan,
-    );
+    const resolved = resolveSpan(normalized.toLowerCase(), lowerToOriginal, collectLimit);
+    const pinnable = resolved.matches.length > 0 ? pinnableMatches(normalized, resolved.matches) : null;
+    const matches = pinnable ?? [];
+    const ambiguous = resolved.ambiguous || (resolved.matches.length > 0 && pinnable === null);
     if (matches.length > 0) {
       consumed.add(i);
       for (const m of matches) {
@@ -352,8 +463,9 @@ export function extractQueryPaths(
     const { path: stripped, lines } = stripWrapping(tokens[i]!);
     if (stripped.length < 4 || !KEBAB_BASENAME.test(stripped)) continue;
     basenameStems ??= buildBasenameStems(indexedPaths);
-    const matches = basenameStems.get(stripped.toLowerCase());
-    if (!matches || matches.length > maxMatchesPerSpan) continue;
+    const stemMatches = basenameStems.get(stripped.toLowerCase());
+    const matches = stemMatches ? pinnableMatches(stripped, stemMatches) : null;
+    if (!matches) continue;
     consumed.add(i);
     for (const m of matches) {
       if (pinnedSeen.has(m) || pinned.length >= maxPins) continue;
@@ -419,5 +531,10 @@ export function extractQueryPaths(
       seenAnchor.add(key);
       return true;
     }),
+    // A file another span pinned outright (the agent also wrote its full path)
+    // was not set aside after all.
+    setAsideMatches: setAside
+      .map((s) => ({ span: s.span, files: s.files.filter((f) => !pinnedSeen.has(f)) }))
+      .filter((s) => s.files.length > 0),
   };
 }
