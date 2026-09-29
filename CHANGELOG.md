@@ -12,6 +12,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.1] - 2026-09-29
+
 ### Highlights
 
 - **Sharper answers from `codegraph_explore`.** It returns the functions and methods you name — even from a very large file, or one full of same-named overrides — honours line numbers in a query, and says when it shortened an answer instead of calling it complete.
@@ -1099,3 +1102,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.4.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.4.1
 [1.5.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.5.0
 [1.6.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.0
+[1.6.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.1
