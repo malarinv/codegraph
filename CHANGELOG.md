@@ -173,6 +173,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - On Windows, the shared MCP daemon now waits longer for another program — an antivirus scan, an indexer, or another session reading its lock file — to let go of that file, so it starts instead of leaving the session to fall back to a slower in-process server. (#1773)
 - File watching no longer drops the full re-scan a removed directory asks for when that sync fails, so the deleted files leave the index instead of lingering. (#1964)
+- Running `codegraph index` while the MCP server is running no longer leaves live auto-sync writing into the old, replaced index: the server now switches to the rebuilt index before its next update and catches up on everything it would otherwise have missed. (#1902)
 - Daemon startup and cleanup now preserve live legacy PID-only locks while still reclaiming dead or identity-disproved records, preventing two writers from serving the same project.
 - Incremental sync now keeps edge rebinding crash-safe: replacing a resolved edge with its recovery reference commits atomically, so an interruption cannot permanently remove the relationship.
 - Status now detects committed but unindexed changes and restored edits without scanning every source file; thanks @inth3shadows. (#1829)
