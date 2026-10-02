@@ -26,7 +26,7 @@ import { isVisibleCppMacro, clearCppMacroVisibility } from './cpp-macro-visibili
 import { isCppConstructorRef, matchCppConstructor } from './cpp-constructor';
 import { gateSwiftTypeTarget, clearSwiftTypeVisibility, swiftExtendedConformances } from './swift-type-visibility';
 import { gateTypeParameter, clearTypeParameterMemos } from './type-parameters';
-import { resolveViaImport, resolvePhpImportedStaticCall, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, isExternalImport } from './import-resolver';
+import { resolveViaImport, resolvePhpImportedStaticCall, resolvePhpQualifiedClassRef, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, isExternalImport } from './import-resolver';
 import { ResolverPool, minRefsForPool } from './resolver-pool';
 import { resolveAliasBinding } from './alias-binding';
 import { detectFrameworks } from './frameworks';
@@ -1090,6 +1090,13 @@ export class ReferenceResolver {
     ) {
       return this.resolveCfmlComponentPath(ref);
     }
+
+    // A PHP class written with a namespace in it — `new Alias\X()` through a
+    // `use Ns as Alias;` namespace alias, `extends Sub\Base`, `\Ns\X::make()`
+    // (#2256). The pre-filter below would drop most of these before any import
+    // strategy ran, and PHP gives each one exactly one meaning; resolve it first.
+    const phpQualified = resolvePhpQualifiedClassRef(ref, this.context);
+    if (phpQualified !== undefined) return this.gateLanguage(phpQualified, ref);
 
     // Fast pre-filter: skip if no symbol with this name exists anywhere
     // AND the name doesn't match a local import. The import escape is
