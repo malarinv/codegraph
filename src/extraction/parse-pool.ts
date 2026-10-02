@@ -76,13 +76,13 @@ const MAX_SCALED_PARSE_TIMEOUT_MS = 20_000;
  */
 const HARD_KILL_MULTIPLIER = 3;
 /**
- * How long `destroy()` waits for a worker that is still loading its grammars
- * before terminating it anyway. Terminating a worker whose WebAssembly
- * compiles are still in flight can take the whole process down with an access
- * violation (0xC0000005, seen on Windows): a pool torn down right after a short
- * index often has a late-spawned worker in exactly that state. A load finishes
- * in well under a second normally and a few seconds under heavy load; the cap
- * only bounds a load that is wedged.
+ * How long `destroy()` waits for a worker that is still starting up — loading
+ * its modules, then its grammars — before terminating it anyway. Terminating a
+ * worker while it is still loading its modules can take the whole process down
+ * with an access violation (0xC0000005, seen on Windows): a pool torn down
+ * right after a short index often has a late-spawned worker in exactly that
+ * state. A start finishes in well under a second normally and a few seconds
+ * under heavy load; the cap only bounds a start that is wedged.
  */
 const GRAMMAR_LOAD_SETTLE_MS = 15_000;
 /**

@@ -271,13 +271,13 @@ export class MCPEngine {
 
     // Detach + terminate the worker pool first so no tool call routes to a
     // worker mid-teardown; outstanding pool calls resolve with graceful guidance.
+    // Stopping waits for the workers to end: the daemon exits right after, and
+    // exiting while a worker is still starting up can crash the process.
     this.toolHandler.setQueryPool(null);
-    if (this.queryPool) {
-      void this.queryPool.destroy();
-      this.queryPool = null;
-    }
+    const poolDown = this.queryPool ? this.queryPool.destroy() : Promise.resolve();
+    this.queryPool = null;
     const drained = this.toolHandler.closeAll();
-    this.stopPromise = drained.then(async () => {
+    this.stopPromise = Promise.all([drained, poolDown]).then(async () => {
       if (this.initPromise) await this.initPromise;
       if (this.defaultLease) {
         await this.defaultLease.release();
