@@ -12,6 +12,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.2] - 2026-10-03
+
 ### Highlights
 
 - **Far fewer wrong links, in every language.** A call, import or type now resolves the way its language scopes names — through imports, packages, namespaces and the class it is written in — so it stops landing on an unrelated symbol that only shares its name. This covers TypeScript and JavaScript, Python, Java, Kotlin, Scala, C#, VB.NET, Swift, Objective-C, Go, Rust, C and C++, PHP, Ruby, Dart, Lua, R and more, and makes callers, impact and `codegraph_explore` answers more trustworthy.
@@ -1313,3 +1316,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.5.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.5.0
 [1.6.0]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.0
 [1.6.1]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.1
+[1.6.2]: https://github.com/colbymchenry/codegraph/releases/tag/v1.6.2
