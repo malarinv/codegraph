@@ -30,9 +30,10 @@
  * arguments, as statements and as expressions; TortureGenericCalls.dart:
  * generic calls parsed as two comparisons, recovered as calls;
  * TortureDeclarationDocs.dart: the dartdoc and annotations of a
- * `declaration`-wrapped member with no body, read from before the wrapper)
- * and their CRLF variants
- * (derived in-memory — #1329), plus defer and generated-file pins.
+ * `declaration`-wrapped member with no body, read from before the wrapper;
+ * TortureCommentChains.dart: comments between a member chain's parts skipped
+ * by every sibling step) and their CRLF variants (derived in-memory — #1329),
+ * plus defer and generated-file pins.
  *
  * The full-repo sweeps live in scripts/kernel-parity.mjs (shelf/bloc/flutter
  * with --max-deferral 0.3); this suite keeps the invariant alive in
@@ -141,6 +142,10 @@ describe.skipIf(!kernelBuilt)('kernel Dart extraction parity', () => {
     // external members) take their dartdoc and annotations from before the
     // wrapper; a field's stay with the field.
     ['TortureDeclarationDocs.dart', 20],
+    // Comments between a chain's parts — `tester //` + newline + `.state(…)`,
+    // dartdoc, block comments, one between a member and its arguments — are
+    // skipped by every sibling step: calls, chains, reads, static references.
+    ['TortureCommentChains.dart', 10],
   ] as const;
 
   for (const [file, minNodes] of FIXTURES) {
