@@ -9093,6 +9093,50 @@ function cppEndsDeclarationBegunAbove(line: string, escapedReceiver: string): bo
 }
 
 /**
+ * The type a declaration of the receiver on the code `line` (lines[index])
+ * declares when its type is written on lines above, read with them:
+ * - the end of a type begun above, its text before the name closing a `<`
+ *   an earlier line opened — protobuf's `const
+ *   google::protobuf::internal::ExtensionIdentifier<` above `FeatureSet,
+ *   TypeTraitsT, field_type, is_packed>& extension) const {`. Lines are
+ *   joined, up to six, until the brackets pair;
+ * - a type alone on the line above, the name starting this one — rocksdb's
+ *   `std::unordered_map<std::string, std::shared_ptr<const TableProperties>>`
+ *   above `props;`, as cppDataMemberIn reads a member.
+ * Null when the line needs no line above, or the lines read together declare
+ * no type there.
+ */
+function cppDeclarationBegunAbove(
+  lines: readonly string[],
+  index: number,
+  line: string,
+  receiverPattern: RegExp,
+  declaratorRegex: RegExp,
+  rawLines: ReturnType<typeof cppNonCodeLines>,
+): string | null {
+  const at = line.search(receiverPattern);
+  if (at < 0 || index === 0) return null;
+  const codeAt = (j: number): string => cppCodeOf(cppLiteralsBlanked(lines[j]!, j + 1, rawLines)) ?? '';
+  const head = line.slice(0, at);
+  if (/^\s*[*&]*\s*$/.test(head)) {
+    const above = codeAt(index - 1);
+    return CPP_TYPE_LINE.test(above) ? matchCppDeclarator(`${above} ${line}`, declaratorRegex)?.[1] ?? null : null;
+  }
+  // (Only such a line can need the lines above: every other line naming the
+  // receiver is spared joining them.)
+  if (!cppTypeBeganAbove(head)) return null;
+  let text = line;
+  let before = head;
+  for (let j = index - 1; j >= Math.max(0, index - 6); j--) {
+    const above = codeAt(j);
+    text = `${above} ${text}`;
+    before = `${above} ${before}`;
+    if (!cppTypeBeganAbove(before)) return matchCppDeclarator(text, declaratorRegex)?.[1] ?? null;
+  }
+  return null;
+}
+
+/**
  * The last name of a declared C++ type: `const std::vector<std::pair<int,
  * Foo>>&` → `vector`, `ns::Table<int, Box<int>>` → `Table`. Null when the text
  * names no type.
@@ -11091,8 +11135,16 @@ function inferCppReceiverType(
           return cppDeclaredType(element.text, elementType, true, ref, context, found);
         }
       }
-      // The end of a declaration begun on an earlier line, maybe the
-      // receiver's: one found further up may be another variable.
+      // A declaration begun on an earlier line, read with the lines it began on.
+      const begun = cppDeclarationBegunAbove(lines, i, line, receiverPattern, declaratorRegex, rawLines);
+      const begunType = begun && normalizeCppTypeName(begun);
+      if (begun && begunType && begunType !== 'auto') {
+        const inCallerScope = isCppCallersDeclaration(ref.filePath, i + 1, ref, context);
+        noteCppDeclaration(found, begun, inCallerScope);
+        return cppDeclaredType(begun, begunType, inCallerScope, ref, context, found);
+      }
+      // One those lines don't make readable is still maybe the receiver's:
+      // one found further up may be another variable.
       if (cppEndsDeclarationBegunAbove(line, escapedReceiver)) found.shadowed = true;
       // `for (auto& [cfh, iter] : cfh_iter_pairs_)`, `auto [status, iter] = Open();`.
       const bound = !found.shadowed ? cppStructuredBindingType(line, lines, i, receiverName, callLineIndex, ref, context, rawLines) : null;
