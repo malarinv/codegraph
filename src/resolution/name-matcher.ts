@@ -11405,7 +11405,7 @@ function matchCppConstruction(ref: UnresolvedRef, context: ResolutionContext): R
     : { original: ref, targetNodeId: node.id, confidence: 0.7, resolvedBy: 'exact-match' };
   if (cppDeclaresLocalAlias(written, ref, context)) {
     const aliased = resolveCppAliasedType(written, ref, context);
-    const named = aliased && !aliased.pointer ? cppAliasedClass(aliased, context) : undefined;
+    const named = aliased && !aliased.pointer ? cppAliasedClass(aliased, context, ref) : undefined;
     const cls = named ? context.getNodesByQualifiedName(named).find((n) => CPP_CLASS_KINDS.has(n.kind)) : undefined;
     return cls ? made(cls) : null;
   }
