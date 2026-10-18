@@ -23,7 +23,9 @@ import {
   normalizeInferredTypeName,
   goRefQualifier,
   inferLocalReceiverType,
+  arrayElementType,
 } from './name-matcher';
+import { JS_ARRAY_METHODS } from './js-builtins';
 
 /**
  * Extension resolution order by language
@@ -3270,34 +3272,22 @@ export function pythonModulePath(source: string, fromFile: string): string | nul
  * way resolution reads it for the call (inferLocalReceiverType, memoized per
  * file, scope and receiver, so a call the matcher just tried costs a lookup):
  * the binding the type is written through, `LRUCache` of `new LRUCache<K,
- * V>(…)` or `lib` of `new lib.LRUCache()`. Undefined for a type the file
- * doesn't import, in a file that imports nothing, and for a local declared as
- * an array of the type (`results: URI[]`). Resolution reads the element type
- * there too, but the call is the array's (`results.push(…)`), which no edit
- * of the type's module links: such calls were most of what this parked on
- * vscode, and retrying them nearly doubled what an edit of `uri.ts` retried.
+ * V>(…)` or `lib` of `new lib.LRUCache()`, of the element type of an array
+ * (`results: URI[]`), or of the type whose property it is (`Emitter<E>['event']`).
+ * Undefined for a type the file doesn't import, in a file that imports
+ * nothing, and for a method arrays have called on an array (`results.push(…)`):
+ * resolution links that to no project class, so no edit of the type's module
+ * does. Such calls were most of what this parked on vscode, and retrying them
+ * nearly doubled what an edit of `uri.ts` retried.
  */
 function localTypeBinding(receiver: string, ref: UnresolvedRef, context: ResolutionContext, mappings: ImportMapping[]): ImportMapping | undefined {
   if (mappings.length === 0) return undefined;
-  const decl: { raw?: string; line?: number } = {};
-  if (!inferLocalReceiverType(receiver, ref, context, decl) || !decl.raw) return undefined;
-  const head = decl.raw.split('.')[0];
-  const binding = mappings.find((m) => m.localName === head);
-  if (!binding || decl.line === undefined) return binding;
-  const lines = context.getFileLines?.(ref.filePath) ?? context.readFile(ref.filePath)?.split(/\r?\n/);
-  const declaration = lines?.[decl.line];
-  return declaration !== undefined && declaresArrayOf(declaration, receiver, decl.raw) ? undefined : binding;
-}
-
-/** A `name: Type` annotation, the type's arguments, and the `[` of an array of it: `items: Item<K, V>[]`. */
-const ANNOTATION = /([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w.$]*)\s*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*(\[)?/g;
-
-/** Whether `line` annotates `name` as an array of `type`: `items: Item[]`, `items: Item<K>[] = []`. */
-function declaresArrayOf(line: string, name: string, type: string): boolean {
-  for (const m of line.matchAll(ANNOTATION)) {
-    if (m[1] === name && m[2] === type) return m[3] !== undefined;
-  }
-  return false;
+  const decl: { raw?: string } = {};
+  const type = inferLocalReceiverType(receiver, ref, context, decl);
+  if (!type || !decl.raw) return undefined;
+  if (arrayElementType(type) !== undefined && JS_ARRAY_METHODS.has(ref.referenceName.slice(receiver.length + 1))) return undefined;
+  const head = decl.raw.split(/[.<[\s]/)[0];
+  return mappings.find((m) => m.localName === head);
 }
 
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;

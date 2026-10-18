@@ -35,6 +35,10 @@ const CALLERS: Files = {
   'src/use-param.ts': "import { LRUCache } from './lru-cache';\nexport function c(cache: LRUCache<string, number>) {\n  return cache.get('k');\n}\n",
   'src/use-namespace.ts': "import * as lib from './lru-cache';\nexport function g() {\n  const cache = new lib.LRUCache<string, number>(3);\n  return cache.get('k');\n}\n",
   'src/use-default.ts': "import Store from './store';\nexport function e() {\n  const s = new Store();\n  return s.get();\n}\n",
+  // A call on an element that shares the array's name: the element's class.
+  'src/use-each.ts': "import { LRUCache } from './lru-cache';\nexport function h(cs: LRUCache<string, number>[]) {\n  cs.forEach((cs) => cs.get('k'));\n}\n",
+  // One of the class's properties, which resolution reads as the class.
+  'src/use-prop.ts': "import { LRUCache } from './lru-cache';\nexport function i(max: LRUCache<string, number>['max']) {\n  return max.toFixed(0);\n}\n",
   'src/noise.ts': NOISE,
 };
 
@@ -50,6 +54,7 @@ const LINKS = [
   'cache.get: calls src/use-new.ts -> method src/lru-cache.ts::LRUCache::get',
   'cache.get: calls src/use-param.ts -> method src/lru-cache.ts::LRUCache::get',
   'cache.set: calls src/use-new.ts -> method src/lru-cache.ts::LRUCache::set',
+  'cs.get: calls src/use-each.ts -> method src/lru-cache.ts::LRUCache::get',
   's.get: calls src/use-default.ts -> method src/store.ts::Store::get',
 ];
 
@@ -171,9 +176,9 @@ describe('a failed member call on a typed local', () => {
       // A local of a built-in type, of a package's, of a type the file
       // declares itself and one a factory returns: none waits for a module of
       // the project. Nor does a local or a parameter declared as an array of
-      // an imported class, whose calls are the array's, or a method of `this`
-      // passed as a value, which resolution looks up in the enclosing class,
-      // whatever `this` is declared as.
+      // an imported class, whose array methods are the array's, or a method of
+      // `this` passed as a value, which resolution looks up in the enclosing
+      // class, whatever `this` is declared as.
       'src/other.ts':
         "import { createCache, LRUCache } from './factory';\n" +
         "import QuickLRU from 'quick-lru';\n" +
@@ -212,6 +217,9 @@ describe('a failed member call on a typed local', () => {
       expect(tails('src/use-param.ts', 'cache.get')).toEqual(['module:lru-cache']);
       expect(tails('src/use-namespace.ts', 'cache.get')).toEqual(['module:lru-cache']);
       expect(tails('src/use-default.ts', 's.get')).toEqual(['module:store']);
+      expect(tails('src/use-each.ts', 'cs.get')).toEqual(['module:lru-cache']);
+      expect(tails('src/use-each.ts', 'cs.forEach')).toEqual(['forEach']);
+      expect(tails('src/use-prop.ts', 'max.toFixed')).toEqual(['module:lru-cache']);
 
       expect(tails('src/other.ts', 'seen.get')).toEqual(['get']);
       expect(tails('src/other.ts', 'pkg.get')).toEqual(['get']);
