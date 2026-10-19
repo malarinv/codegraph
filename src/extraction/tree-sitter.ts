@@ -541,7 +541,8 @@ export class TreeSitterExtractor {
       anchor,
       this.source,
       this.extractor?.docstringStepOverTypes,
-      this.extractor?.docstringSkipsTrailingComments
+      this.extractor?.docstringSkipsTrailingComments,
+      this.extractor?.docstringSkipsDetachedComments
     );
     const body = this.extractor?.getBodyDocstring?.(node, this.source);
     if (preceding && body) return `${preceding}\n\n${body}`;
