@@ -13112,7 +13112,7 @@ function buildLocalReceiverTypePatterns(language: Language, r: string): RegExp[]
         // A type followed by brackets is captured whole, so matchMethodCall
         // can tell an array of it (`items: Item[]`, `items: Item<K>[]`), whose
         // own methods aren't an element's (arrayElementType), from one of its
-        // properties (`groupIds: Element["groupIds"]`).
+        // properties (`groupIds: Element["groupIds"]`), which isn't it.
         new RegExp(`\\b${r}\\b\\s*:\\s*([A-Z][\\w.$]*(?:(?:\\s*<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\\s*\\[[^\\]]*\\])?)`), // lg: Logger  (annotation or typed param)
       ];
     case 'python':
@@ -14259,12 +14259,35 @@ export function matchMethodCall(
     // declares, where `distinctElements.find(…)` on vscode's `ExplorerItem[]`
     // reached `ExplorerItem.find`; any other is called on one of its elements
     // under the same name, as in `d.forEach(d => d.dispose())`, so it takes
-    // the element's type. A type's property (`Emitter<E>['event']`,
-    // `Parameters<typeof f>[0]`) is still read as the type.
+    // the element's type. One of a type's properties (`editor:
+    // IChatWidget['inputEditor']`) has the type that property is declared
+    // with, an array of it the same way, where the type it indexes reached
+    // vscode's `ISessionChatPillVisibilityService.isVisible` through
+    // `['pullRequests']`. That type decides alone, as a `this.<field>`
+    // call's does (matchTsThisFieldCall): the method is its, or nothing the
+    // method's name would guess. Its class is the one the declaring file
+    // imports, as a typed local's is the one the call's file imports:
+    // vscode's `ComponentFixtureContext['disposableStore']` reached
+    // copilot's vendored `DisposableStore`. A property whose type isn't
+    // written there (a getter like `Emitter`'s `event`, `typeof`), or a key
+    // that isn't a name (`Parameters<typeof f>[0]`), says nothing new, and
+    // is read as the type it indexes, as before: the nearest line declaring
+    // the name may be another variable's type's member, as vscode's `let
+    // mockPty: { onCommandExecuted: Emitter<E>['event'] }` is above calls on
+    // the local `onCommandExecuted`, an `Emitter<E>`.
     if (inferredType && ESM_FAMILY.has(ref.language) && inferredType.endsWith(']')) {
       const element = arrayElementType(inferredType);
-      if (element !== undefined && JS_ARRAY_METHODS.has(methodName!)) return null;
-      inferredType = element ?? inferredType.replace(/\s*\[[^\]]*\]$/, '');
+      const declared = element !== undefined
+        ? { type: element, array: true, file: undefined }
+        : tsIndexedPropertyType(inferredType, ref, context);
+      if (!declared) {
+        inferredType = inferredType.replace(/\s*\[[^\]]*\]$/, '');
+      } else {
+        if (declared.array && JS_ARRAY_METHODS.has(methodName!)) return null;
+        inferredType = normalizeInferredTypeName(declared.type);
+        if (!inferredType) return null;
+        if (element === undefined) return resolveMethodOnType(inferredType, methodName!, ref, context, 0.9, 'instance-method', declared.file);
+      }
     }
     if (inferredType) {
       // A Go local bound from a type assertion calls a method of the type Go
@@ -15558,7 +15581,15 @@ function matchRustSelfFieldCall(
  * patterns each time, a third of all method-call matching on vscode. Derived
  * from file source: drops with clearNameMatcherMemos.
  */
-const TS_FIELD_DECL_MEMO = new WeakMap<ResolutionContext, Map<string, { valueType: boolean; type: string } | null>>();
+const TS_FIELD_DECL_MEMO = new WeakMap<ResolutionContext, Map<string, TsFieldDecl | null>>();
+/**
+ * A TS field's declared type as tsFieldDeclaration reads it: the type it
+ * names (`Mailer` of `mailer: Mailer<T>`), whether that is a value's
+ * (`typeof X`), and whether the field holds an array of it (`items: Item[]`).
+ */
+type TsFieldDecl = { valueType: boolean; type: string; array?: boolean };
+/** What follows a field's type when the field holds an array of it: `[]`, after any type arguments. */
+const TS_ARRAY_SUFFIX = /^\s*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*\[\s*\]/;
 /** A class's comment-stripped lines, and which of them hold each `[\w$#]` token. */
 interface TsClassDecl {
   lines: string[];
@@ -15612,7 +15643,7 @@ const TS_FIELD_PATTERNS_AT: readonly TsFieldPattern[] = [
 ];
 
 /** The first declaration of `field` on one line, as `line.match` of its patterns in order would find it. */
-function tsFieldOnLine(line: string, field: string): { valueType: boolean; type: string } | null {
+function tsFieldOnLine(line: string, field: string): TsFieldDecl | null {
   let at: number[] | null = null;
   for (let i = line.indexOf(field); i !== -1; i = line.indexOf(field, i + 1)) {
     const end = i + field.length;
@@ -15624,7 +15655,7 @@ function tsFieldOnLine(line: string, field: string): { valueType: boolean; type:
     for (const i of at) {
       re.lastIndex = i;
       const m = re.exec(line);
-      if (m && m[1]) return { valueType, type: m[1] };
+      if (m && m[1]) return { valueType, type: m[1], array: TS_ARRAY_SUFFIX.test(line.slice(re.lastIndex)) };
     }
   }
   return null;
@@ -15687,7 +15718,7 @@ function tsFieldDeclaration(
   cls: Node,
   field: string,
   context: ResolutionContext
-): { valueType: boolean; type: string } | null {
+): TsFieldDecl | null {
   let memo = TS_FIELD_DECL_MEMO.get(context);
   if (!memo) {
     memo = new Map();
@@ -15696,7 +15727,7 @@ function tsFieldDeclaration(
   const key = cls.id + '\0' + field;
   const hit = memo.get(key);
   if (hit !== undefined) return hit;
-  let found: { valueType: boolean; type: string } | null = null;
+  let found: TsFieldDecl | null = null;
   const decl = tsClassDecl(cls, context);
   if (decl && TS_FIELD_TOKEN.test(field)) {
     // Every pattern needs the field as a whole `[\w$#]` run — the lookbehind
@@ -15718,13 +15749,72 @@ function tsFieldDeclaration(
       for (const { re, valueType } of patterns) {
         const m = line.match(re);
         if (!m || !m[1]) continue;
-        found = { valueType, type: m[1] };
+        found = { valueType, type: m[1], array: TS_ARRAY_SUFFIX.test(line.slice(m.index! + m[0].length)) };
         break scan;
       }
     }
   }
   memo.set(key, found);
   return found;
+}
+
+/**
+ * What a TS indexed type (`editor: IChatWidget['inputEditor']`) is: the type
+ * that property is declared with in the project class or interface it
+ * indexes, whether the property holds an array of it, and the file that
+ * says which class of that name it is. The indexed type is the one the
+ * call's file imports, when it imports one; the property's type is the one
+ * the declaring file imports, or else declares (tsImportedTypeFile).
+ * Undefined when the key isn't a string literal (`Parameters<typeof f>[0]`,
+ * `T[K]`), the indexed type isn't the project's, or the property's type
+ * isn't written there (a getter, `typeof`).
+ */
+function tsIndexedPropertyType(
+  indexed: string,
+  ref: UnresolvedRef,
+  context: ResolutionContext
+): { type: string; array: boolean; file: string } | undefined {
+  const m = /^([A-Za-z_$][\w$]*)\s*\[\s*(['"])([\w$]+)\2\s*\]$/.exec(indexed);
+  if (!m) return undefined;
+  const imported = tsImportedTypeFile(m[1]!, ref, context);
+  const owners = preferCallSiteFile(context.getNodesByName(m[1]!), imported ?? ref.filePath).filter((n) =>
+    (n.kind === 'class' || n.kind === 'interface' || n.kind === 'type_alias' || n.kind === 'component') &&
+    sameLanguageFamily(n.language, ref.language));
+  for (const owner of owners) {
+    const decl = tsFieldDeclaration(owner, m[3]!, context);
+    if (!decl) continue;
+    // A type parameter of the class names no type: `Emitter<T>`'s
+    // `fire(event: T)`, which the reader takes for its `event`.
+    if (decl.valueType || tsClassTypeParameter(owner, decl.type, context)) return undefined;
+    const at = owner.filePath === ref.filePath ? ref : { ...ref, filePath: owner.filePath, language: owner.language };
+    return { type: decl.type, array: decl.array === true, file: tsImportedTypeFile(decl.type, at, context) ?? owner.filePath };
+  }
+  return undefined;
+}
+
+/** Is `name` one of the type parameters the head of the TS class or interface `cls` declares (`class Emitter<T>`)? */
+function tsClassTypeParameter(cls: Node, name: string, context: ResolutionContext): boolean {
+  const lines = context.getFileLines?.(cls.filePath) ?? context.readFile(cls.filePath)?.split(/\r?\n/) ?? [];
+  const head = lines.slice(cls.startLine - 1, cls.startLine + 2).join(' ').split('{')[0]!;
+  const open = new RegExp(`\\b${cls.name.replace(/\$/g, '\\$')}\\s*<`).exec(head);
+  if (!open) return false;
+  // The parameters between the `<` after the name and its own `>`, split
+  // at their top level: `T`, `K extends keyof T = never`.
+  let depth = 0;
+  let from = open.index + open[0].length;
+  for (let i = from; i < head.length; i++) {
+    const c = head[i];
+    if (c === '<' || c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === '>' && head[i - 1] !== '=') {
+      if (depth === 0) return head.slice(from, i).trim().replace(/^(?:in|out|const)\s+/, '').split(/[\s=]/)[0] === name;
+      depth--;
+    } else if (c === ',' && depth === 0) {
+      if (head.slice(from, i).trim().replace(/^(?:in|out|const)\s+/, '').split(/[\s=]/)[0] === name) return true;
+      from = i + 1;
+    }
+  }
+  return false;
 }
 
 /**
