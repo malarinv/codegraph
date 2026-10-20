@@ -11362,22 +11362,6 @@ function isMethodOwnerKind(n: Node): boolean {
 }
 
 /**
- * Is `n` the method `name` of the class `cls` a receiver is taken to name
- * (the class-name and capitalized-receiver strategies of matchMethodCall)?
- * In C and C++, only one of exactly that class: protobuf's `arena.get()`
- * took the `get` of `Arena::UniquePtr`, a class nested in `Arena`, since its
- * qualified name has `Arena` in it, as `ThreadSafeArena::get`'s does. In
- * other languages, any method of the name whose qualified name has the
- * class's name in it, as before.
- */
-function isClassStrategyMethod(n: Node, cls: Node, name: string): boolean {
-  if (n.kind !== 'method' || n.name !== name) return false;
-  return cls.language === 'c' || cls.language === 'cpp'
-    ? n.qualifiedName === `${cls.qualifiedName}::${name}`
-    : n.qualifiedName.includes(cls.name);
-}
-
-/**
  * When a symbol name is ambiguous across files, prefer the candidate(s) declared
  * in the call site's own file, keeping the rest in their original order (#1079).
  * A same-file definition is the strongest language-agnostic signal for which of
@@ -17214,7 +17198,11 @@ function readDeclaredSupertypes(cls: Node, context: ResolutionContext): string[]
     text ? [...text.matchAll(/([A-Za-z_][\w.:\\]*)/g)].map((m) => m[1]!.split(/::|\.|\\/).pop()!).filter((w) => !/^(?:metaclass|object)$/.test(w)) : [];
   switch (cls.language) {
     case 'pascal': return names(/=\s*class\s*\(([^)]*)\)/i.exec(head)?.[1]);
-    case 'python': return names(/\bclass\s+\w+\s*\(([^)]*)\)/.exec(head)?.[1]?.replace(/\w+\s*=\s*[\w.]+/g, ''));
+    // A base built by a class's factory — Django's `class Manager(
+    // BaseManager.from_queryset(QuerySet))` — subclasses that class: the
+    // qualifier is the supertype, not the method called on it.
+    case 'python': return names(/\bclass\s+\w+\s*\(([^)]*)\)/.exec(head)?.[1]?.replace(/\w+\s*=\s*[\w.]+/g, '')
+      .replace(/([A-Za-z_][\w.]*)\.\w+\s*\(/g, '$1 ('));
     case 'ruby': return names(/\bclass\s+[\w:]+\s*<\s*([\w:]+)/.exec(head)?.[1]);
     case 'php': return names(/\bextends\s+([\w.\\]+)/.exec(head)?.[1]);
     case 'typescript': case 'tsx': case 'javascript': case 'jsx':
@@ -18417,9 +18405,17 @@ export function matchMethodCall(
     // staxrip's `FrameServerFactory.Create(…)` went to its AutoCrop tool's copy.
     if (ref.language === 'vbnet') classCandidates = preferVbProject(classCandidates, ref, context);
 
+    const productionCaller = !isTestPath(ref.filePath);
     for (const classNode of classCandidates) {
       // Skip cross-language class matches
       if (classNode.language !== ref.language) continue;
+      // A class declared inside a function is named only in there: a
+      // `File.write(…)` elsewhere is not the `File` a Django test declares.
+      if (!isLexicallyReachable(classNode, ref, context)) continue;
+      // Production code never names a test suite's class: Django's
+      // `manager.check()` in `Model._check_managers` is no test app's
+      // `Manager` model (whose `check` it inherits from `Model`).
+      if (productionCaller && isTestPath(classNode.filePath)) continue;
 
       // C++'s `Outer::Count()` is the member C++ looks up in `Outer`: its
       // own, else one a base declares (cppMethodOf), never one of a class
@@ -18431,8 +18427,7 @@ export function matchMethodCall(
         return { original: ref, targetNodeId: method.id, confidence: own ? 0.85 : 0.8, resolvedBy: 'qualified-name' };
       }
 
-      const nodesInFile = context.getNodesInFile(classNode.filePath);
-      const methodNode = nodesInFile.find((n) => isClassStrategyMethod(n, classNode, methodName!));
+      const methodNode = classStrategyMethod(classNode, methodName!, context);
 
       if (methodNode) {
         return {
@@ -18500,7 +18495,7 @@ export function matchMethodCall(
   }
 
   // Strategy 2: Instance variable receiver - try capitalized form to find class
-  // e.g., "permissionEngine" → look for classes containing "PermissionEngine"
+  // e.g., "permissionEngine" → look for a class named "PermissionEngine"
   const capitalizedReceiver = objectOrClass!.charAt(0).toUpperCase() + objectOrClass!.slice(1);
   if (capitalizedReceiver !== objectOrClass) {
     const strat2 = nmTimedT('mc-capital', ref, (): ResolvedRef | null => {
@@ -18508,16 +18503,16 @@ export function matchMethodCall(
         withinCppTranslationUnit(context.getNodesByName(capitalizedReceiver).filter(isMethodOwnerKind), ref, context),
         ref.filePath,
       );
+      const productionCaller = !isTestPath(ref.filePath);
       for (const classNode of fuzzyClassCandidates) {
         // Skip cross-language class matches
         if (classNode.language !== ref.language) continue;
+        // Nor a class declared inside another function, nor a test suite's
+        // class from production code (see Strategy 1).
+        if (!isLexicallyReachable(classNode, ref, context)) continue;
+        if (productionCaller && isTestPath(classNode.filePath)) continue;
 
-        const nodesInFile = context.getNodesInFile(classNode.filePath);
-        const methodNode = nodesInFile.find((n) => isClassStrategyMethod(n, classNode, methodName!) &&
-          // A Go standard method name is the type's own, not one of another
-          // type its name is part of: kubernetes' `status.String()` is no
-          // `RuntimeStatus::String` beside a `Status` type.
-          (!goStd || n.qualifiedName === `${classNode.name}::${methodName}`));
+        const methodNode = classStrategyMethod(classNode, methodName!, context);
 
         if (methodNode) {
           return {
@@ -18587,6 +18582,15 @@ export function matchMethodCall(
     // rest_framework/renderers.py's `view.reverse_action(…)` is not a test's
     // `DummyView`. The test's methods were never in the running.
     if (!isTestPath(ref.filePath)) targetMethods = targetMethods.filter((m) => !isTestPath(m.filePath));
+    // Nor is it a method of a class another function declares: Django's
+    // `file.write(…)` in one test is not the `File` a serializer test
+    // declares in its body. The one method such a filter may leave is still
+    // only a guess by the receiver's name (the scoring below), never the
+    // only method of the name: `cache.aadd()` is `BaseCache`'s, while
+    // `value.split()` is no test model's `split`.
+    const reachable = targetMethods.filter((m) => isLexicallyReachable(m, ref, context));
+    const scopedOut = reachable.length !== targetMethods.length;
+    targetMethods = reachable;
     // A Vue component's own method is reached as `this.m()` inside it —
     // never as `e.preventDefault()` on an event, nor `this.editor.setValue()`
     // on something the component holds. A template ref
@@ -18603,7 +18607,7 @@ export function matchMethodCall(
     // (`web_push_request.legacy_encrypt` → WebPushRequest). rubocop's
     // `node.loc` on a rubocop-ast node went to the one `loc` in the project
     // 1,201 times; lobsters' `value.to_s` to a short-id class's.
-    if (targetMethods.length === 1 && !narrowed && targetMethods[0]!.language === ref.language &&
+    if (targetMethods.length === 1 && !narrowed && !scopedOut && targetMethods[0]!.language === ref.language &&
         // A test double is only what a test names — as in the scoring below:
         // allauth's `resp.json()` on a Django test response is not the one
         // `json` of its `MockedResponse`.
@@ -18627,7 +18631,7 @@ export function matchMethodCall(
     }
 
     // Multiple methods: score by receiver name word overlap with class name
-    if (targetMethods.length > 1) {
+    if (targetMethods.length > 1 || (targetMethods.length === 1 && scopedOut && !narrowed)) {
       // What the receiver is named after is its last link: `builder.tokeniser`
       // is a Tokeniser, `table.Columns` no kind of table.
       const receiverWords = splitCamelCase(receiverLink(objectOrClass!));
@@ -20881,6 +20885,41 @@ function tsFieldCall(
     return { original: ref, targetNodeId: nearest.id, confidence: 0.85, resolvedBy: 'instance-method' };
   }
   return resolveMethodOnType(typeName, methodName, ref, context, 0.85, 'instance-method', imported);
+}
+
+/**
+ * The `method` named `methodName` declared on `classNode`, among the nodes of
+ * the class's file: the class's exact qualified name first, then the
+ * owner-by-name form the resolver uses elsewhere (`Logger::log`,
+ * `ns::Logger::log`). Never a substring test: `FileLogger::log` contains
+ * `Logger`.
+ *
+ * Known limitation — same-named NESTED classes: the owner-by-name form also
+ * matches `Outer::Logger::log`, and every same-named class is a candidate in
+ * the caller's loop, so a nested `Outer::Logger` can take a top-level
+ * `Logger.log()` (declared first, or the only one with the method). Choosing
+ * among them needs each language's scope rules.
+ */
+function findOwnMethod(nodesInFile: Node[], classNode: Node, methodName: string): Node | undefined {
+  const methods = nodesInFile.filter((n) => n.kind === 'method' && n.name === methodName);
+  const exact = `${classNode.qualifiedName}::${methodName}`;
+  const byName = `${classNode.name}::${methodName}`;
+  return (
+    methods.find((n) => n.qualifiedName === exact) ??
+    methods.find((n) => n.qualifiedName === byName || n.qualifiedName.endsWith(`::${byName}`))
+  );
+}
+
+/**
+ * The method a class-name or capitalized-receiver call reaches on `classNode`:
+ * its own (findOwnMethod), else the nearest one a declared supertype has, as a
+ * call on an instance of the class finds it. Django's `form.is_valid()` on
+ * `Form` reaches `BaseForm::is_valid`, which the substring test this replaced
+ * only found because `BaseForm` contains `Form`.
+ */
+function classStrategyMethod(classNode: Node, methodName: string, context: ResolutionContext): Node | undefined {
+  return findOwnMethod(context.getNodesInFile(classNode.filePath), classNode, methodName) ??
+    inheritedClassMethod([classNode], methodName, context) ?? undefined;
 }
 
 /**
