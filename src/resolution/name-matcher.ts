@@ -3889,22 +3889,31 @@ function pythonFromImports(filePath: string, context: ResolutionContext): Map<st
 function isPythonNameImportedFromOutside(name: string, ref: UnresolvedRef, context: ResolutionContext): boolean {
   const module = pythonFromImports(ref.filePath, context).get(name);
   if (!module || module.startsWith('.')) return false;
-  return !isPythonProjectModule(module, context);
+  return !isPythonProjectModule(module, ref.filePath, context);
 }
 
-/** Whether some project file is the module `a.b` (`a/b.py` or `a/b/__init__.py`). */
-function isPythonProjectModule(module: string, context: ResolutionContext): boolean {
+/** Whether some project file is the module `a.b` as `fromFile` imports it (`a/b.py` or `a/b/__init__.py`). */
+function isPythonProjectModule(module: string, fromFile: string, context: ResolutionContext): boolean {
   let memo = PY_MODULE_LOCAL.get(context);
   if (!memo) {
     memo = new Map();
     PY_MODULE_LOCAL.set(context, memo);
   }
-  let local = memo.get(module);
+  // The import resolver decides where a module lives (package roots), and the
+  // answer can depend on the importer (a monorepo service's own root), so key
+  // by both. A file that merely ENDS in `requests/__init__.py` — a copy nested
+  // in a test fixture — is not the `requests` an import names.
+  const key = `${fromFile}\0${module}`;
+  let local = memo.get(key);
   if (local === undefined) {
-    const rel = module.replace(/\./g, '/');
-    local = context.getAllFiles().some((f) =>
-      f === `${rel}.py` || f.endsWith(`/${rel}.py`) || f === `${rel}/__init__.py` || f.endsWith(`/${rel}/__init__.py`));
-    memo.set(module, local);
+    if (context.resolveModuleFile) {
+      local = context.resolveModuleFile(module, fromFile, 'python') !== null;
+    } else {
+      const rel = module.replace(/\./g, '/');
+      local = context.getAllFiles().some((f) =>
+        f === `${rel}.py` || f.endsWith(`/${rel}.py`) || f === `${rel}/__init__.py` || f.endsWith(`/${rel}/__init__.py`));
+    }
+    memo.set(key, local);
   }
   return local;
 }
@@ -3928,7 +3937,7 @@ export function isPythonOutsideModuleReceiver(name: string, ref: UnresolvedRef, 
     // the module `a` tells that `x` comes from outside.
     return [...keys].every((key) => {
       const module = key.slice(0, key.indexOf(':'));
-      return !module.startsWith('.') && !isPythonProjectModuleAnyRoot(module, context);
+      return !module.startsWith('.') && !isPythonProjectModuleAnyRoot(module, ref.filePath, context);
     });
   });
   return outside && !pythonBindsLocally(name, ref, context, false);
@@ -3939,9 +3948,9 @@ export function isPythonOutsideModuleReceiver(name: string, ref: UnresolvedRef, 
  * with the package itself indexed as the root — `b/c.py` or `c.py`. Erring
  * toward "project" only leaves a call to the name strategies, as before.
  */
-function isPythonProjectModuleAnyRoot(module: string, context: ResolutionContext): boolean {
+function isPythonProjectModuleAnyRoot(module: string, fromFile: string, context: ResolutionContext): boolean {
   const parts = module.split('.');
-  return parts.some((_, i) => isPythonProjectModule(parts.slice(i).join('.'), context));
+  return parts.some((_, i) => isPythonProjectModule(parts.slice(i).join('.'), fromFile, context));
 }
 
 const JAVA_TYPE_KINDS: ReadonlySet<string> = new Set(['class', 'interface', 'enum', 'struct', 'record', 'trait']);
@@ -20444,6 +20453,14 @@ function matchReferenceInner(
   // worse than none).
   if (ref.referenceKind === 'function_ref') {
     return matchFunctionRef(ref, context);
+  }
+
+  // A python name imported from a module the project does not provide — `from
+  // requests import get` with no `requests` at a package root — names nothing
+  // in the project. Name matching would bind the import to any same-named
+  // symbol, such as a copy of the package nested in a test fixture.
+  if (ref.language === 'python' && ref.referenceKind === 'imports' && isPythonNameImportedFromOutside(ref.referenceName, ref, context)) {
+    return null;
   }
 
   // ArkTS chained UI attributes — emitted with a leading dot (`.titleStyle`,
