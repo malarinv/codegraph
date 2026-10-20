@@ -3002,7 +3002,12 @@ function resolvePythonModuleMember(
   }
 
   for (const imp of imports) {
-    if (imp.localName !== receiver) continue;
+    // `import pkg.mod` binds `pkg`, so a call spells the whole path out —
+    // `pkg.mod.func()`. The mapping names the module by its last segment, which
+    // never matches that receiver; match the full dotted source instead.
+    const spelledOut = imp.isNamespace && imp.localName === imp.source.split('.').pop()
+      && imp.source.includes('.') && ref.referenceName.startsWith(`${imp.source}.`);
+    if (imp.localName !== receiver && !spelledOut) continue;
 
     // `import mod` / `import numpy as np` bind the module at `source` itself;
     // `from . import certs` / `from pkg import mod` bind a SUBMODULE whose
@@ -3015,27 +3020,62 @@ function resolvePythonModuleMember(
     // form (where the two names coincide) worked (#1626). For an unaliased
     // import the two are identical, so this changes nothing there.
     const moduleName = imp.exportedName === '*' ? imp.localName : imp.exportedName;
-    const modulePath = imp.isNamespace
+    let modulePath = imp.isNamespace
       ? imp.source
       : imp.source.endsWith('.')
         ? imp.source + moduleName
         : imp.source + '.' + moduleName;
+    const rest = ref.referenceName
+      .substring(spelledOut ? imp.source.length + 1 : dotIdx + 1)
+      .split('.');
 
     if (!imp.isNamespace && pythonPackageBinds(imp, ref.filePath, context)) continue;
-    const resolvedPath = resolveImportPath(modulePath, ref.filePath, ref.language, context);
+    let resolvedPath = resolveImportPath(modulePath, ref.filePath, ref.language, context);
     if (!resolvedPath || resolvedPath === ref.filePath) continue;
 
-    // The member as the module binds it: a module-level def (never a method —
-    // `mod.foo` must not land on a same-named class method, and never a nested
-    // def), or a name the module re-exports from elsewhere (`pkg/__init__.py`
-    // doing `from .impl import foo`).
-    const target = findExportedSymbol(
-      resolvedPath,
-      { isDefault: false, isNamespace: false, exportedName: member, memberName: null },
+    // The symbol `name` as the module at `filePath` binds it: a module-level
+    // def (never a method — `mod.foo` must not land on a same-named class
+    // method, and never a nested def), or a name the module re-exports from
+    // elsewhere (`pkg/__init__.py` doing `from .impl import foo`).
+    const bound = (filePath: string, name: string): Node | undefined => findExportedSymbol(
+      filePath,
+      { isDefault: false, isNamespace: false, exportedName: name, memberName: null },
       'python',
       context,
       new Set()
     );
+
+    // A CALL through a longer path — `utils.helpers.do_x()`, `mod.Klass.run()`
+    // — names submodules and then one symbol. Descend while the next segment
+    // is a module file; what is left must be a top-level callable, or a class
+    // and one of its methods. Anything else is not something this path can
+    // prove, so it is no edge — never the first segment's symbol, which for
+    // `mod.Klass.run()` would record a call to the class. Other reference
+    // kinds keep the single-member lookup below.
+    if (ref.referenceKind === 'calls' && rest.length > 1) {
+      while (rest.length > 1) {
+        // `modulePath` is spelled from the importer (`.utils.helpers`), so it
+        // resolves from there, not from the module file just reached.
+        const sub = resolveImportPath(`${modulePath}.${rest[0]}`, ref.filePath, ref.language, context);
+        if (!sub) break;
+        modulePath = `${modulePath}.${rest.shift()}`;
+        resolvedPath = sub;
+      }
+      const head = bound(resolvedPath, rest[0]!);
+      let target: Node | undefined;
+      if (rest.length === 1) {
+        target = head && (head.kind === 'function' || head.kind === 'class') ? head : undefined;
+      } else if (rest.length === 2 && head?.kind === 'class') {
+        target = context.getNodesInFile(head.filePath).find((n) =>
+          n.kind === 'method' && n.name === rest[1] && n.qualifiedName === `${head.qualifiedName}::${rest[1]}`);
+      }
+      if (target) {
+        return { original: ref, targetNodeId: target.id, confidence: 0.85, resolvedBy: 'import' };
+      }
+      continue;
+    }
+
+    const target = bound(resolvedPath, rest[0]!);
     if (target) {
       return { original: ref, targetNodeId: target.id, confidence: 0.85, resolvedBy: 'import' };
     }
@@ -3705,8 +3745,10 @@ function resolveImportedInstanceMember(
 ): ResolvedRef | null {
   if (ref.referenceKind !== 'calls') return null;
   if (value.kind !== 'constant' && value.kind !== 'variable') return null;
-  const member = ref.referenceName.slice(localName.length + 1).split('.')[0];
-  if (!member) return null;
+  // The method called on the value itself: `app.jinja_env.filters.keys()`
+  // calls `keys`, no method of the app's type — never `jinja_env`.
+  const member = ref.referenceName.slice(localName.length + 1);
+  if (!member || member.includes('.')) return null;
 
   const source = context.readFile(value.filePath);
   if (!source) return null;
