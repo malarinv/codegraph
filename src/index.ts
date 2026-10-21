@@ -1058,14 +1058,15 @@ export class CodeGraph {
             // (`snippets/price.liquid`) waits under, and the keys a route's
             // lazily loaded module waits under (`module:Team` for
             // `lazy-import:./pages/Team`), as does a reference through an
-            // import binding the module declares under another name
-            // (`module:tag` for `import tagsController from
-            // './tag/tag.controller'`) and a direct member reference through
-            // any binding (`module:constants` for `LIST.includes(x)` after
-            // `import { LIST } from './constants'`): each resolves through the
-            // module, so an edit can satisfy it as well as an added file. On
-            // a sync where no failed ref matches, this is a few indexed
-            // lookups.
+            // import binding of the module (`module:tag` for `import
+            // tagsController from './tag/tag.controller'`, `module:context`
+            // for `import { useInvocation } from './context'`, which the
+            // barrel `context/index.ts` forwards) and a direct member
+            // reference through any binding (`module:constants` for
+            // `LIST.includes(x)` after `import { LIST } from './constants'`):
+            // each resolves through the module, so an edit can satisfy it as
+            // well as an added file. On a sync where no failed ref matches,
+            // this is a few indexed lookups.
             const tRetry = Date.now();
             edgesBeforeRetry = this.queries.getMaxEdgeId();
             const retryable = this.queries.getRetryableFailedReferences([...new Set([
