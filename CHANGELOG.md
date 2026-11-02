@@ -51,6 +51,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In Drupal, services from `*.services.yml`, plugin definitions (attributes and docblock annotations, a contrib module's own plugin types included) and `#[Hook]` methods are now part of the graph, and a call through `\Drupal::service('x')` or `$container->get('x')` links to the method on that service's class. Thanks @mikedamoiseau and @marcelovani.
 - In Next.js, a route now links to the `proxy.ts` or `middleware.ts` that runs before it, following `config.matcher`, so `codegraph impact`, `codegraph callers` and `codegraph_explore` show which routes a change to it reaches. Thanks @RIGOandre.
 
+### Features
+
+- Kubernetes, Flux, Crossplane and Backstage catalog manifests are now part of the graph. Each YAML document that declares an `apiVersion` and a `kind` becomes a node named after both — `HelmRelease/consensus`, `Kustomization/kustomization`, `Record/www-dev-a-record` — so `codegraph explore`, search and impact can answer questions about manifests the way they do about code. Edges are added only for the keys that point at another document, such as a HelmRelease's `sourceRef` and `dependsOn`, a Kustomization's `spec.path`, its `resources:` list, and a Crossplane claim's `secretRef` or `providerConfigRef`, so what a manifest needs can be followed rather than read. A repository whose YAML is only config, like `mkdocs.yml` or `.gitlab-ci.yml`, is unaffected. Re-index GitOps repositories after upgrading.
+- A Rego policy's `data.<file>` reads now link to the data YAML file it reads. A flat YAML file whose name carries an underscore or a digit, such as `policy/data/consensus_bounds.yaml`, is indexed under that name, so the policy's dependency on it shows in callers and impact, and changing it can be followed to the rules that read it.
+
 ### Fixes
 
 - In TypeScript, an awaited call with type arguments like `await fetchApi<User>("/me")` or `await api.get<T>(url)` now links to the function it calls. Before, the call was dropped, so typed fetch wrappers looked like they had no callers. (#2586)
