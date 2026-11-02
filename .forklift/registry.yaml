@@ -1,9 +1,10 @@
 generatedAt: "2026-10-30T00:00:00Z"
 
-# Six commits ahead of upstream/main after the 2026-11-02 rebase onto
+# Seven commits ahead of upstream/main after the 2026-11-02 rebase onto
 # f72c9d2e: Rego support, forklift registration, the count rebaseline, the
-# publish chore, the GitOps YAML feature, and this registry update.
-expected_fork_commit_count: 6
+# publish chore, the GitOps YAML feature, the registry update, and this
+# GitHub-Packages release wiring.
+expected_fork_commit_count: 7
 
 features:
   - name: "rego-language-support"
@@ -76,6 +77,22 @@ divergences:
   - path: "package.json"
     reason: "Upstream owns the published version number; the fork must not drift it on sync."
     resolution: "prefer_upstream"
+  - path: ".github/workflows/release.yml"
+    reason: >-
+      Fork publishes to the GitHub Packages npm registry under malarinv
+      (GITHUB_TOKEN + packages: write, no OIDC, no npmmirror), while upstream
+      uses OIDC trusted publishing on npmjs.com. On a sync, keep the fork's
+      publish/verify/npmrc wiring but re-anchor it onto upstream's step
+      changes: our part is the registry choice and auth, upstream's is
+      everything else in the file.
+    resolution: "prefer_fork"
+  - path: "scripts/pack-npm.sh"
+    reason: >-
+      Scope and repository URL derive from GITHUB_REPOSITORY so a fork packs
+      @malarinv/* for GitHub Packages instead of upstream's hardcoded
+      @colbymchenry scope. Falls back to @colbymchenry when GITHUB_REPOSITORY
+      is unset, so upstream's copy keeps working.
+    resolution: "prefer_fork"
 
 removals: []
 

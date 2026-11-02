@@ -5,9 +5,11 @@
 # Produces, under release/npm/:
 #   codegraph-<target>/   one per built bundle — the vendored Node + app, tagged
 #                         with os/cpu so npm installs only the matching one.
-#   main/                 the @colbymchenry/codegraph shim package: a tiny bin
-#                         that execs the matching platform bundle, with every
-#                         platform package in optionalDependencies.
+#   main/                 the <SCOPE>/codegraph shim package (scope follows the
+#                         owning repo via GITHUB_REPOSITORY, defaulting to
+#                         @colbymchenry): a tiny bin that execs the matching
+#                         platform bundle, with every platform package in
+#                         optionalDependencies.
 #
 # The release pipeline then `npm publish`es each dir. This does NOT touch the
 # repo's package.json — the dev/from-source path keeps working; the *published*
@@ -19,7 +21,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-$(node -p "require('$ROOT/package.json').version")}"
-SCOPE="@colbymchenry"
+# Scope and repository URL follow the repo the packer runs in, so a fork
+# publishes under its own owner (GitHub Packages requires the package
+# scope to match the registry owner) instead of upstream's scope.
+UPSTREAM_SCOPE="@colbymchenry"
+UPSTREAM_REPO="https://github.com/colbymchenry/codegraph"
+if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  SCOPE="@${GITHUB_REPOSITORY%%/*}"
+  REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+else
+  SCOPE="$UPSTREAM_SCOPE"
+  REPO_URL="$UPSTREAM_REPO"
+fi
+export SCOPE REPO_URL
 REL="$ROOT/release"
 NPM="$REL/npm"
 
@@ -71,7 +85,7 @@ for archive in "${archives[@]}"; do
         license: "MIT",
         // npm --provenance refuses to publish unless this matches the repo
         // the release workflow runs in.
-        repository: { type: "git", url: "git+https://github.com/colbymchenry/codegraph.git" }
+        repository: { type: "git", url: "git+" + process.env.REPO_URL + ".git" }
       }, null, 2) + "\n");
     ' "$pkgdir/package.json"
   targets+=("$target")
@@ -119,7 +133,7 @@ VERSION="$VERSION" SCOPE="$SCOPE" TARGETS="${targets[*]}" \
       optionalDependencies: opt,
       files: ["npm-shim.js","npm-sdk.js","dist","README.md"],
       license: "MIT",
-      repository: { type: "git", url: "git+https://github.com/colbymchenry/codegraph.git" }
+      repository: { type: "git", url: "git+" + process.env.REPO_URL + ".git" }
     }, null, 2) + "\n");
   ' "$NPM/main/package.json"
 
