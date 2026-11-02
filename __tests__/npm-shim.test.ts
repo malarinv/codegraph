@@ -114,6 +114,36 @@ describe.skipIf(isWindows)('npm-shim launcher', () => {
     expect(fs.existsSync(path.join(cache, 'bundles'))).toBe(false);
   });
 
+  // A fork publishing under its own scope (e.g. GitHub Packages as
+  // @malarinv/codegraph): the platform optionalDependency resolves from the
+  // main package's own name, not a hardcoded scope. Before that derivation the
+  // shim asked for @colbymchenry/codegraph-<target>, reported the installed
+  // bundle "missing" and 404'd on an upstream release it doesn't own.
+  it('resolves the platform bundle under the main package\'s own scope', async () => {
+    const pkg = makePkg('9.9.9-fork');
+    fs.writeFileSync(path.join(pkg, 'package.json'),
+      JSON.stringify({
+        name: '@malarinv/codegraph',
+        version: '9.9.9-fork',
+        repository: { type: 'git', url: 'git+https://github.com/malarinv/codegraph.git' },
+      }) + '\n');
+    const platformPkg = path.join(pkg, 'node_modules', '@malarinv', `codegraph-${target}`);
+    writeLauncher(path.join(platformPkg, 'bin'));
+    fs.writeFileSync(path.join(platformPkg, 'package.json'),
+      JSON.stringify({ name: `@malarinv/codegraph-${target}`, version: '9.9.9-fork' }) + '\n');
+    const cache = mkTmp('cache');
+    const r = await runShim(pkg, ['--probe-fork'], {
+      CODEGRAPH_INSTALL_DIR: cache,
+      CODEGRAPH_NO_DOWNLOAD: '1', // a fallback here would mean the fork bundle was not found
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('FAKE_BUNDLE_RAN');
+    expect(r.stdout).toContain('--probe-fork');
+    expect(r.stderr).not.toContain('@colbymchenry');
+    expect(r.stderr).not.toContain('downloading');
+  });
+
   it('uses an already-cached bundle even when downloads are disabled', async () => {
     const pkg = makePkg('1.2.3-cached');
     const cache = mkTmp('cache');

@@ -1,10 +1,12 @@
 generatedAt: "2026-10-30T00:00:00Z"
 
-# Eight commits ahead of upstream/main after the 2026-11-02 rebase onto
+# Nine commits ahead of upstream/main after the 2026-11-02 rebase onto
 # f72c9d2e: Rego support, forklift registration, the count rebaseline, the
 # publish chore, the GitOps YAML feature, the registry update, the
-# GitHub-Packages release wiring, and the release-notes length cap.
-expected_fork_commit_count: 8
+# GitHub-Packages release wiring, the release-notes length cap, and the
+# fork-scope thin-installer resolution (shim + SDK). The 1.7.0 and 1.7.1
+# release runs also push their own CHANGELOG-promote commits.
+expected_fork_commit_count: 9
 
 features:
   - name: "rego-language-support"
@@ -99,6 +101,18 @@ divergences:
       GitHub-API release-body limit (125,000 chars) at bullet granularity.
       Without the flag the output is byte-identical to upstream's, so the
       divergence only activates from the fork's release.yml.
+    resolution: "prefer_fork"
+  - path: "scripts/npm-shim.js"
+    reason: >-
+      Resolves the per-platform optionalDependency from the installed main
+      package's own name (and its repository URL for the self-heal download),
+      so a fork published under another owner's scope works. Upstream's
+      @colbymchenry name remains the fallback when the scoped name is absent.
+    resolution: "prefer_fork"
+  - path: "scripts/npm-sdk.js"
+    reason: >-
+      Same own-scope derivation as npm-shim.js for the `require` entry: the
+      library resolves from the main package's scope, not a hardcoded one.
     resolution: "prefer_fork"
 
 removals: []
