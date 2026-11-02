@@ -32,9 +32,23 @@ var os = require('os');
 var path = require('path');
 
 var target = process.platform + '-' + process.arch; // e.g. darwin-arm64, linux-x64
-var pkg = '@colbymchenry/codegraph-' + target;
 var isWindows = process.platform === 'win32';
-var REPO = 'colbymchenry/codegraph';
+
+// Resolve the platform optionalDependency from THIS package's name, so a fork
+// publishing under its own scope (GitHub Packages) works without a second
+// launcher. Upstream name/repo remain the fallback.
+var own = {};
+try {
+  own = require('./package.json');
+} catch (e) {
+  own = {};
+}
+var ownName = typeof own.name === 'string' ? own.name : '@colbymchenry/codegraph';
+var repoFromOwn = typeof own.repository === 'object' && own.repository
+  ? (own.repository.url || '').replace(/\.git$/, '').replace(/^git\+/, '')
+  : '';
+var REPO = (repoFromOwn.replace(/^https?:\/\/[^/]+\//, '') || 'colbymchenry/codegraph');
+var pkg = ownName.replace(/\/[^/]*$/, '') + '/codegraph-' + target;
 
 main().catch(function (e) {
   process.stderr.write('codegraph: ' + (e && e.message ? e.message : String(e)) + '\n');
@@ -272,7 +286,7 @@ function fail(reason) {
     'A registry mirror (e.g. npmmirror/cnpm) that did not mirror the per-platform\n' +
     'package is the usual cause. Fixes:\n' +
     '  - install from the official registry:\n' +
-    '      npm i -g @colbymchenry/codegraph --registry=https://registry.npmjs.org\n' +
+    '      npm i -g ' + ownName + ' --registry=https://registry.npmjs.org\n' +
     '  - or use the standalone installer (no Node required):\n' +
     '      curl -fsSL https://raw.githubusercontent.com/' + REPO + '/main/install.sh | sh\n'
   );

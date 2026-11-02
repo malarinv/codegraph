@@ -12,6 +12,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- npm installs of this fork now resolve their platform bundle under the fork's own package scope: the `codegraph` and `require` entries looked for `@colbymchenry/codegraph-<platform>-<arch>` regardless of which scope the packages installed from, so on GitHub Packages as `@malarinv/codegraph` every command reported the bundle "missing" and then failed to fetch a matching upstream release. Both now derive the scope and repository from the installed main package's own `package.json`, with upstream's remaining the fallback, and the self-heal download points at the fork's own releases.
+- The self-heal fallback and its guidance lines no longer name the wrong owner when the packages come from a fork, so `npm i -g <pkg> --registry=…` in the fix-it text points at a package that exists.
+
 
 ## [1.7.0] - 2026-11-02
 
