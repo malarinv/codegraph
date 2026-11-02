@@ -1,6 +1,6 @@
 {
   "name": "@malarinv/codegraph",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "description": "Supercharge AI coding agents with semantic code intelligence — surgical context, fewer tool calls, faster answers. 100% local.",
   "repository": "https://github.com/malarinv/codegraph.git",
   "main": "dist/index.js",
