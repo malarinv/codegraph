@@ -129,6 +129,8 @@ These are cg-owned files. Conflicts here prefer ours unless upstream's change is
 | Feature | Owned files |
 |---------|------------|
 | rego-language-support | `src/types.ts`, `src/extraction/grammars.ts`, `src/extraction/languages/index.ts`, `src/extraction/languages/rego.ts`, `src/extraction/wasm/tree-sitter-rego.wasm`, `src/resolution/name-matcher.ts`, `__tests__/rego-policy-calls.test.ts` |
+| gitops-yaml-manifests | `__tests__/gitops-yaml.test.ts`, `src/extraction/extraction-version.ts`, `src/resolution/frameworks/gitops.ts`, `src/resolution/frameworks/index.ts` |
+| forklift-harness | `.forklift/README.md`, `.forklift/SKILL.md`, `.forklift/harness.lock`, `.forklift/registry.yaml`, `.claude/skills/forklift-doctor/SKILL.md`, `.claude/skills/forklift-init/SKILL.md`, `.claude/skills/forklift-maintain/SKILL.md`, `.cursor/rules/forklift-doctor.md`, `.cursor/rules/forklift-init.md`, `.cursor/rules/forklift-maintain.md`, `AGENT.md` |
 
 > **Note:** The § Owned Symbols table below is generally more current than this § Feature Stack, because new shared-file symbols are registered immediately while high-level feature rows may lag. After any feature merge, audit both tables.
 
@@ -142,6 +144,7 @@ owns inside shared files.
 
 These up files exist but cg intentionally doesn't override them. Always take upstream:
 
+- `package-lock.json` — Lockfile tracks upstream dependency resolution; our `yaml` dep entry and version strings live beside upstream's. Take upstream on dependency-only conflicts, keep our added package entries otherwise.
 - `CHANGELOG.md` — Upstream owns release notes.
 - `package.json` — Upstream owns the published version number; the fork must not drift it on sync.
 

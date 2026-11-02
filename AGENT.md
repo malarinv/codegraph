@@ -7,7 +7,7 @@ This repository is a **fork** of codegraph (colbymchenry) kept in sync by forkli
 ## Fork Identity & Remotes
 - **Fork remote/branch**: `origin/main`
 - **Upstream remote/branch**: `upstream/main`
-- **Expected fork commits**: `1`
+- **Expected fork commits**: `6`
 
 ## Fork-Owned Features
 These are the paths this fork owns; prefer ours when they conflict with upstream, and register any new fork-owned path in `.forklift/registry.yaml` before relying on it.
@@ -15,6 +15,8 @@ These are the paths this fork owns; prefer ours when they conflict with upstream
 | Feature | Description | Owned Paths |
 | --- | --- | --- |
 | rego-language-support | Indexes Open Policy Agent (OPA) policy modules — rule heads become function nodes, rule-to-rule calls become resolvable calls edges, data/input paths become references, and packages and imports become import nodes. Carries the vendored tree-sitter-rego wasm so the grammar ships with the package rather than resolving from tree-sitter-wasms. | `src/types.ts`<br>`src/extraction/grammars.ts`<br>`src/extraction/languages/index.ts`<br>`src/extraction/languages/rego.ts`<br>`src/extraction/wasm/tree-sitter-rego.wasm`<br>`src/resolution/name-matcher.ts`<br>`__tests__/rego-policy-calls.test.ts` |
+| gitops-yaml-manifests | Indexes Kubernetes, Flux, Crossplane and Backstage catalog YAML manifests through a gitops framework resolver: one struct node per apiVersion+kind document, reference edges for pointer keys (sourceRef, dependsOn, path, resources), and constant nodes for flat data files whose basename reaches the shape Rego reads (data.<basename>). Detection is per-repo but classification is per-file; libbyell plain-word basenames emit nothing. | `__tests__/gitops-yaml.test.ts`<br>`src/extraction/extraction-version.ts`<br>`src/resolution/frameworks/gitops.ts`<br>`src/resolution/frameworks/index.ts` |
+| forklift-harness | The forklift bookkeeping itself: the registry, harness lock, generated skill/agent artifacts and stamped docs. No product behavior; the fork's memory for later rebases. | `.forklift/README.md`<br>`.forklift/SKILL.md`<br>`.forklift/harness.lock`<br>`.forklift/registry.yaml`<br>`.claude/skills/forklift-doctor/SKILL.md`<br>`.claude/skills/forklift-init/SKILL.md`<br>`.claude/skills/forklift-maintain/SKILL.md`<br>`.cursor/rules/forklift-doctor.md`<br>`.cursor/rules/forklift-init.md`<br>`.cursor/rules/forklift-maintain.md`<br>`AGENT.md` |
 
 ## Verification Commands
 - **Typecheck**: `npx tsc --noEmit`
@@ -24,6 +26,7 @@ These are the paths this fork owns; prefer ours when they conflict with upstream
 ## Divergences & Intentional Removals
 **Divergences (upstream-owned, take upstream):**
 
+- `package-lock.json` — Lockfile tracks upstream dependency resolution; our `yaml` dep entry and version strings live beside upstream's. Take upstream on dependency-only conflicts, keep our added package entries otherwise.
 - `CHANGELOG.md` — Upstream owns release notes.
 - `package.json` — Upstream owns the published version number; the fork must not drift it on sync.
 
