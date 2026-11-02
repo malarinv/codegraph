@@ -1,10 +1,10 @@
 generatedAt: "2026-10-30T00:00:00Z"
 
-# Seven commits ahead of upstream/main after the 2026-11-02 rebase onto
+# Eight commits ahead of upstream/main after the 2026-11-02 rebase onto
 # f72c9d2e: Rego support, forklift registration, the count rebaseline, the
-# publish chore, the GitOps YAML feature, the registry update, and this
-# GitHub-Packages release wiring.
-expected_fork_commit_count: 7
+# publish chore, the GitOps YAML feature, the registry update, the
+# GitHub-Packages release wiring, and the release-notes length cap.
+expected_fork_commit_count: 8
 
 features:
   - name: "rego-language-support"
@@ -92,6 +92,13 @@ divergences:
       @malarinv/* for GitHub Packages instead of upstream's hardcoded
       @colbymchenry scope. Falls back to @colbymchenry when GITHUB_REPOSITORY
       is unset, so upstream's copy keeps working.
+    resolution: "prefer_fork"
+  - path: "scripts/extract-release-notes.mjs"
+    reason: >-
+      Supports an optional --max-chars flag that trims the release notes to a
+      GitHub-API release-body limit (125,000 chars) at bullet granularity.
+      Without the flag the output is byte-identical to upstream's, so the
+      divergence only activates from the fork's release.yml.
     resolution: "prefer_fork"
 
 removals: []
