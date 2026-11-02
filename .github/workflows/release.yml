@@ -217,8 +217,12 @@ jobs:
         # never be needed in practice. Kept for defense-in-depth.
         run: |
           V="${{ steps.ver.outputs.version }}"
-          node scripts/extract-release-notes.mjs "$V" > notes.md 2>/dev/null \
-            || node scripts/extract-release-notes.mjs Unreleased > notes.md 2>/dev/null || true
+          # GitHub Releases caps a release body at 125,000 characters and
+          # returns HTTP 422 past it; the [Unreleased] backlog can exceed
+          # that. --max-chars 124000 trims bullet-granular, never mid-bullet,
+          # and appends a pointer to CHANGELOG.md for the rest.
+          node scripts/extract-release-notes.mjs "$V" --max-chars 124000 > notes.md 2>/dev/null \
+            || node scripts/extract-release-notes.mjs Unreleased --max-chars 124000 > notes.md 2>/dev/null || true
           if [ ! -s notes.md ]; then
             echo "::error::No release notes in CHANGELOG.md for [$V] or [Unreleased]."
             exit 1
