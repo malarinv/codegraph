@@ -58,7 +58,8 @@
     "picomatch": "^4.0.3",
     "sisteransi": "^1.0.5",
     "tree-sitter-wasms": "^0.1.11",
-    "web-tree-sitter": "^0.25.3"
+    "web-tree-sitter": "^0.25.3",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
