@@ -1,0 +1,214 @@
+generatedAt: "2026-10-30T00:00:00Z"
+
+# Nine commits ahead of upstream/main after the 2026-11-02 rebase onto
+# f72c9d2e: Rego support, forklift registration, the count rebaseline, the
+# publish chore, the GitOps YAML feature, the registry update, the
+# GitHub-Packages release wiring, the release-notes length cap, and the
+# fork-scope thin-installer resolution (shim + SDK). The 1.7.0 and 1.7.1
+# release runs also push their own CHANGELOG-promote commits.
+expected_fork_commit_count: 9
+
+features:
+  - name: "rego-language-support"
+    description: >-
+      Indexes Open Policy Agent (OPA) policy modules — rule heads become
+      function nodes, rule-to-rule calls become resolvable calls edges,
+      data/input paths become references, and packages and imports become
+      import nodes. Carries the vendored tree-sitter-rego wasm so the grammar
+      ships with the package rather than resolving from tree-sitter-wasms.
+    owned_paths:
+      - "src/types.ts"
+      - "src/extraction/grammars.ts"
+      - "src/extraction/languages/index.ts"
+      - "src/extraction/languages/rego.ts"
+      - "src/extraction/wasm/tree-sitter-rego.wasm"
+      - "src/resolution/name-matcher.ts"
+      - "__tests__/rego-policy-calls.test.ts"
+    protecting_tests:
+      - "__tests__/rego-policy-calls.test.ts"
+    status: "active"
+
+  - name: "gitops-yaml-manifests"
+    description: >-
+     Indexes Kubernetes, Flux, Crossplane and Backstage catalog YAML manifests
+     through a gitops framework resolver: one struct node per apiVersion+kind
+     document, reference edges for pointer keys (sourceRef, dependsOn, path,
+     resources), and constant nodes for flat data files whose basename reaches
+     the shape Rego reads (data.<basename>). Detection is per-repo but
+     classification is per-file; libbyell plain-word basenames emit nothing.
+    owned_paths:
+      - "__tests__/gitops-yaml.test.ts"
+      - "src/extraction/extraction-version.ts"
+      - "src/resolution/frameworks/gitops.ts"
+      - "src/resolution/frameworks/index.ts"
+    protecting_tests:
+      - "__tests__/gitops-yaml.test.ts"
+    status: "active"
+
+  - name: "forklift-harness"
+    description: >-
+      The forklift bookkeeping itself: the registry, harness lock, generated
+      skill/agent artifacts and stamped docs. No product behavior; the fork's
+      memory for later rebases.
+    owned_paths:
+      - ".forklift/README.md"
+      - ".forklift/SKILL.md"
+      - ".forklift/harness.lock"
+      - ".forklift/registry.yaml"
+      - ".claude/skills/forklift-doctor/SKILL.md"
+      - ".claude/skills/forklift-init/SKILL.md"
+      - ".claude/skills/forklift-maintain/SKILL.md"
+      - ".cursor/rules/forklift-doctor.md"
+      - ".cursor/rules/forklift-init.md"
+      - ".cursor/rules/forklift-maintain.md"
+      - "AGENT.md"
+    coverage_exempt: "forklift bookkeeping artifacts and the registry itself; no product behavior to test"
+    status: "active"
+
+# Upstream owns release notes and version bumps; the fork always takes them.
+divergences:
+  - path: "package-lock.json"
+    reason: >-
+      Lockfile tracks upstream dependency resolution; our `yaml` dep entry and
+      version strings live beside upstream's. Take upstream on dependency-only
+      conflicts, keep our added package entries otherwise.
+    resolution: "prefer_upstream"
+  - path: "CHANGELOG.md"
+    reason: "Upstream owns release notes."
+    resolution: "prefer_upstream"
+  - path: "package.json"
+    reason: "Upstream owns the published version number; the fork must not drift it on sync."
+    resolution: "prefer_upstream"
+  - path: ".github/workflows/release.yml"
+    reason: >-
+      Fork publishes to the GitHub Packages npm registry under malarinv
+      (GITHUB_TOKEN + packages: write, no OIDC, no npmmirror), while upstream
+      uses OIDC trusted publishing on npmjs.com. On a sync, keep the fork's
+      publish/verify/npmrc wiring but re-anchor it onto upstream's step
+      changes: our part is the registry choice and auth, upstream's is
+      everything else in the file.
+    resolution: "prefer_fork"
+  - path: "scripts/pack-npm.sh"
+    reason: >-
+      Scope and repository URL derive from GITHUB_REPOSITORY so a fork packs
+      @malarinv/* for GitHub Packages instead of upstream's hardcoded
+      @colbymchenry scope. Falls back to @colbymchenry when GITHUB_REPOSITORY
+      is unset, so upstream's copy keeps working.
+    resolution: "prefer_fork"
+  - path: "scripts/extract-release-notes.mjs"
+    reason: >-
+      Supports an optional --max-chars flag that trims the release notes to a
+      GitHub-API release-body limit (125,000 chars) at bullet granularity.
+      Without the flag the output is byte-identical to upstream's, so the
+      divergence only activates from the fork's release.yml.
+    resolution: "prefer_fork"
+  - path: "scripts/npm-shim.js"
+    reason: >-
+      Resolves the per-platform optionalDependency from the installed main
+      package's own name (and its repository URL for the self-heal download),
+      so a fork published under another owner's scope works. Upstream's
+      @colbymchenry name remains the fallback when the scoped name is absent.
+    resolution: "prefer_fork"
+  - path: "scripts/npm-sdk.js"
+    reason: >-
+      Same own-scope derivation as npm-shim.js for the `require` entry: the
+      library resolves from the main package's scope, not a hardcoded one.
+    resolution: "prefer_fork"
+
+removals: []
+
+owned_symbols: []
+
+harness:
+  version: 1
+
+  fork:
+    name: "codegraph (malarinv)"
+    short: "cg"
+    remote: "origin"
+    branch: "main"
+
+  upstream:
+    name: "codegraph (colbymchenry)"
+    short: "up"
+    remote: "upstream"
+    branch: "main"
+
+  project:
+    languages: ["typescript"]
+    source_roots: ["src/**"]
+    test_globs: ["__tests__/*.test.ts"]
+    typecheck_command: "npx tsc --noEmit"
+    test_command: "npx vitest run"
+    lint_command: "npx eslint src"
+    conflict_marker_globs: ["src/**/*.ts", "__tests__/**/*.ts"]
+    package_aliases:
+      "@colbymchenry/codegraph": "src"
+
+  checks:
+    # Registration edits in these files gate every other language's behaviour,
+    # so a conflict resolution here needs the full suite, not a spot check.
+    behavioral_source_regex: "^src/(types|extraction|resolution)/.*\\.ts$"
+    native_sentinel: null
+    footprint_baseline: ".forklift/footprint-baseline.json"
+    excludes: [".forklift/"]
+    # semantic_drift:
+    #   tool: "difftastic"
+
+  # No runner script: syncs are a manual rebase onto upstream/main.
+  sync_command: "git fetch upstream && git rebase upstream/main"
+  fork_doc: ".forklift/README.md"
+
+knowledge: |
+  ## Conflict Resolution Decision Tree
+
+  When a sync reports a conflict, apply this logic in order:
+
+  1. Is the file in the Rego feature's `owned_paths`? → prefer ours; the feature
+     owns those registries and the extractor.
+  2. Did upstream restructure `src/extraction/grammars.ts` (the
+     `WASM_GRAMMAR_FILES` / `VENDORED_WASM_LANGS` / `EXTENSION_MAP` tables)?
+     → keep our three Rego rows and re-anchor them on upstream's new shape; the
+     tables are append-mostly, so the conflict is usually a moved anchor.
+  3. Did upstream add a language with its own wasm? → check that ours still
+     resolves from `src/extraction/wasm/` and that `VENDORED_WASM_LANGS`
+     still names `rego`; a refactor into a shared table should keep both rows.
+  4. Did upstream change the `LanguageExtractor` interface or the walker
+     contract (`visitNode` return semantics, `addUnresolvedReference` shape)?
+     → adapted our extractor, then run `__tests__/rego-policy-calls.test.ts`
+     first: it asserts the behaviour, so it is the fastest signal that the
+     contract moved under us.
+  5. Did upstream apply Rego support themselves? → ESCALATE; the feature is
+     then obsolete, and the fork should drop it rather than fight.
+
+  ## Guidelines for New Features
+
+  - **One language, one extractor file.** The extractor lives in its own file
+    and registers through one entry in `src/extraction/languages/index.ts`; the
+    shared-file contact is three type tables plus that one map entry.
+  - **Verify the grammar before vendoring it.** Run
+    `node scripts/add-lang/check-grammar.mjs <wasm> <sample>` — it loads the
+    wasm beside every other vendored grammar under indexing's V8 flags and
+    fails a grammar that corrupts the shared WASM heap.
+  - **Keep tests behavioural.** `__tests__/rego-policy-calls.test.ts` asserts
+    resolved `calls` edges through a full index, not just node counts, so an
+    upstream walker change breaks it loudly.
+
+  ## Porting protocol
+
+  When syncing: `git fetch upstream && git rebase upstream/main`. After the
+  rebase, rebuild (`npm run build`), run the Rego test, then re-copy
+  `dist/extraction/{grammars,types}.js`,
+  `dist/extraction/languages/{index,rego}.js`, `dist/resolution/name-matcher.js`
+  and `dist/extraction/wasm/tree-sitter-rego.wasm` into the installed
+  `~/.codegraph/versions/<ver>/lib/dist/` tree — the installed CLI is a
+  **complete** dist, so a partial copy breaks module resolution.
+
+post_sync_knowledge: |
+  - **Rebuild after every sync.** The installed CLI runs the compiled dist, not
+    this working tree; `npm run build` then copy the full `dist/` into
+    `~/.codegraph/versions/<ver>/lib/dist/` (partial copies break with
+    `Cannot find module './js-super-calls'`).
+  - **Re-verify the grammar wasm.** `scripts/add-lang/check-grammar.mjs` after
+    any upstream change to `src/extraction/wasm-runtime-flags.ts`; the V8 flags
+    the check runs with must stay the ones indexing uses.
