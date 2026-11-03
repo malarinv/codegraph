@@ -37,6 +37,7 @@ import { expoRouterResolver } from './expo-router';
 import { fabricViewResolver } from './fabric';
 import { cicsResolver } from './cics';
 import { terraformResolver } from './terraform';
+import { gitopsResolver } from './gitops';
 
 /**
  * All registered framework resolvers
@@ -102,6 +103,10 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   cicsResolver,
   // Terraform / OpenTofu — disambiguate var/local/module/resource refs to same-dir module
   terraformResolver,
+  // Kubernetes / Flux / Crossplane / Backstage catalog YAML manifests — one
+  // struct node per apiVersion+kind document, reference edges for sourceRef /
+  // dependsOn / path, and data-file nodes so Rego's `data.<name>` resolves
+  gitopsResolver,
 ];
 
 /**
@@ -206,3 +211,4 @@ export { reactNativeBridgeResolver } from './react-native';
 export { expoModulesResolver, expoModulesJsResolver } from './expo-modules';
 export { expoRouterResolver } from './expo-router';
 export { fabricViewResolver } from './fabric';
+export { gitopsResolver } from './gitops';
