@@ -16,13 +16,37 @@
  * Usage:
  *   extract-release-notes.mjs <version>     # read CHANGELOG.md
  *   extract-release-notes.mjs --stdin       # read from stdin (any text)
+ *   extract-release-notes.mjs --max-chars N # cap output at N characters
+ *
+ * The GitHub Releases API rejects a release body longer than 125,000
+ * characters ("body is too long"). The fork release path therefore caps
+ * the notes with --max-chars for the release artifact only; CHANGELOG.md
+ * itself always keeps the full text. Trimming is bullet-granular (never
+ * mid-bullet) and the truncated block gets a pointer to the changelog.
  */
 
 import { readFileSync } from 'fs';
 
-const arg = process.argv[2];
+const argv = process.argv.slice(2);
+let arg;
+let maxChars = 0;
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--stdin') {
+    arg = '--stdin';
+  } else if (a === '--max-chars') {
+    const n = argv[++i];
+    maxChars = Number.parseInt(n, 10);
+    if (!Number.isInteger(maxChars) || maxChars <= 0) {
+      console.error(`--max-chars expects a positive integer, got: ${n}`);
+      process.exit(1);
+    }
+  } else if (!arg) {
+    arg = a;
+  }
+}
 if (!arg) {
-  console.error('usage: extract-release-notes.mjs <version> | --stdin');
+  console.error('usage: extract-release-notes.mjs <version> | --stdin [--max-chars N]');
   process.exit(1);
 }
 
@@ -126,5 +150,43 @@ for (const line of block) {
 }
 flushBuf();
 
-process.stdout.write(out.join('\n'));
-if (!out[out.length - 1]?.endsWith('\n')) process.stdout.write('\n');
+// Cap the emitted text for consumers with a hard length limit (GitHub
+// Releases: 125,000 characters). Cut only at a bullet boundary — a
+// `- ` / `* ` / `N. ` list item line, start-of-heading, or paragraph
+// break that is not itself the first body line — so no bullet is split
+// in half. Headings stay; prose paragraphs before the first bullet are
+// kept whole as long as they fit. Appends a pointer to the full text.
+let body = out.join('\n');
+if (!out[out.length - 1]?.endsWith('\n')) body += '\n';
+if (maxChars > 0 && body.length > maxChars) {
+  const cutRe = /^(?:\s*(?:[-*]|\d+\.)\s+|#{1,6}\s|\s*$)/;
+  const lines = body.split('\n');
+  const kept = [];
+  let len = 0;
+  let dropped = 0;
+  for (const line of lines) {
+    if (len + line.length + 1 > maxChars) {
+      if (cutRe.test(line) || kept.length === 0) {
+        dropped++;
+        continue;
+      }
+      break; // mid-bullet line: stop entirely rather than truncate it
+    }
+    kept.push(line);
+    len += line.length + 1;
+  }
+  // Never leave a dangling heading with no section content under it.
+  while (kept.length > 0 && /^#{1,6}\s/.test(kept[kept.length - 1])) {
+    kept.pop();
+  }
+  const pointer = [
+    '',
+    `_(Release notes trimmed to fit GitHub's release-body limit; the rest of this`,
+    `release — ${dropped} more entries — is in [CHANGELOG.md](https://github.com/${process.env.GITHUB_REPOSITORY ?? 'colbymchenry/codegraph'}/blob/main/CHANGELOG.md).)_`,
+    '',
+  ].join('\n');
+  body = [...kept, pointer].join('\n');
+}
+
+process.stdout.write(body);
+if (!body.endsWith('\n')) process.stdout.write('\n');

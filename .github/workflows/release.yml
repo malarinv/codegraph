@@ -10,23 +10,26 @@ name: Release
 #      native compilation, so cross-packaging is fine),
 #   4. creates the GitHub Release (tag v<version>) with all archives, using the
 #      release notes from CHANGELOG.md,
-#   5. publishes the npm thin-installer (shim + per-platform packages).
+#   5. publishes the npm thin-installer (shim + per-platform packages) to
+#      the GitHub Packages npm registry under the owning user.
+#
+# Fork release path: packages are scoped to the repo owner (from
+# GITHUB_REPOSITORY at pack time) and authenticated with the workflow's
+# GITHUB_TOKEN (`packages: write` below) — no OIDC trusted publishing and
+# no npmjs.com involvement. Appending to the existing package requires the
+# token to have that package write access, which it keeps for packages
+# created from this repo's own releases.
 #
 # Before triggering: bump package.json. CHANGELOG.md entries can live under
 # `## [Unreleased]` — step 2 takes care of moving them.
-#
-# npm auth is OIDC trusted publishing (no NPM_TOKEN): every published package
-# (@colbymchenry/codegraph + the per-platform bundles) has this repo +
-# release.yml configured as its trusted publisher on npmjs.com. Adding a new
-# platform package means configuring its trusted publisher there before the
-# first release that includes it.
 on:
   workflow_dispatch: {}
 
 permissions:
   contents: write      # create the GitHub Release + tag, push the CHANGELOG promote
-  id-token: write      # OIDC token for npm --provenance and Sigstore signing
+  id-token: write      # Sigstore signing of the bundle attestations
   attestations: write  # store the GitHub artifact attestations for the bundles
+  packages: write      # publish the npm packages to GitHub Packages
 
 jobs:
   # Native extraction-kernel prebuilds (docs/design/rust-kernel-migration-plan.md).
@@ -77,29 +80,17 @@ jobs:
           # Default checkout is detached at a SHA; we need an actual branch
           # so the CHANGELOG-promote commit knows where to push.
           ref: ${{ github.ref }}
-          # Authenticate as the maintainer (admin), not as github-actions[bot].
-          # The "Require PR approval for main branch" ruleset only lets the
-          # Admin repo role bypass — and GitHub blocks adding the GitHub
-          # Actions integration to bypass_actors on user-owned (non-org)
-          # repos with "Actor GitHub Actions integration must be part of
-          # the ruleset source or owner organization." So the auto-promote
-          # and auto-sync `git push origin HEAD:main` steps below both fail
-          # under the default GITHUB_TOKEN. Using a fine-grained PAT owned
-          # by the admin makes the push go through cleanly. Set the
-          # RELEASE_PAT secret with: contents:write on this repo, no other
-          # scopes. Rotate per your token policy; the workflow only runs
-          # on manual dispatch so the blast radius is small.
-          token: ${{ secrets.RELEASE_PAT }}
+          # The fork has no branch rulesets, so the default GITHUB_TOKEN
+          # (contents: write) pushes the CHANGELOG-promote / lock-sync
+          # commits straight to main. (Upstream used an admin PAT here
+          # because its ruleset blocked the Actions integration.)
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-          # No registry-url here: it writes an .npmrc that requires a
-          # NODE_AUTH_TOKEN env var to exist, and we publish via OIDC
-          # trusted publishing instead of a token.
-
-      - name: Upgrade npm for OIDC trusted publishing
-        # Trusted publishing needs npm >= 11.5; Node 22 bundles npm 10.
-        run: npm install -g npm@11 && npm --version
+          # Point npm at the GitHub Packages npm registry; the publish and
+          # verify steps feed it a token through NODE_AUTH_TOKEN (which
+          # this .npmrc line costily requires).
+          registry-url: https://npm.pkg.github.com
 
       - name: Sync package-lock.json if version drifted
         # When the maintainer bumps the version on package.json only — for
@@ -213,7 +204,7 @@ jobs:
         # was built by this workflow from this repo — SHA256SUMS alone only
         # proves integrity, not origin, since it ships next to the bundles.
         # Verify any downloaded artifact with:
-        #   gh attestation verify <file> -R colbymchenry/codegraph
+        #   gh attestation verify <file> -R "$GITHUB_REPOSITORY"
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
@@ -226,8 +217,12 @@ jobs:
         # never be needed in practice. Kept for defense-in-depth.
         run: |
           V="${{ steps.ver.outputs.version }}"
-          node scripts/extract-release-notes.mjs "$V" > notes.md 2>/dev/null \
-            || node scripts/extract-release-notes.mjs Unreleased > notes.md 2>/dev/null || true
+          # GitHub Releases caps a release body at 125,000 characters and
+          # returns HTTP 422 past it; the [Unreleased] backlog can exceed
+          # that. --max-chars 124000 trims bullet-granular, never mid-bullet,
+          # and appends a pointer to CHANGELOG.md for the rest.
+          node scripts/extract-release-notes.mjs "$V" --max-chars 124000 > notes.md 2>/dev/null \
+            || node scripts/extract-release-notes.mjs Unreleased --max-chars 124000 > notes.md 2>/dev/null || true
           if [ ! -s notes.md ]; then
             echo "::error::No release notes in CHANGELOG.md for [$V] or [Unreleased]."
             exit 1
@@ -246,12 +241,14 @@ jobs:
             gh release create "$TAG" release/codegraph-* release/SHA256SUMS --title "$TAG" --notes-file notes.md
           fi
 
-      - name: Publish to npm
-        # Auth is OIDC trusted publishing (id-token: write above) — npm mints
-        # a short-lived credential from the workflow's identity; there is no
-        # NPM_TOKEN. Provenance is generated automatically on this path; the
-        # explicit --provenance keeps the intent visible and fails loudly if
-        # OIDC is ever unavailable.
+      - name: Publish to GitHub Packages
+        # Auth is the workflow's GITHUB_TOKEN with `packages: write`
+        # (see permissions above), matched to the //npm.pkg.github.com line
+        # setup-node wrote into ~/.npmrc. GitHub Packages scopes every
+        # package under the owning user, which pack-npm.sh derives from
+        # GITHUB_REPOSITORY — provenance/OIDC don't apply on this registry.
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.ver.outputs.version }}"
           bash scripts/pack-npm.sh "$V"
@@ -263,14 +260,13 @@ jobs:
               echo "skip $name@$V (already published)"
             else
               echo "publishing $name@$V"
-              # --provenance: publish with an npm provenance attestation
-              # (needs the id-token: write permission above and the
-              # repository field pack-npm.sh writes into each package.json).
-              ( cd "$dir" && npm publish --access public --provenance )
+              ( cd "$dir" && npm publish --registry https://npm.pkg.github.com )
             fi
           done
 
       - name: Verify every package is actually on the registry
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.ver.outputs.version }}"
           # npm publish can print success without persisting; confirm against the
@@ -288,18 +284,3 @@ jobs:
             echo "verified $name@$V"
           done
 
-      - name: Sync packages to npmmirror
-        # npmmirror/cnpm mirror lazily and frequently never pull the per-platform
-        # optionalDependencies on their own, so `npm i` there fails with
-        # "no prebuilt bundle" (issue #303). Nudge a sync now so mirror users get
-        # the bundle without waiting. Best-effort — the launcher also self-heals
-        # from GitHub Releases — so a mirror hiccup never fails the release.
-        continue-on-error: true
-        run: |
-          for dir in release/npm/codegraph-* release/npm/main; do
-            name=$(node -p "require('./$dir/package.json').name")
-            enc=$(node -p "encodeURIComponent(require('./$dir/package.json').name)")
-            echo "sync $name"
-            curl -s -X PUT "https://registry.npmmirror.com/-/package/$enc/syncs" || true
-            echo
-          done

@@ -28,7 +28,16 @@ var os = require('os');
 var fs = require('fs');
 
 var target = process.platform + '-' + process.arch; // e.g. darwin-arm64, linux-x64
-var pkg = '@colbymchenry/codegraph-' + target;
+
+// Resolve the platform optionalDependency from THIS package's name, so a fork
+// publishing under its own scope (GitHub Packages) works. Upstream is the
+// fallback.
+var ownName = '@colbymchenry/codegraph';
+try {
+  var own = require('./package.json');
+  if (typeof own.name === 'string') ownName = own.name;
+} catch (e) { /* use the upstream name */ }
+var pkg = ownName.replace(/\/[^/]*$/, '') + '/codegraph-' + target;
 
 module.exports = require(resolveLibrary());
 
