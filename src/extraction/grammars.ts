@@ -51,6 +51,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   terraform: 'tree-sitter-terraform.wasm',
   arkts: 'tree-sitter-arkts.wasm',
   nix: 'tree-sitter-nix.wasm',
+  rego: 'tree-sitter-rego.wasm',
 };
 
 /**
@@ -142,6 +143,8 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.cu': 'cpp',
   '.cuh': 'cpp',
   '.nix': 'nix',
+  // Open Policy Agent (OPA) policy modules.
+  '.rego': 'rego',
   // XML: file-level tracking; the MyBatis extractor matches `<mapper namespace="...">`
   // shape and emits SQL-statement nodes (other XML returns empty).
   '.xml': 'xml',
@@ -448,6 +451,12 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // kernel compiles the same-commit vendored C (codegraph-kernel/grammars/
   // dart); crates.io tree-sitter-dart is a different-lineage fork (rejected).
   'dart',
+  // R7c (Rego/OPA): tree-sitter-rego v1.0.0 (FallenAngel97, master@da2a1f6,
+  // "add support for the `and` and `or` logical operators"). Not on npm and
+  // absent from tree-sitter-wasms, built from the commit's checked-in
+  // src/parser.c with emcc (SIDE_MODULE, `_tree_sitter_rego` exported), ABI 15.
+  // 20/20 clean parses beside the other vendored grammars (check-grammar.mjs).
+  'rego',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */
@@ -946,6 +955,7 @@ export function getLanguageDisplayName(language: Language): string {
     objc: 'Objective-C',
     solidity: 'Solidity',
     nix: 'Nix',
+    rego: 'Rego',
     yaml: 'YAML',
     twig: 'Twig',
     xml: 'XML',
